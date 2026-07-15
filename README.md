@@ -1,1 +1,140 @@
-# CoderBot!
+# coderbot
+
+Autonomous coding agent that works the improvements backlog (a Google Doc,
+`CODEBOT_DOC_ID`) of whatever target repo you point it at (`CODEBOT_REPO_PATH`),
+plans with that repo's OpenSpec (opsx) skills via headless Claude Code, and talks
+to the maintainer exclusively by email (`CODEBOT_USER_EMAIL`).
+
+## Target repo prerequisites
+
+Coderbot lives in its own repo and is pointed at a target checkout via
+`CODEBOT_REPO_PATH`. The target repo is expected to provide:
+
+- **OpenSpec (opsx) skills** in its Claude Code setup (`/opsx:explore`,
+  `/opsx:propose`, `/opsx:apply`) — used for the planning workflow.
+- An **`e2e/` Playwright harness** with `e2e/run.sh` (the pre-PR gate) and
+  `e2e/playwright.config.ts` (evidence videos are recorded from its
+  `test-results/`).
+- The **`Code Review` GitHub Action** (OpenCodeReview,
+  `.github/workflows/code-review.yml`) — drives the automated review loop.
+
+## Lifecycle
+
+```
+IDLE → pick item (non-struck ¶ in the Doc, Claude chooses) → branch codebot/<slug>
+     → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
+     → IMPLEMENTING (must add Playwright e2e specs) → E2E gate (e2e/run.sh)
+     → OPEN_PR (gh) → WAIT_REVIEW ⇄ ADDRESS_REVIEW → email PR + evidence videos → WAIT_MERGE
+     → merge → strike item through in the Doc → IDLE
+```
+
+Any phase can detour through WAIT_REPLY: if Claude needs the user, it ends its
+output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
+with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
+
+## Abort / reset (last resort)
+
+Email codebot with a body of exactly `ABORT` (case-insensitive) to force a reset.
+Checked at the start of every tick and mailbox-wide (any thread, or a brand-new
+email), so it works even when the agent is stuck waiting on a thread. On receipt it
+discards the working-tree changes, returns to a clean, up-to-date `main`
+(`git reset --hard` + `checkout -f main` + `clean -fd` + fast-forward to
+`origin/main`), clears all task state, and goes back to IDLE — then emails a
+confirmation. It only touches the **local** checkout: remote branches and PRs are
+left as-is (clean those up on GitHub yourself if needed). The check runs between
+phases, so an abort sent mid-phase takes effect once the current Claude call returns.
+
+## Automated code review (WAIT_REVIEW ⇄ ADDRESS_REVIEW)
+
+Opening the PR triggers the `Code Review` GitHub Action (OpenCodeReview, see
+`.github/workflows/code-review.yml`), which leaves inline comments. Codebot does
+**not** email the user yet: it enters `WAIT_REVIEW` and polls that action's check on
+the PR head. When a run finishes, it fetches the `github-actions[bot]` inline comments
+posted since the last round (plus the sticky summary for context) and, if any are new,
+hands them to the same Claude session (`ADDRESS_REVIEW`) to fix genuine issues, commit,
+and push — which re-triggers the action. The loop repeats until a run leaves no new
+comments (then it records evidence and emails the PR), or until `CODEBOT_REVIEW_MAX_ROUNDS`
+(default 3) or `CODEBOT_REVIEW_WAIT_TIMEOUT` (default 45 min per run) is hit, in which
+case it emails anyway with a note about the unresolved review.
+
+## One-time setup
+
+1. **Google OAuth client**: in Google Cloud Console create a project, enable the
+   Gmail, Google Docs and Google Drive APIs, create an OAuth client of type
+   *Desktop app*, and download its JSON to `data/credentials.json`.
+2. **Consent flow** (on the host, from the coderbot repo root):
+   ```bash
+   pip install -r requirements.txt
+   python3 setup_oauth.py     # opens a browser; writes data/token.json
+   ```
+3. **Configuration**: create `.env` at the repo root (see `.env.example`):
+   ```
+   # Required: absolute host path of the target git checkout. It is mounted into
+   # the container at the SAME path (Claude's per-project state and the e2e
+   # docker stack both depend on host==container paths).
+   CODEBOT_REPO_PATH=/absolute/path/to/target-repo
+   # Required: Google Doc id of the improvements backlog
+   CODEBOT_DOC_ID=<the id from the doc's URL>
+   # Required: the address codebot sends to and reads replies from
+   CODEBOT_USER_EMAIL=you@example.com
+   GH_TOKEN=<a PAT with repo scope, e.g. from `gh auth token`>
+   CLAUDE_CODE_OAUTH_TOKEN=<output of `claude setup-token` on the host>
+   GIT_AUTHOR_NAME=codebot
+   GIT_AUTHOR_EMAIL=codebot@example.com
+   # Optional: project name used in prompts; defaults to the repo dir name
+   CODEBOT_PROJECT_NAME=
+   # Optional; defaults to claude-opus-4-8
+   CLAUDE_MODEL=claude-opus-4-8
+   # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
+   CODEBOT_LOG_LEVEL=DEBUG
+   ```
+   (macOS keeps Claude credentials in the Keychain, which the Linux container
+   can't read — hence the explicit token.)
+4. **Claude Code**: the host's `~/.claude` and `~/.claude.json` (settings + opsx
+   skills) are mounted in; git pushes use HTTPS with `GH_TOKEN` (no SSH needed).
+
+## Run
+
+From the coderbot repo root:
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+State lives in `data/state.json`; the container restarts safely from any state.
+To abort the current task: stop the container, delete `data/state.json`, clean the
+git branch, restart.
+
+## Smoke tests
+
+Inside the container (`docker compose exec codebot bash`):
+
+```bash
+claude -p 'say ok' --dangerously-skip-permissions   # Claude auth works
+gh auth status                                       # GH token works
+git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
+python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'
+python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'
+```
+
+## Logs
+
+All activity is logged to stdout (visible via `docker compose logs -f`). At the
+default `DEBUG` level you see every state transition, each Claude invocation
+(model, prompt size, returned session/output size, whether it hit the
+`NEED_USER_INPUT` sentinel), every email sent (subject, thread, attachment count
+and byte totals, any size-skipped files) and reply received, git commands, the
+e2e suite result, and the evidence-video harvest (which `.webm` files were found
+and their sizes — with explicit warnings if none were produced or a feature
+shipped without e2e specs). Set `CODEBOT_LOG_LEVEL=INFO` for a quieter feed.
+
+## Evidence videos
+
+The implementation phase must add comprehensive Playwright specs under `e2e/tests/`.
+After the suite passes, codebot re-runs the feature's specs with `PW_VIDEO=on`
+(forces `video: "on"` in `e2e/playwright.config.ts`), then stitches the resulting
+`.webm` clips from `e2e/test-results/` into a single H.264 `evidence.mp4` with
+ffmpeg (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate
+cleanly) and attaches that one file to the PR email. If ffmpeg is unavailable or
+stitching fails, it falls back to attaching the raw `.webm` clips.

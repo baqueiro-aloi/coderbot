@@ -1,0 +1,28 @@
+# Run from the coderbot repo root:  docker compose up -d --build
+# Requires .env (compose also interpolates ${VARS} below from it) with GH_TOKEN,
+# CODEBOT_REPO_PATH, CODEBOT_DOC_ID and CODEBOT_USER_EMAIL — see .env.example —
+# and data/token.json created by setup_oauth.py on the host.
+services:
+  codebot:
+    build: .
+    restart: unless-stopped
+    env_file: .env # also delivers CODEBOT_REPO_PATH into the container
+    volumes:
+      # App code + data/ (token, state, outbox): bind-mounted so code changes
+      # take effect on restart without an image rebuild.
+      - .:/app
+      # The target repo is mounted at the SAME absolute path as on the host:
+      # (a) ~/.claude per-project state is keyed by absolute project path, so
+      #     sessions resolve identically inside and outside the container;
+      # (b) e2e/run.sh talks to the HOST docker daemon via the mounted socket,
+      #     so any bind mounts it declares must be valid host paths.
+      - ${CODEBOT_REPO_PATH:?Set CODEBOT_REPO_PATH in .env to the target repo's absolute path}:${CODEBOT_REPO_PATH}
+      - ~/.claude:/home/bot/.claude
+      # claude rewrites ~/.claude.json on almost every run. Sharing the SAME file with
+      # the host's own claude means two processes write it concurrently and corrupt it
+      # ("Unterminated string"). Mount it READ-ONLY as a seed; entrypoint.sh copies it
+      # to a container-private /home/bot/.claude.json that only this claude writes.
+      - ~/.claude.json:/seed/.claude.json:ro
+      # e2e/run.sh spins up its own docker compose stack — share the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /app
