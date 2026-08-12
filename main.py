@@ -659,25 +659,6 @@ def do_merge_reply(state: dict, reply: str) -> None:
               f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", attachments)
         return  # stay in WAIT_MERGE
     # merge
-    threads = unresolved_review_threads(state["pr_url"])
-    if threads:
-        log.info("PR has %d unresolved review thread(s); addressing before merge", len(threads))
-        r = claude_runner.resume(
-            state["session_id"],
-            prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
-                           branch=state["branch"]))
-        if handle_result(state, r, "IMPLEMENTING"):
-            return
-        still_unresolved = [t for t in threads if not resolve_review_thread(t["id"])]
-        if still_unresolved:
-            log.warning("could not resolve %d/%d review thread(s)",
-                        len(still_unresolved), len(threads))
-            email(state, "could not resolve all review threads",
-                  f"I addressed the open review conversation(s) on the PR but GitHub would "
-                  f"not let me mark {len(still_unresolved)}/{len(threads)} of them resolved.\n"
-                  f"PR: {state['pr_url']}\n\nPlease resolve the rest manually, then reply "
-                  "'merge' to continue.")
-            return  # stay in WAIT_MERGE
     info = json.loads(subprocess.run(
         ["gh", "pr", "view", state["pr_url"], "--json", "state,mergeable"],
         cwd=config.REPO_PATH, capture_output=True, text=True, check=True).stdout)
@@ -718,9 +699,32 @@ def do_merge_reply(state: dict, reply: str) -> None:
         email(state, "could not mark item done",
               f"PR merged, but I could not find this item in the doc to strike it "
               f"through:\n\n{state['item']}\n\nPlease mark it manually.")
-    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs"):
+    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
+                "pr_thread_round", "pr_thread_notified"):
         state.pop(key, None)
     state["state"] = "IDLE"
+
+
+def _finish_address_pr_threads(state: dict) -> None:
+    threads = state.pop("pr_threads", [])
+    still_unresolved = [t for t in threads if not resolve_review_thread(t["id"])]
+    if still_unresolved:
+        log.warning("could not resolve %d/%d review thread(s) on GitHub",
+                    len(still_unresolved), len(threads))
+    state["state"] = "WAIT_MERGE"
+
+
+def do_address_pr_threads(state: dict) -> None:
+    threads = state.get("pr_threads", [])
+    state["pr_thread_round"] = state.get("pr_thread_round", 0) + 1
+    log.info("addressing %d unresolved review thread(s), round %d", len(threads), state["pr_thread_round"])
+    result = claude_runner.resume(
+        state["session_id"],
+        prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
+                       branch=state["branch"]))
+    if handle_result(state, result, "ADDRESS_PR_THREADS"):
+        return
+    _finish_address_pr_threads(state)
 
 
 # ---------------------------------------------------------------- loop
@@ -733,10 +737,13 @@ PHASES = {
     "E2E": do_e2e,
     "OPEN_PR": do_open_pr,
     "ADDRESS_REVIEW": do_address_review,
+    "ADDRESS_PR_THREADS": do_address_pr_threads,
 }
 
 # WAIT_REVIEW polls the Code Review action rather than the inbox, but shares the
 # post-tick sleep, so it lives in WAITS and is dispatched ahead of the inbox waits.
+# WAIT_MERGE does too: it also checks the PR for unresolved review threads before
+# falling through to the inbox check (see handle_merge_wait).
 WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_CLEAN", "WAIT_REVIEW"}
 
 
@@ -752,6 +759,33 @@ def handle_wait(state: dict) -> None:
     # (e.g. a transient claude failure), the message stays unprocessed so the next tick
     # re-reads and re-handles it instead of silently dropping the user's reply.
     gmail_client.mark_processed(msg_id)
+
+
+def handle_merge_wait(state: dict) -> None:
+    """Every WAIT_MERGE poll: check the open PR for unresolved review threads (e.g. a
+    human reviewer's) and address them, so live feedback gets fixed before the user
+    even says 'merge'. Falls through to the normal inbox check either way."""
+    threads = unresolved_review_threads(state["pr_url"])
+    if not threads:
+        state.pop("pr_thread_round", None)
+        state.pop("pr_thread_notified", None)
+    elif state.get("pr_thread_notified"):
+        log.debug("%d unresolved review thread(s) still open; already notified the user",
+                  len(threads))
+    elif state.get("pr_thread_round", 0) >= config.PR_THREAD_MAX_ROUNDS:
+        log.warning("review-thread round limit (%d) reached with %d open thread(s); "
+                    "leaving them for the user", config.PR_THREAD_MAX_ROUNDS, len(threads))
+        email(state, "unresolved review threads need your help",
+              f"There are still {len(threads)} unresolved review conversation(s) on the PR "
+              f"after {config.PR_THREAD_MAX_ROUNDS} round(s) of fixes.\nPR: {state['pr_url']}"
+              "\n\nPlease resolve them yourself, or reply 'merge' to merge anyway.")
+        state["pr_thread_notified"] = True
+    else:
+        state["pr_threads"] = threads
+        state["state"] = "ADDRESS_PR_THREADS"
+        log.info("PR has %d new unresolved review thread(s); addressing before merge", len(threads))
+        return
+    handle_wait(state)
 
 
 # ---------------------------------------------------------------- abort / reset
@@ -809,7 +843,8 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           "from the backlog doc.", new_thread=new_thread)
     for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
                 "return_state", "review_since", "review_round", "review_run_link",
-                "review_comment_watermark", "review_comments", "pr_summary"):
+                "review_comment_watermark", "review_comments", "pr_summary",
+                "pr_threads", "pr_thread_round", "pr_thread_notified"):
         state.pop(key, None)
     state["state"] = "IDLE"
 
@@ -852,13 +887,16 @@ def _handle_reply(state: dict, reply: str) -> None:
         if handle_result(state, result, phase):
             return  # re-questioned; handle_result reset return_state for the new phase
         next_state = {"EXPLORING": "PROPOSING", "PROPOSING": "WAIT_APPROVAL",
-                      "IMPLEMENTING": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW"}[phase]
+                      "IMPLEMENTING": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
+                      "ADDRESS_PR_THREADS": "WAIT_MERGE"}[phase]
         if next_state == "WAIT_APPROVAL":
             email(state, "proposal for review",
                   f"{result.output}\n\nReply with your approval or requested changes.")
         if next_state == "WAIT_REVIEW":
             state.pop("review_comments", None)
             _enter_review_wait(state)  # the push re-triggers Code Review on the new commit
+        elif phase == "ADDRESS_PR_THREADS":
+            _finish_address_pr_threads(state)  # resolves the threads, then re-enters WAIT_MERGE
         else:
             state["state"] = next_state
         state.pop("return_state", None)
@@ -892,6 +930,8 @@ def main() -> None:
                 pass  # reset to IDLE; skip normal dispatch this tick
             elif state["state"] == "WAIT_REVIEW":
                 handle_review_wait(state)
+            elif state["state"] == "WAIT_MERGE":
+                handle_merge_wait(state)
             elif state["state"] in WAITS:
                 handle_wait(state)
             else:

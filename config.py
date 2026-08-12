@@ -38,6 +38,11 @@ REVIEW_WAIT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_REVIEW_WAIT_TIMEOUT", 
 # Cap the fix<->re-review loop so a comment codebot can't resolve doesn't stall the PR.
 REVIEW_MAX_ROUNDS = int(os.environ.get("CODEBOT_REVIEW_MAX_ROUNDS", "3"))
 
+# While waiting on the user's merge decision, codebot also polls the PR for unresolved
+# review conversation threads (e.g. a human reviewer's) and fixes them proactively. Cap
+# that fix<->recheck loop so a thread codebot can't resolve doesn't stall the merge.
+PR_THREAD_MAX_ROUNDS = int(os.environ.get("CODEBOT_PR_THREAD_MAX_ROUNDS", "3"))
+
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
 
