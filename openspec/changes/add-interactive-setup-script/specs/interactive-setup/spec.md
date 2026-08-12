@@ -4,7 +4,8 @@ Defines the guided command-line setup flow that collects codebot's
 configuration for a target project — required and optional environment
 variables plus the Google OAuth credential file — and writes a valid `.env`,
 so pointing codebot at a new project does not require manually transcribing
-values against `.env.example`.
+values against `.env.example` or manually navigating the Google Cloud
+Console unguided.
 
 ## ADDED Requirements
 
@@ -68,22 +69,76 @@ entered, and re-prompt on an invalid value rather than writing it to `.env`.
 - **THEN** the setup script reports the problem and re-prompts for
   `CODEBOT_USER_EMAIL` without proceeding
 
-### Requirement: Google OAuth credential handoff
-The setup script SHALL check for the Google OAuth client credential file the
-Gmail/Docs/Drive integration requires, and SHALL NOT attempt to create it
-itself, since obtaining it requires a manual Google Cloud Console step.
+### Requirement: Guided Google OAuth credential setup
+The setup script SHALL actively guide the user through obtaining the Google
+OAuth client credential file, not just describe the steps: for each action
+that must happen in the Google Cloud Console (selecting/creating a project,
+enabling the required APIs, creating the OAuth client), it explains what is
+about to happen, opens the relevant console page in the user's browser when
+a browser-opening command is available, and waits for the user to confirm
+before continuing. It SHALL NOT attempt to create the credential file
+itself, since obtaining it requires actions only the user can take in the
+console. Once the file is in place, the setup script SHALL run the consent
+flow that produces the OAuth token file automatically, without asking.
 
-#### Scenario: Credential file missing
-- **WHEN** the setup script runs and the expected Google OAuth credential
-  file is not present
-- **THEN** it prints the exact manual steps to obtain the file and where to
-  place it, and does not treat this as a fatal error for the rest of setup
+#### Scenario: Guiding project selection
+- **WHEN** the Google OAuth credential file is not present and the walkthrough
+  begins
+- **THEN** the setup script explains that a project must be selected or
+  created, opens the Cloud Console's project page, and waits for the user to
+  press Enter before continuing
 
-#### Scenario: Credential file present
+#### Scenario: Guiding API enablement
+- **WHEN** the user has confirmed a project is selected
+- **THEN** the setup script explains which APIs are required (Gmail, Docs,
+  Drive), opens each API's enable page, and waits for the user to confirm all
+  three are enabled before continuing
+
+#### Scenario: Guiding OAuth client creation
+- **WHEN** the required APIs have been confirmed enabled
+- **THEN** the setup script explains how to create a Desktop-app OAuth client
+  and download its JSON, opens the Cloud Console's credentials page, and
+  repeatedly checks for the downloaded file at the expected path until it is
+  found or the user chooses to skip
+
+#### Scenario: Browser cannot be opened automatically
+- **WHEN** the setup script has no way to open a browser automatically (no
+  `open`/`xdg-open`-equivalent command available)
+- **THEN** it prints the console URL for the user to open manually instead of
+  failing
+
+#### Scenario: Credential file already present
 - **WHEN** the setup script runs and the expected Google OAuth credential
-  file is present
-- **THEN** it offers to run the consent flow that produces the OAuth token
-  file immediately, before finishing
+  file is already present
+- **THEN** it skips the project/API/client-creation walkthrough entirely
+
+#### Scenario: Consent flow runs automatically once the file is in place
+- **WHEN** the Google OAuth credential file is present (whether already
+  present at the start, or just placed there during the walkthrough)
+- **THEN** the setup script runs the consent flow that produces the OAuth
+  token file automatically, without asking for confirmation first
+
+#### Scenario: OAuth already fully configured
+- **WHEN** the setup script runs and the OAuth token file already exists
+- **THEN** it skips the entire Google OAuth section with a note that it is
+  already configured, instead of repeating the walkthrough
+
+### Requirement: Bulk reuse of an existing .env
+When an existing `.env` is found, the setup script SHALL offer to keep it
+unchanged and skip the variable-collection prompts entirely, in addition to
+offering each existing value as a per-variable default.
+
+#### Scenario: User keeps the existing .env as-is
+- **WHEN** an existing `.env` is found and the user confirms they want to
+  keep it unchanged
+- **THEN** the setup script skips every required and optional variable
+  prompt and does not rewrite `.env`
+
+#### Scenario: User opts to review values
+- **WHEN** an existing `.env` is found and the user declines to keep it
+  unchanged
+- **THEN** the setup script proceeds through each prompt as usual, offering
+  the existing value as the default for each
 
 ### Requirement: Safe .env output
 The setup script SHALL write the collected configuration to `.env` at the

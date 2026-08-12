@@ -34,49 +34,75 @@
 - [x] 3.3 Prompt for `CODEBOT_LOG_LEVEL` with an explanation (`DEBUG` or
       `INFO`) and its default (`DEBUG`), accepting an empty answer.
 
-## 4. Google OAuth credential handoff
+## 4. Bulk reuse of an existing .env
 
-- [x] 4.1 Check for `data/credentials.json`; if missing, print the Cloud
-      Console steps to obtain it (project, enable Gmail/Docs/Drive APIs,
-      create a Desktop-app OAuth client, download JSON to that path) and
-      continue without failing setup.
-- [x] 4.2 If `data/credentials.json` is present, offer to run `python3
-      setup_oauth.py` immediately (after confirming `pip install -r
-      requirements.txt` has been run, or running it if not).
+- [x] 4.1 If `.env` already exists, ask once, up front, whether to keep it
+      unchanged and skip sections 2 and 3 entirely.
+- [x] 4.2 If the user declines, fall through to sections 2 and 3 exactly as
+      before (per-variable defaults from the existing file).
 
-## 5. Writing .env
+## 5. Guided Google OAuth credential setup
 
-- [x] 5.1 If `.env` already exists, back it up to a non-clobbering path
-      (`.env.bak.<n>`) and confirm the overwrite with the user before writing.
-- [x] 5.2 Write all collected required and optional values to `.env` in the
-      same shape as `.env.example`.
-- [x] 5.3 `chmod 600 .env` after writing.
-- [x] 5.4 Print a summary of what was written (variable names only, never
+- [x] 5.1 Add a best-effort `open_url` helper: always prints the URL, and
+      also tries `open` (macOS) then `xdg-open` (Linux) in the background;
+      never fails setup if neither is available.
+- [x] 5.2 If `data/token.json` already exists, print a note and skip this
+      entire section (OAuth is already configured).
+- [x] 5.3 Else, if `data/credentials.json` is missing: explain and open the
+      Cloud Console project page; wait for Enter. Explain and open the
+      Gmail/Docs/Drive API library pages; wait for Enter. Explain and open
+      the credentials page; loop prompting the user to save the downloaded
+      JSON to `data/credentials.json` and press Enter (checking for the file
+      each time), with a `skip` escape hatch.
+- [x] 5.4 Once `data/credentials.json` is present (whether it was already
+      there or just placed during 5.3), run `python3 setup_oauth.py`
+      automatically (installing dependencies first if needed) — no separate
+      yes/no prompt. Report failure/cancellation without aborting the rest of
+      the script.
+
+## 6. Writing .env
+
+- [x] 6.1 If the user opted to review values (section 4) and `.env` already
+      exists, back it up to a non-clobbering path (`.env.bak.<n>`) and
+      confirm the overwrite with the user before writing.
+- [x] 6.2 Write all collected required and optional values to `.env` in the
+      same shape as `.env.example`. Skip this entirely if the user chose to
+      keep the existing file unchanged (section 4).
+- [x] 6.3 `chmod 600 .env` after writing.
+- [x] 6.4 Print a summary of what was written (variable names only, never
       secret values) and the next command to run (`docker compose up -d
-      --build`).
+      --build`) — or, if the existing file was kept, a note that it was left
+      unchanged.
 
-## 6. Documentation
+## 7. Documentation
 
-- [x] 6.1 Update the README's "One-time setup" section to lead with
+- [x] 7.1 Update the README's "One-time setup" section to lead with
       `./setup.sh` as the recommended path, keeping the manual
       `.env.example`-based steps documented as a fallback.
 
-## 7. Verification
+## 8. Verification
 
-- [x] 7.1 Ran `setup.sh` (via bash 3.2, macOS's default `/bin/bash` — no
+- [x] 8.1 Ran `setup.sh` (via bash 3.2, macOS's default `/bin/bash` — no
       `declare -A`/bash-4 support, which caught a real portability bug) against
       an isolated scratch git repo end-to-end: relative-path/non-git-dir repo
       path rejected then a valid one accepted; a full Google Docs URL had its
       id correctly extracted; a malformed email was rejected then a valid one
       accepted; blank optional/default-bearing prompts fell back to git
-      config / `claude-opus-4-8` / `DEBUG` as expected; the missing
-      `data/credentials.json` case printed the manual steps without erroring;
-      the resulting `.env` had exactly the entered/defaulted values and mode
-      `600`.
-- [x] 7.2 Re-ran against the same sandbox with that `.env` present: every
-      prompt (including the two secrets) offered the existing value as the
-      default when left blank, a `data/credentials.json`-present run offered
-      (and, on decline, skipped) the consent flow, and confirming the
+      config / `claude-opus-4-8` / `DEBUG` as expected; the resulting `.env`
+      had exactly the entered/defaulted values and mode `600`.
+- [x] 8.2 Re-ran against the same sandbox with that `.env` present, declining
+      bulk reuse: every prompt (including the two secrets) offered the
+      existing value as the default when left blank, and confirming the
       overwrite backed up the old file to `.env.bak.1` before writing the new
       one with identical values. Declining the overwrite left the original
       `.env` untouched and exited non-zero.
+- [x] 8.3 Re-ran with `.env` present, accepting bulk reuse: confirmed every
+      variable prompt was skipped and `.env` was not rewritten.
+- [x] 8.4 Exercised the guided OAuth walkthrough with a stubbed `open`
+      command (to avoid actually launching a browser in the test sandbox):
+      confirmed each stage prints its explanation and the correct URL, calls
+      the stub with that URL, and waits for Enter; confirmed the
+      credential-file wait loop re-checks and accepts `skip`; confirmed a
+      pre-existing `data/credentials.json` skips straight to running
+      `setup_oauth.py`; confirmed a pre-existing `data/token.json` skips the
+      whole section with a note.

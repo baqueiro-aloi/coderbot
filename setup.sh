@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Interactive setup: walks through every .env variable codebot needs, explains
 # each one, offers discoverable defaults, validates what's cheaply checkable,
-# and writes the result to .env. See README.md "One-time setup" for context.
+# guides the Google OAuth credential setup with browser deep links, and
+# writes the result to .env. See README.md "One-time setup" for context.
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ENV_FILE=".env"
 CREDENTIALS_PATH="data/credentials.json"
+TOKEN_PATH="data/token.json"
 HAS_EXISTING_ENV="no"
+KEEP_EXISTING_ENV="no"
 
 echo "== codebot setup =="
 echo "This walks through the values codebot needs and writes them to $ENV_FILE."
 
 if [ -f "$ENV_FILE" ]; then
   HAS_EXISTING_ENV="yes"
-  echo "Found an existing $ENV_FILE — its values will be offered as defaults."
 fi
 
 # existing_value VAR: VAR's value in the current .env, or "" if absent/no .env.
@@ -64,137 +66,202 @@ prompt_var() {
   echo "$value"
 }
 
-# ---------------------------------------------------------------- required
-
-while true; do
-  CODEBOT_REPO_PATH=$(prompt_var "CODEBOT_REPO_PATH" \
-    "Absolute path to the target project's git checkout that codebot will work on and open PRs against." \
-    "")
-  case "$CODEBOT_REPO_PATH" in
-  /*) ;;
-  *)
-    echo "  -> must be an absolute path (starting with /)." >&2
-    continue
-    ;;
-  esac
-  if [ ! -e "$CODEBOT_REPO_PATH/.git" ]; then
-    echo "  -> $CODEBOT_REPO_PATH is not a git checkout (no .git found there)." >&2
-    continue
+# open_url URL: prints the URL (always, so a headless session can copy it
+# manually) and best-effort opens it in a browser via `open` (macOS) or
+# `xdg-open` (Linux); never fails setup if neither is available.
+open_url() {
+  local url="$1"
+  echo "  $url"
+  if command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 &
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
   fi
-  break
-done
+}
 
-while true; do
-  raw=$(prompt_var "CODEBOT_DOC_ID" \
-    "Google Doc id of the improvements backlog. Open the Doc and copy the id from its URL (.../document/d/<ID>/edit) — pasting the full URL also works." \
-    "")
-  if [[ "$raw" =~ /document/d/([a-zA-Z0-9_-]+) ]]; then
-    CODEBOT_DOC_ID="${BASH_REMATCH[1]}"
-  else
-    CODEBOT_DOC_ID="$raw"
-  fi
-  if [[ -n "$CODEBOT_DOC_ID" && "$CODEBOT_DOC_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    break
-  fi
-  echo "  -> that doesn't look like a valid Doc id or URL." >&2
-done
+# ---------------------------------------------------------------- bulk reuse
 
-while true; do
-  CODEBOT_USER_EMAIL=$(prompt_var "CODEBOT_USER_EMAIL" \
-    "The email address codebot sends its updates to and reads your replies from." \
-    "")
-  if [[ "$CODEBOT_USER_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
-    break
+if [ "$HAS_EXISTING_ENV" = "yes" ]; then
+  echo
+  echo "Found an existing $ENV_FILE."
+  read -r -p "Keep it as-is and skip the questions below? [Y/n] " keep_answer
+  if [[ ! "$keep_answer" =~ ^[Nn] ]]; then
+    KEEP_EXISTING_ENV="yes"
+    echo "Keeping $ENV_FILE unchanged."
   fi
-  echo "  -> that doesn't look like a valid email address." >&2
-done
-
-gh_token_default=""
-gh_note="Create one at https://github.com/settings/tokens, or run: gh auth login"
-if command -v gh >/dev/null 2>&1; then
-  gh_token_default="$(gh auth token 2>/dev/null || true)"
-  [ -n "$gh_token_default" ] && gh_note="Detected via the authenticated gh CLI — press Enter to use it."
 fi
-GH_TOKEN=$(prompt_var "GH_TOKEN" \
-  "GitHub personal access token with 'repo' scope; used for git pushes over HTTPS and gh pr/api calls. $gh_note" \
-  "$gh_token_default" "yes")
 
-CLAUDE_CODE_OAUTH_TOKEN=$(prompt_var "CLAUDE_CODE_OAUTH_TOKEN" \
-  "OAuth token for headless Claude Code runs inside the container (macOS keeps Claude credentials in the Keychain, which the Linux container can't read). Run 'claude setup-token' yourself — it opens a browser — then paste its output here." \
-  "" "yes")
+if [ "$KEEP_EXISTING_ENV" = "no" ]; then
 
-git_name_default="$(git config --global user.name 2>/dev/null || true)"
-GIT_AUTHOR_NAME=$(prompt_var "GIT_AUTHOR_NAME" \
-  "Git author name codebot commits as in the target repo." \
-  "${git_name_default:-codebot}")
+  # -------------------------------------------------------------- required
 
-git_email_default="$(git config --global user.email 2>/dev/null || true)"
-GIT_AUTHOR_EMAIL=$(prompt_var "GIT_AUTHOR_EMAIL" \
-  "Git author email codebot commits as in the target repo." \
-  "${git_email_default:-codebot@example.com}")
+  while true; do
+    CODEBOT_REPO_PATH=$(prompt_var "CODEBOT_REPO_PATH" \
+      "Absolute path to the target project's git checkout that codebot will work on and open PRs against." \
+      "")
+    case "$CODEBOT_REPO_PATH" in
+    /*) ;;
+    *)
+      echo "  -> must be an absolute path (starting with /)." >&2
+      continue
+      ;;
+    esac
+    if [ ! -e "$CODEBOT_REPO_PATH/.git" ]; then
+      echo "  -> $CODEBOT_REPO_PATH is not a git checkout (no .git found there)." >&2
+      continue
+    fi
+    break
+  done
 
-# ---------------------------------------------------------------- optional
+  while true; do
+    raw=$(prompt_var "CODEBOT_DOC_ID" \
+      "Google Doc id of the improvements backlog. Open the Doc and copy the id from its URL (.../document/d/<ID>/edit) — pasting the full URL also works." \
+      "")
+    if [[ "$raw" =~ /document/d/([a-zA-Z0-9_-]+) ]]; then
+      CODEBOT_DOC_ID="${BASH_REMATCH[1]}"
+    else
+      CODEBOT_DOC_ID="$raw"
+    fi
+    if [[ -n "$CODEBOT_DOC_ID" && "$CODEBOT_DOC_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      break
+    fi
+    echo "  -> that doesn't look like a valid Doc id or URL." >&2
+  done
 
-repo_basename="$(basename "$CODEBOT_REPO_PATH")"
-CODEBOT_PROJECT_NAME=$(prompt_var "CODEBOT_PROJECT_NAME" \
-  "Optional: human-readable project name used in prompts. Leave blank to default to the repo directory name ($repo_basename)." \
-  "")
+  while true; do
+    CODEBOT_USER_EMAIL=$(prompt_var "CODEBOT_USER_EMAIL" \
+      "The email address codebot sends its updates to and reads your replies from." \
+      "")
+    if [[ "$CODEBOT_USER_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+      break
+    fi
+    echo "  -> that doesn't look like a valid email address." >&2
+  done
 
-CLAUDE_MODEL=$(prompt_var "CLAUDE_MODEL" \
-  "Optional: Claude model codebot uses for its working sessions." \
-  "claude-opus-4-8")
+  gh_token_default=""
+  gh_note="Create one at https://github.com/settings/tokens, or run: gh auth login"
+  if command -v gh >/dev/null 2>&1; then
+    gh_token_default="$(gh auth token 2>/dev/null || true)"
+    [ -n "$gh_token_default" ] && gh_note="Detected via the authenticated gh CLI — press Enter to use it."
+  fi
+  GH_TOKEN=$(prompt_var "GH_TOKEN" \
+    "GitHub personal access token with 'repo' scope; used for git pushes over HTTPS and gh pr/api calls. $gh_note" \
+    "$gh_token_default" "yes")
 
-CODEBOT_LOG_LEVEL=$(prompt_var "CODEBOT_LOG_LEVEL" \
-  "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
-  "DEBUG")
+  CLAUDE_CODE_OAUTH_TOKEN=$(prompt_var "CLAUDE_CODE_OAUTH_TOKEN" \
+    "OAuth token for headless Claude Code runs inside the container (macOS keeps Claude credentials in the Keychain, which the Linux container can't read). Run 'claude setup-token' yourself — it opens a browser — then paste its output here." \
+    "" "yes")
+
+  git_name_default="$(git config --global user.name 2>/dev/null || true)"
+  GIT_AUTHOR_NAME=$(prompt_var "GIT_AUTHOR_NAME" \
+    "Git author name codebot commits as in the target repo." \
+    "${git_name_default:-codebot}")
+
+  git_email_default="$(git config --global user.email 2>/dev/null || true)"
+  GIT_AUTHOR_EMAIL=$(prompt_var "GIT_AUTHOR_EMAIL" \
+    "Git author email codebot commits as in the target repo." \
+    "${git_email_default:-codebot@example.com}")
+
+  # -------------------------------------------------------------- optional
+
+  repo_basename="$(basename "$CODEBOT_REPO_PATH")"
+  CODEBOT_PROJECT_NAME=$(prompt_var "CODEBOT_PROJECT_NAME" \
+    "Optional: human-readable project name used in prompts. Leave blank to default to the repo directory name ($repo_basename)." \
+    "")
+
+  CLAUDE_MODEL=$(prompt_var "CLAUDE_MODEL" \
+    "Optional: Claude model codebot uses for its working sessions." \
+    "claude-opus-4-8")
+
+  CODEBOT_LOG_LEVEL=$(prompt_var "CODEBOT_LOG_LEVEL" \
+    "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
+    "DEBUG")
+fi
 
 # ---------------------------------------------------------------- Google OAuth
 
 echo
-if [ -f "$CREDENTIALS_PATH" ]; then
-  echo "Found $CREDENTIALS_PATH."
-  read -r -p "Run the Google OAuth consent flow now (python3 setup_oauth.py)? [y/N] " run_oauth
-  if [[ "$run_oauth" =~ ^[Yy] ]]; then
+echo "== Google OAuth setup =="
+if [ -f "$TOKEN_PATH" ]; then
+  echo "Found $TOKEN_PATH — Google OAuth is already configured."
+  echo "(Delete it and re-run this script if you need to redo this.)"
+else
+  if [ -f "$CREDENTIALS_PATH" ]; then
+    echo "Found $CREDENTIALS_PATH already — skipping credential creation."
+  else
+    echo "Codebot needs a Google OAuth client to read/update the backlog Doc,"
+    echo "read Drive, and send email. First, a browser window will open to the"
+    echo "Google Cloud Console so you can create or select a project."
+    read -r -p "Press Enter to continue..." _
+    open_url "https://console.cloud.google.com/projectselector2/home/dashboard"
+    echo "In the page that opened: create a new project, or select an existing one."
+    read -r -p "Press Enter once you've selected a project..." _
+
+    echo
+    echo "Next, we'll enable the three APIs codebot needs. A browser tab will"
+    echo "open for each one."
+    read -r -p "Press Enter to continue..." _
+    for api in gmail docs drive; do
+      open_url "https://console.cloud.google.com/apis/library/${api}.googleapis.com"
+    done
+    echo "On each tab that opened: click 'Enable' (if it already says 'Manage', it's already enabled)."
+    read -r -p "Press Enter once all three APIs are enabled..." _
+
+    echo
+    echo "Finally, we'll create the OAuth client. A browser tab will open to the"
+    echo "Credentials page."
+    read -r -p "Press Enter to continue..." _
+    open_url "https://console.cloud.google.com/apis/credentials"
+    echo "On that page: '+ Create Credentials' -> 'OAuth client ID' -> Application"
+    echo "type 'Desktop app' -> give it a name -> Create, then click 'Download JSON'."
+    while true; do
+      read -r -p "Copy the downloaded file to $CREDENTIALS_PATH, then press Enter (or type 'skip' to do this later): " ack
+      if [ "$ack" = "skip" ]; then
+        echo "Skipping — place the file at $CREDENTIALS_PATH and run this script again, or run 'python3 setup_oauth.py' yourself."
+        break
+      fi
+      if [ -f "$CREDENTIALS_PATH" ]; then
+        break
+      fi
+      echo "  -> $CREDENTIALS_PATH not found yet." >&2
+    done
+  fi
+
+  if [ -f "$CREDENTIALS_PATH" ]; then
+    echo
+    echo "Running the consent flow (python3 setup_oauth.py) — one more browser window will open to sign in and grant access."
     if ! python3 -c "import google_auth_oauthlib" >/dev/null 2>&1; then
       echo "Installing Python dependencies (pip install -r requirements.txt)..."
-      pip install -r requirements.txt
+      pip install -r requirements.txt || echo "  -> pip install failed; install dependencies yourself and re-run: python3 setup_oauth.py"
     fi
-    python3 setup_oauth.py
-  else
-    echo "Skipping for now — run 'python3 setup_oauth.py' yourself before starting codebot."
+    python3 setup_oauth.py || echo "  -> setup_oauth.py did not complete; re-run it yourself once ready: python3 setup_oauth.py"
   fi
-else
-  cat <<MSG
-$CREDENTIALS_PATH not found. Codebot needs a Google OAuth client (Desktop app)
-to read/update the backlog Doc and send email:
-  1. In Google Cloud Console, create a project (or use an existing one).
-  2. Enable the Gmail, Google Docs, and Google Drive APIs.
-  3. Create an OAuth client of type 'Desktop app'.
-  4. Download its JSON and save it as $CREDENTIALS_PATH.
-Then run 'python3 setup_oauth.py' to complete the consent flow (writes data/token.json).
-MSG
 fi
 
 # ---------------------------------------------------------------- write .env
 
-if [ -f "$ENV_FILE" ]; then
-  backup="$ENV_FILE.bak.1"
-  n=1
-  while [ -e "$backup" ]; do
-    n=$((n + 1))
-    backup="$ENV_FILE.bak.$n"
-  done
+if [ "$KEEP_EXISTING_ENV" = "yes" ]; then
   echo
-  read -r -p "$ENV_FILE already exists. Back it up to $backup and overwrite? [y/N] " confirm
-  if [[ ! "$confirm" =~ ^[Yy] ]]; then
-    echo "Aborted — $ENV_FILE was left unchanged."
-    exit 1
+  echo "$ENV_FILE was left unchanged."
+else
+  if [ -f "$ENV_FILE" ]; then
+    backup="$ENV_FILE.bak.1"
+    n=1
+    while [ -e "$backup" ]; do
+      n=$((n + 1))
+      backup="$ENV_FILE.bak.$n"
+    done
+    echo
+    read -r -p "$ENV_FILE already exists. Back it up to $backup and overwrite? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+      echo "Aborted — $ENV_FILE was left unchanged."
+      exit 1
+    fi
+    cp "$ENV_FILE" "$backup"
+    echo "Backed up existing $ENV_FILE to $backup."
   fi
-  cp "$ENV_FILE" "$backup"
-  echo "Backed up existing $ENV_FILE to $backup."
-fi
 
-cat >"$ENV_FILE" <<EOF
+  cat >"$ENV_FILE" <<EOF
 CODEBOT_REPO_PATH=$CODEBOT_REPO_PATH
 CODEBOT_DOC_ID=$CODEBOT_DOC_ID
 CODEBOT_PROJECT_NAME=$CODEBOT_PROJECT_NAME
@@ -206,13 +273,15 @@ CLAUDE_MODEL=$CLAUDE_MODEL
 CODEBOT_USER_EMAIL=$CODEBOT_USER_EMAIL
 CODEBOT_LOG_LEVEL=$CODEBOT_LOG_LEVEL
 EOF
-chmod 600 "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
 
-echo
-echo "Wrote $ENV_FILE with:"
-for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
-  GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL; do
-  echo "  - $var"
-done
+  echo
+  echo "Wrote $ENV_FILE with:"
+  for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
+    GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL; do
+    echo "  - $var"
+  done
+fi
+
 echo
 echo "Next: docker compose up -d --build"
