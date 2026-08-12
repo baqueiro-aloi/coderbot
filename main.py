@@ -212,6 +212,16 @@ def _seed_self_healing_items(state: dict) -> None:
             log.info("self-healing: seeded backlog item for missing Code Review workflow")
 
 
+_EVIDENCE_CONTRACT = (
+    " After you're done, an automated evidence step re-runs each new/changed spec/collection "
+    "file by NAME ONLY (e.g. `./run.sh your-new-test.spec.ts`), with no extra CLI flags, and "
+    "no environment variables beyond what forces recording on (video for Playwright). It must "
+    "exercise its real happy path and produce evidence under that exact bare invocation — do "
+    "not gate the meaningful assertions behind a custom flag, mode, or env var (e.g. a "
+    "`--provider xyz` switch) that this invocation will never pass, and do not have the test "
+    "self-skip by default, or no evidence will be captured for the PR.")
+
+
 def _e2e_note(state: dict) -> str:
     if not state.get("has_e2e_harness"):
         return ("- No e2e harness exists in this repo yet; verify the change using your own "
@@ -219,8 +229,9 @@ def _e2e_note(state: dict) -> str:
                 "tests.")
     if state.get("e2e_kind") == "newman":
         return ("- Every user-facing feature MUST include comprehensive Postman collections "
-                "under e2e/collections/, run via Newman (they must pass).")
-    return "- Every user-facing feature MUST include comprehensive Playwright e2e tests in e2e/tests/ (they must pass)."
+                "under e2e/collections/, run via Newman (they must pass)." + _EVIDENCE_CONTRACT)
+    return ("- Every user-facing feature MUST include comprehensive Playwright e2e tests in "
+            "e2e/tests/ (they must pass)." + _EVIDENCE_CONTRACT)
 
 
 def _e2e_report_note(state: dict) -> str:
@@ -512,6 +523,9 @@ def finalize_pr(state: dict, note: str = "") -> None:
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
                             else "a Playwright video (mp4)")
         body += f"Attached: {attachment_desc} demonstrating the feature.\n"
+    elif state.get("has_e2e_harness"):
+        body += ("Note: no e2e evidence could be captured for this PR (the spec/collection may "
+                 "have skipped itself when re-run bare, or none matched — see codebot logs).\n")
     body += "Reply with change requests, or tell me to merge."
     email(state, "PR ready for review", body, evidence_files)
     for key in ("review_since", "review_round", "review_run_link",

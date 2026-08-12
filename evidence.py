@@ -85,7 +85,9 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     new = sorted(after - before)
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
-                    "check PW_VIDEO wiring and test-results mount", len(before), len(after))
+                    "check PW_VIDEO wiring and test-results mount, and whether the spec "
+                    "skipped itself (bare `./run.sh <spec>` invocation, no extra flags/env). "
+                    "Run output tail:\n%s", len(before), len(after), (proc.stdout + proc.stderr)[-1500:])
     videos = new or sorted(after)
     kept = [v for v in videos if v.stat().st_size > 0]
     for v in kept:
@@ -164,7 +166,10 @@ def _record_newman_report(spec_files: list[str]) -> list[Path]:
     new = sorted(after - before)
     if not new:
         log.warning("no NEW report file after Newman evidence run (before=%d, after=%d); "
-                    "check the reporter wiring and test-results mount", len(before), len(after))
+                    "check the reporter wiring and test-results mount, and whether the "
+                    "collection skipped itself (bare `./run.sh <collection>` invocation, no "
+                    "extra flags/env). Run output tail:\n%s",
+                    len(before), len(after), (proc.stdout + proc.stderr)[-1500:])
         return []
     newest = max(new, key=lambda p: p.stat().st_mtime)
     if newest.stat().st_size == 0:
