@@ -30,6 +30,9 @@ LOG_LEVEL = (os.environ.get("CODEBOT_LOG_LEVEL") or "DEBUG").upper()
 POLL_INTERVAL_SECONDS = int(os.environ.get("CODEBOT_POLL_INTERVAL", "120"))
 CLAUDE_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "7200"))
 E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "3600"))
+# Cap the e2e-fails -> resume-to-fix -> re-run loop so a failure Claude can't resolve
+# (e.g. an external resource stuck from a prior run) doesn't spin forever.
+E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
 
 # After opening a PR, codebot waits for the "Code Review" GitHub Action
 # (OpenCodeReview) to finish and addresses its comments before notifying the user.

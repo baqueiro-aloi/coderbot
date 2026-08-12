@@ -337,6 +337,7 @@ def do_implement(state: dict) -> None:
              len(state["e2e_specs"]), state["e2e_specs"])
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
+    state["e2e_round"] = 0
     state["state"] = "E2E"
 
 
@@ -348,12 +349,28 @@ def do_e2e(state: dict) -> None:
     log.info("running e2e suite (e2e/run.sh)")
     passed, output = evidence.run_suite()
     if not passed:
-        log.warning("e2e suite FAILED; resuming session to fix. Tail:\n%s", output[-1500:])
+        state["e2e_round"] = state.get("e2e_round", 0) + 1
+        log.warning("e2e suite FAILED (round %d/%d); resuming session to fix. Tail:\n%s",
+                    state["e2e_round"], config.E2E_MAX_ROUNDS, output[-1500:])
+        if state["e2e_round"] > config.E2E_MAX_ROUNDS:
+            log.warning("e2e round limit (%d) reached; asking user for help instead of retrying",
+                        config.E2E_MAX_ROUNDS)
+            email(state, "e2e suite stuck — needs your help",
+                  f"Task: {state['item']}\n\nThe e2e suite has failed {config.E2E_MAX_ROUNDS} "
+                  "times in a row and I could not fix it myself (this is often caused by "
+                  "something outside the code, e.g. a stuck process/port left over from a "
+                  f"prior run). Latest failure output:\n\n{output[-3000:]}\n\n"
+                  "Please investigate, then reply with guidance (or tell me what to try) "
+                  "to continue.")
+            state["return_state"] = "E2E"
+            state["state"] = "WAIT_REPLY"
+            return
         result = claude_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E, output=output))
         if handle_result(state, result, "IMPLEMENTING"):
             return
         return  # loop re-enters E2E and re-runs the suite
     log.info("e2e suite PASSED")
+    state["e2e_round"] = 0
     state["state"] = "OPEN_PR"
 
 
@@ -887,7 +904,7 @@ def _handle_reply(state: dict, reply: str) -> None:
         if handle_result(state, result, phase):
             return  # re-questioned; handle_result reset return_state for the new phase
         next_state = {"EXPLORING": "PROPOSING", "PROPOSING": "WAIT_APPROVAL",
-                      "IMPLEMENTING": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
+                      "IMPLEMENTING": "E2E", "E2E": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
                       "ADDRESS_PR_THREADS": "WAIT_MERGE"}[phase]
         if next_state == "WAIT_APPROVAL":
             email(state, "proposal for review",
@@ -898,6 +915,8 @@ def _handle_reply(state: dict, reply: str) -> None:
         elif phase == "ADDRESS_PR_THREADS":
             _finish_address_pr_threads(state)  # resolves the threads, then re-enters WAIT_MERGE
         else:
+            if phase == "E2E":
+                state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
             state["state"] = next_state
         state.pop("return_state", None)
 

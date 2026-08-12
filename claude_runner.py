@@ -27,6 +27,17 @@ then stop working. Otherwise finish the work and summarize what you did.
 If a question is about visible UI behavior and a screenshot or short video would
 help, save the file(s) under {OUTBOX_DIR}/ and list each one's ABSOLUTE path on
 its own line starting with `ATTACH: ` before the {SENTINEL} line.
+
+Each of your turns is a brand-new, one-shot headless process: nothing monitors
+this session between invocations. If you start a background process (including
+via the Bash tool's run_in_background), it is orphaned the moment this turn
+ends — no future turn will check on it, read its output, or wait for it. NEVER
+end a turn by saying you are "waiting" for a background job to finish; that
+job will never be checked again and the task will stall. Run builds, servers,
+and test suites to completion in the foreground within the current turn. If
+something is occupying a resource you need (e.g. a port already bound), find
+and stop the actual owning process yourself rather than assuming a background
+task will free it up later.
 """
 
 
