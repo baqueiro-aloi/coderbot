@@ -23,9 +23,14 @@ missing:
   - **Missing**: the e2e gate is skipped for the current task, and codebot
     adds a backlog item requesting the harness (Playwright if the repo has a
     frontend, Newman otherwise) so a later task can build it.
-- The **`Code Review` GitHub Action** (OpenCodeReview,
-  `.github/workflows/code-review.yml`, matched by its declared workflow
-  `name:`) — drives the automated review loop.
+- A **`Code Review` GitHub Actions workflow** — matched by its declared
+  top-level workflow `name:` being exactly `Code Review` — drives the
+  automated review loop. Codebot's self-healing item asks for this to be
+  built on [alibaba/open-code-review](https://github.com/alibaba/open-code-review)
+  (OpenCodeReview), an Anthropic-backed automated PR reviewer, with the
+  workflow named `Code Review` (not OpenCodeReview's own suggested workflow
+  name) and posting under the default `github-actions[bot]` identity — both
+  required for codebot's detection and comment-polling to see it.
   - **Missing**: the post-PR review wait is skipped and the PR is emailed to
     the user immediately, and codebot adds a backlog item requesting the
     workflow.

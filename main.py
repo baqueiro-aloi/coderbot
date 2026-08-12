@@ -159,8 +159,26 @@ E2E_HARNESS_ITEMS = {
     "newman": "Set up a Newman/Postman e2e harness (e2e/run.sh + collections under "
               "e2e/collections/) so future changes can be gated on it.",
 }
-CODE_REVIEW_ITEM = ("Add a 'Code Review' GitHub Actions workflow so pull requests get "
-                     "automated review.")
+CODE_REVIEW_ITEM = (
+    "Add a 'Code Review' GitHub Actions workflow that runs the alibaba/open-code-review "
+    "(OpenCodeReview) action (https://github.com/alibaba/open-code-review) as the automated "
+    "PR reviewer, using an Anthropic API key as its LLM backend. To match coderbot's "
+    "automated-review integration exactly: (1) the workflow's top-level `name:` field must be "
+    "exactly `Code Review` (NOT the action's own suggested name, `OpenCodeReview PR Review`) "
+    "so coderbot's Code Review detection and polling can find it; (2) trigger on pull_request "
+    "(or pull_request_target) `opened`, `synchronize`, and `reopened` so a fresh run fires on "
+    "every push, including fix-up commits; (3) invoke the action via "
+    "`uses: alibaba/open-code-review@<pinned version>` per "
+    "https://github.com/alibaba/open-code-review/blob/main/pages/src/content/docs/en/integrations/ci.md "
+    "(or the action.yml at the repo root), with `llm_use_anthropic: true` and "
+    "`llm_url`/`llm_auth_token`/`llm_model` sourced from repo secrets/variables pointing at the "
+    "Anthropic API — ask the user for these credentials via NEED_USER_INPUT if they are not "
+    "already configured in the repo, rather than guessing; (4) leave `github_token` at its "
+    "default (`${{ github.token }}`) and `sticky_summary` at its default (`true`), so feedback "
+    "posts as inline PR review comments plus a sticky summary comment under the "
+    "`github-actions[bot]` identity — do NOT swap in a custom GitHub App or bot account, since "
+    "coderbot only recognizes comments from `github-actions[bot]`; (5) grant "
+    "`permissions: contents: read` and `pull-requests: write`.")
 
 
 def _seed_self_healing_items(state: dict) -> None:
