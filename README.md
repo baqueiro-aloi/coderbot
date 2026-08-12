@@ -75,6 +75,21 @@ case it emails anyway with a note about the unresolved review.
 
 ## One-time setup
 
+**Recommended**: from the coderbot repo root, run the guided setup script. It
+walks through every value below, explains what it is and where to get it,
+pre-fills defaults where discoverable (git config, an authenticated `gh` CLI,
+an existing `.env`), validates what it can, and writes `.env` for you:
+
+```bash
+./setup.sh
+```
+
+It also detects `data/credentials.json` (see step 1 below) and, if present,
+offers to run the consent flow in step 2 for you.
+
+<details>
+<summary>Manual setup (what <code>setup.sh</code> automates)</summary>
+
 1. **Google OAuth client**: in Google Cloud Console create a project, enable the
    Gmail, Google Docs and Google Drive APIs, create an OAuth client of type
    *Desktop app*, and download its JSON to `data/credentials.json`.
@@ -106,6 +121,9 @@ case it emails anyway with a note about the unresolved review.
    ```
    (macOS keeps Claude credentials in the Keychain, which the Linux container
    can't read — hence the explicit token.)
+
+</details>
+
 4. **Claude Code**: the host's `~/.claude` and `~/.claude.json` (settings + opsx
    skills) are mounted in; git pushes use HTTPS with `GH_TOKEN` (no SSH needed).
 
