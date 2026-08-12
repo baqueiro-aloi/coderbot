@@ -14,6 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Target repos' e2e/run.sh installs its own pinned Playwright npm package and browser
+# binary at runtime, as the non-root `bot` user (into a user-writable cache dir) — but
+# launching headless Chromium also needs a set of OS shared libraries that require
+# root/apt to install, which `bot` doesn't have at runtime. Install those once here,
+# as root, at build time. `install-deps` only touches OS packages (not the browser
+# binary itself), so it isn't tied to any particular target repo's Playwright version.
+RUN npx --yes playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN npm install -g @anthropic-ai/claude-code
 
 COPY requirements.txt /tmp/requirements.txt

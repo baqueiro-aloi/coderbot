@@ -97,6 +97,25 @@ def handle_result(state: dict, result: claude_runner.ClaudeResult, phase: str) -
     return False
 
 
+def _collect_attachments(result: claude_runner.ClaudeResult, e2e_specs: list[str],
+                          e2e_kind: str | None) -> list[Path]:
+    """Files to attach to a post-task email: whatever Claude explicitly pointed to via
+    ATTACH: lines in its own (non-question) output, plus whatever the evidence pipeline
+    separately records. Claude may have already captured and converted its own evidence
+    (e.g. mid-review, outside the dedicated E2E phase) — trust that over re-deriving
+    evidence from scratch, which runs in a fresh subprocess and can fail for reasons
+    Claude's own sandboxed tool calls didn't hit. Deduped by resolved path in case both
+    sources happen to reference the same file."""
+    evidence_files = evidence.record_evidence(e2e_specs, e2e_kind)
+    combined, seen = [], set()
+    for f in [Path(p) for p in result.attachments] + evidence_files:
+        resolved = f.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            combined.append(f)
+    return combined
+
+
 # ---------------------------------------------------------------- capability detection
 
 def _has_e2e_harness() -> bool:
@@ -558,9 +577,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
         if handle_result(state, r, "IMPLEMENTING"):
             return
-        evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
+        attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
         email(state, "PR updated",
-              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", evidence_files)
+              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", attachments)
         return  # stay in WAIT_MERGE
     # merge
     info = json.loads(subprocess.run(
