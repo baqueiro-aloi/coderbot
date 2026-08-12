@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import config
@@ -95,7 +96,7 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     if not kept:
         log.info("_record_playwright_video: no clips to stitch")
         return []
-    stitched = _stitch_to_mp4(kept, results_dir)
+    stitched = _stitch_to_mp4(kept)
     if stitched:
         log.info("_record_playwright_video: returning stitched %s (%d bytes)", stitched, stitched.stat().st_size)
         return [stitched]
@@ -103,16 +104,20 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     return kept
 
 
-def _stitch_to_mp4(clips: list[Path], out_dir: Path) -> Path | None:
+def _stitch_to_mp4(clips: list[Path]) -> Path | None:
     """Concatenate .webm clips into one H.264 .mp4 via ffmpeg. None on failure.
 
     Each clip is scaled/padded to a common 1280x720 frame so clips recorded at
-    different viewport sizes concatenate cleanly.
+    different viewport sizes concatenate cleanly. Writes into a fresh /tmp scratch
+    dir rather than e2e/test-results: that directory is bind-mounted from the target
+    repo and its e2e stack's own containers may own it (different uid), so codebot's
+    process can read the clips there but isn't guaranteed write access.
     """
     if not shutil.which("ffmpeg"):
         log.warning("ffmpeg not found; cannot stitch/convert evidence videos")
         return None
-    out = out_dir / "evidence.mp4"
+    scratch_dir = Path(tempfile.mkdtemp(prefix="codebot-evidence-"))
+    out = scratch_dir / "evidence.mp4"
     w, h = 1280, 720
     inputs: list[str] = []
     filters = []
