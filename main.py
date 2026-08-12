@@ -554,6 +554,83 @@ def do_address_review(state: dict) -> None:
     _enter_review_wait(state)  # the push re-triggers Code Review on the new commit
 
 
+# ---------------------------------------------------------------- pre-merge thread resolution
+
+def unresolved_review_threads(pr_url: str) -> list[dict]:
+    """Open (unresolved) PR review conversation threads: [{id, comments: [{path, line,
+    body, author}]}]. GitHub's REST API has no notion of thread resolution, so this goes
+    through the GraphQL API (unlike the rest of this file's gh calls)."""
+    owner_repo, number = _pr_owner_number(pr_url)
+    owner, repo = owner_repo.split("/", 1)
+    query = """
+    query($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes {
+              id
+              isResolved
+              comments(first: 50) {
+                nodes { path line originalLine body author { login } }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    proc = subprocess.run(
+        ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
+         "-F", f"repo={repo}", "-F", f"number={number}"],
+        cwd=config.REPO_PATH, capture_output=True, text=True)
+    if proc.returncode != 0:
+        log.warning("gh api graphql (reviewThreads) failed: %s", proc.stderr[-300:])
+        return []
+    try:
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except json.JSONDecodeError:
+        return []
+    repository = (data.get("data") or {}).get("repository") or {}
+    pull_request = repository.get("pullRequest") or {}
+    nodes = (pull_request.get("reviewThreads") or {}).get("nodes") or []
+    threads = []
+    for t in nodes:
+        if t.get("isResolved"):
+            continue
+        comments = [{
+            "path": c.get("path"),
+            "line": c.get("line") or c.get("originalLine"),
+            "body": c.get("body", ""),
+            "author": (c.get("author") or {}).get("login", "?"),
+        } for c in (t.get("comments") or {}).get("nodes") or []]
+        threads.append({"id": t["id"], "comments": comments})
+    return threads
+
+
+def format_review_threads(threads: list[dict]) -> str:
+    lines = [f"{len(threads)} unresolved review thread(s):"]
+    for i, t in enumerate(threads, 1):
+        comments = t["comments"]
+        first = comments[0] if comments else {}
+        loc = f"{first.get('path')}:{first.get('line')}" if first.get("line") else (first.get("path") or "(general)")
+        lines.append(f"\n[{i}] {loc}")
+        for c in comments:
+            lines.append(f"  {c['author']}: {c['body']}")
+    return "\n".join(lines)
+
+
+def resolve_review_thread(thread_id: str) -> bool:
+    proc = subprocess.run(
+        ["gh", "api", "graphql",
+         "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
+         "-F", f"id={thread_id}"],
+        cwd=config.REPO_PATH, capture_output=True, text=True)
+    if proc.returncode != 0:
+        log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id, proc.stderr[-300:])
+        return False
+    return True
+
+
 def do_merge_reply(state: dict, reply: str) -> None:
     result = claude_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply))
     verdict = parse_json_reply(result.output)
@@ -582,6 +659,25 @@ def do_merge_reply(state: dict, reply: str) -> None:
               f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", attachments)
         return  # stay in WAIT_MERGE
     # merge
+    threads = unresolved_review_threads(state["pr_url"])
+    if threads:
+        log.info("PR has %d unresolved review thread(s); addressing before merge", len(threads))
+        r = claude_runner.resume(
+            state["session_id"],
+            prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
+                           branch=state["branch"]))
+        if handle_result(state, r, "IMPLEMENTING"):
+            return
+        still_unresolved = [t for t in threads if not resolve_review_thread(t["id"])]
+        if still_unresolved:
+            log.warning("could not resolve %d/%d review thread(s)",
+                        len(still_unresolved), len(threads))
+            email(state, "could not resolve all review threads",
+                  f"I addressed the open review conversation(s) on the PR but GitHub would "
+                  f"not let me mark {len(still_unresolved)}/{len(threads)} of them resolved.\n"
+                  f"PR: {state['pr_url']}\n\nPlease resolve the rest manually, then reply "
+                  "'merge' to continue.")
+            return  # stay in WAIT_MERGE
     info = json.loads(subprocess.run(
         ["gh", "pr", "view", state["pr_url"], "--json", "state,mergeable"],
         cwd=config.REPO_PATH, capture_output=True, text=True, check=True).stdout)

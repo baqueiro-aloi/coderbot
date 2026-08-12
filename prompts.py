@@ -114,6 +114,18 @@ requesting changes to the current PR. If the reply asks for changes to the PR, c
 choose "abort" when the user wants codebot itself to stop working on the task.
 """
 
+ADDRESS_PR_THREADS = """The pull request still has unresolved review conversation(s) that
+must be resolved before merging:
+
+$threads
+
+For each: if it points to a genuine problem, fix it properly. If it is not worth acting
+on, leave a brief reply explaining why (e.g. via `gh pr comment` or a reply on the
+thread) rather than silently ignoring it. Keep e2e tests passing and updated. Commit
+your changes on branch $branch with clear messages and push. End with a short summary
+of what you changed and how each thread was addressed.
+"""
+
 APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
 
     $feedback
