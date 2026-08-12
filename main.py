@@ -281,12 +281,15 @@ def do_approval_reply(state: dict, reply: str) -> None:
         claude_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)).output)
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
-    if action not in ("approve", "changes"):
+    if action not in ("approve", "changes", "abort"):
         email(state, "clarification needed",
-              f"I could not tell whether your reply approves the proposal or requests "
-              f"changes:\n\n{reply}\n\nPlease reply again with an explicit approval or "
-              "the changes you want.")
+              f"I could not tell whether your reply approves the proposal, requests "
+              f"changes, or aborts:\n\n{reply}\n\nPlease reply again with an explicit "
+              "approval, the changes you want, or 'abort'.")
         return  # stay in WAIT_APPROVAL
+    if action == "abort":
+        _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean slate.")
+        return
     if action == "approve":
         state["state"] = "IMPLEMENTING"
         return
@@ -537,12 +540,18 @@ def do_merge_reply(state: dict, reply: str) -> None:
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r", action)
-    if action not in ("merge", "changes"):
+    if action not in ("merge", "changes", "abort"):
         # Merging is irreversible: never fall through to it on unexpected output.
         email(state, "clarification needed",
-              f"I could not tell whether your reply asks for changes or a merge:\n\n{reply}\n\n"
-              "Please reply again with either the change requests or an explicit 'merge'.")
+              f"I could not tell whether your reply asks for changes, an abort, or a "
+              f"merge:\n\n{reply}\n\nPlease reply again with the change requests, 'abort', "
+              "or an explicit 'merge'.")
         return  # stay in WAIT_MERGE
+    if action == "abort":
+        pr_url = state.get("pr_url", "-")
+        _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean "
+                                f"slate.\n\nPR: {pr_url}")
+        return
     if action == "changes":
         r = claude_runner.resume(
             state["session_id"],
@@ -667,12 +676,35 @@ def _reset_to_base_branch() -> list[str]:
     return problems
 
 
+def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
+    """Shared abort machinery: reset the local checkout, email a confirmation, clear all
+    task state, and return to IDLE. Used both by the mailbox-wide last-resort 'ABORT'
+    email and by an explicit abort classified from a WAIT_APPROVAL/WAIT_MERGE reply.
+    Never touches remote branches or PRs — those are left for the user to clean up."""
+    aborted_task = state.get("item", "-")
+    prev_state = state["state"]
+    log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
+    problems = _reset_to_base_branch()
+    status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
+              else "The reset finished with issues (I'll re-check the tree before starting the "
+                   "next task):\n- " + "\n- ".join(problems))
+    email(state, "aborted — reset to IDLE",
+          f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
+          "Remote branches and PRs were left untouched. I'll pick up the next pending item "
+          "from the backlog doc.", new_thread=new_thread)
+    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
+                "return_state", "review_since", "review_round", "review_run_link",
+                "review_comment_watermark", "review_comments", "pr_summary"):
+        state.pop(key, None)
+    state["state"] = "IDLE"
+
+
 def check_abort(state: dict) -> bool:
     """Last-resort kill switch: on an 'ABORT' email, reset to a clean IDLE slate. True if so.
 
     Checked every tick regardless of state and mailbox-wide, so it works even when the agent
     is stuck waiting on a thread. A gmail hiccup here must not break the tick, so polling
-    failures are swallowed. Resets local state only — remote branches and PRs are untouched.
+    failures are swallowed.
     """
     try:
         polled = gmail_client.poll_abort()
@@ -685,23 +717,8 @@ def check_abort(state: dict) -> bool:
     # Consume the trigger first: the reset below is idempotent, but marking it processed up
     # front guarantees a failure afterwards can't loop us into re-aborting.
     gmail_client.mark_processed(msg_id)
-    aborted_task = state.get("item", "-")
-    prev_state = state["state"]
-    log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
-    problems = _reset_to_base_branch()
-    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
-                "return_state", "review_since", "review_round", "review_run_link",
-                "review_comment_watermark", "review_comments", "pr_summary"):
-        state.pop(key, None)
-    state["state"] = "IDLE"
-    status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
-              else "The reset finished with issues (I'll re-check the tree before starting the "
-                   "next task):\n- " + "\n- ".join(problems))
-    email(state, "aborted — reset to IDLE",
-          f"ABORT received: I stopped the task in progress and reset myself to a clean slate.\n\n"
-          f"Was working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
-          "Remote branches and PRs were left untouched. I'll pick up the next pending item "
-          "from the backlog doc.", new_thread=True)
+    _abort_and_reset(state, "ABORT received: I stopped the task in progress and reset myself "
+                            "to a clean slate.", new_thread=True)
     return True
 
 

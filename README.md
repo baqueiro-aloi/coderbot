@@ -127,6 +127,9 @@ offers to run the consent flow in step 2 for you.
    # Optional; defaults to "main" — the trunk branch codebot syncs from, branches off
    # of, opens PRs against, and resets to on abort
    CODEBOT_BASE_BRANCH=main
+   # Optional; only needed if the target repo's own .claude/settings.json defines an
+   # "apiKeyHelper" that reads this variable — see "Troubleshooting" below
+   CLAUDE_API_KEY=
    ```
    (macOS keeps Claude credentials in the Keychain, which the Linux container
    can't read — hence the explicit token.)
@@ -160,6 +163,23 @@ git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN w
 python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'
 python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'
 ```
+
+## Troubleshooting
+
+**`claude exited 1: apiKeyHelper failed: did not return a value`**: the target repo
+has its own `.claude/settings.json` (project-level, applies to any `claude` invocation
+with cwd in that repo) that defines an `apiKeyHelper` script codebot doesn't satisfy.
+Claude Code's authentication precedence always tries `apiKeyHelper` *before*
+`CLAUDE_CODE_OAUTH_TOKEN`, with **no fallback** if the helper fails or returns
+nothing — so this silently breaks codebot's OAuth auth for that repo regardless of a
+valid `CLAUDE_CODE_OAUTH_TOKEN`. Check what env var the helper reads (e.g.
+`cat "$CODEBOT_REPO_PATH/.claude/settings.json"`) and set it to a real key from
+[console.anthropic.com](https://console.anthropic.com/) via `CLAUDE_API_KEY` in
+`.env` (see `.env.example`) — codebot's work in that repo will then bill via that
+API key instead of your OAuth/subscription plan. Note some apps regenerate
+`.claude/settings.json` at their own startup (check whether it's gitignored); if so,
+the setting will keep reappearing and `CLAUDE_API_KEY` is the durable fix rather than
+hand-editing the file.
 
 ## Logs
 

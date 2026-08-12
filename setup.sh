@@ -221,6 +221,10 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
   CODEBOT_LOG_LEVEL=$(prompt_var "CODEBOT_LOG_LEVEL" \
     "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
     "DEBUG")
+
+  CLAUDE_API_KEY=$(prompt_var "CLAUDE_API_KEY" \
+    "Optional: only needed if the target repo has its own .claude/settings.json with an 'apiKeyHelper' that reads this variable. Claude Code always tries apiKeyHelper before CLAUDE_CODE_OAUTH_TOKEN with no fallback, so a target repo's own apiKeyHelper convention can break codebot's OAuth auth unless this is set to a real key from https://console.anthropic.com/ (billed per-token, separate from your subscription plan). Leave blank if the target repo has no such setting." \
+    "" "yes")
 fi
 
 # ---------------------------------------------------------------- Google OAuth
@@ -322,6 +326,7 @@ CLAUDE_MODEL=$CLAUDE_MODEL
 CODEBOT_USER_EMAIL=$CODEBOT_USER_EMAIL
 CODEBOT_LOG_LEVEL=$CODEBOT_LOG_LEVEL
 CODEBOT_BASE_BRANCH=$CODEBOT_BASE_BRANCH
+CLAUDE_API_KEY=$CLAUDE_API_KEY
 EOF
   chmod 600 "$ENV_FILE"
 
@@ -329,7 +334,7 @@ EOF
   echo "Wrote $ENV_FILE with:"
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL \
-    CODEBOT_BASE_BRANCH; do
+    CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
     echo "  - $var"
   done
 fi

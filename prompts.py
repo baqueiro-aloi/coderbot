@@ -48,11 +48,13 @@ CLASSIFY_APPROVAL_REPLY = """The user replied to the proposal-review email with:
     $reply
 
 Classify their intent. Respond with ONLY a JSON object, no other text:
-{"action": "approve" | "changes", "feedback": "<the requested changes, empty if approve>"}
+{"action": "approve" | "changes" | "abort", "feedback": "<the requested changes, empty otherwise>"}
 
 Only choose "approve" when the reply is a clear, explicit go-ahead to implement the
-proposal as-is. If the reply is ambiguous, asks a question, or requests any change,
-choose "changes" and put the substance in "feedback".
+proposal as-is. Only choose "abort" when the reply clearly asks to stop, cancel, or
+abandon this task entirely, rather than change the proposal. If the reply is ambiguous,
+asks a question, or requests any change short of abandoning the task, choose "changes"
+and put the substance in "feedback".
 """
 
 REVISE_PROPOSAL = """The user reviewed the proposal and did NOT approve it yet. They
@@ -103,7 +105,13 @@ CLASSIFY_PR_REPLY = """The user replied to the pull-request review email with:
     $reply
 
 Classify their intent. Respond with ONLY a JSON object:
-{"action": "merge" | "changes", "feedback": "<the change requests, empty if merge>"}
+{"action": "merge" | "changes" | "abort", "feedback": "<the change requests, empty otherwise>"}
+
+Only choose "abort" when the reply clearly asks to stop, cancel, or abandon this task
+entirely (e.g. "abort", "cancel this", "never mind, stop working on this") rather than
+requesting changes to the current PR. If the reply asks for changes to the PR, choose
+"changes" even if it also asks to close/withdraw the PR as part of those changes — only
+choose "abort" when the user wants codebot itself to stop working on the task.
 """
 
 APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
