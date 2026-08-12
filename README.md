@@ -8,23 +8,39 @@ to the maintainer exclusively by email (`CODEBOT_USER_EMAIL`).
 ## Target repo prerequisites
 
 Coderbot lives in its own repo and is pointed at a target checkout via
-`CODEBOT_REPO_PATH`. The target repo is expected to provide:
+`CODEBOT_REPO_PATH`. Two pieces of target-repo infrastructure make codebot's
+lifecycle stricter, but neither is a hard requirement — codebot auto-detects
+each at the start of every task and adapts, self-healing the gap if it's
+missing:
 
-- **OpenSpec (opsx) skills** in its Claude Code setup (`/opsx:explore`,
-  `/opsx:propose`, `/opsx:apply`) — used for the planning workflow.
-- An **`e2e/` Playwright harness** with `e2e/run.sh` (the pre-PR gate) and
-  `e2e/playwright.config.ts` (evidence videos are recorded from its
-  `test-results/`).
+- An **`e2e/` test harness**, run via `e2e/run.sh` as the pre-PR gate. Either
+  tool is supported, detected by what's under `e2e/`:
+  - **Playwright** (web UI) — `e2e/playwright.config.ts`; specs live under
+    `e2e/tests/`; evidence is a stitched video from `test-results/`.
+  - **Newman/Postman** (API-only repos with no frontend) — collections under
+    `e2e/collections/*.postman_collection.json`; evidence is the generated
+    run report from `test-results/`.
+  - **Missing**: the e2e gate is skipped for the current task, and codebot
+    adds a backlog item requesting the harness (Playwright if the repo has a
+    frontend, Newman otherwise) so a later task can build it.
 - The **`Code Review` GitHub Action** (OpenCodeReview,
-  `.github/workflows/code-review.yml`) — drives the automated review loop.
+  `.github/workflows/code-review.yml`, matched by its declared workflow
+  `name:`) — drives the automated review loop.
+  - **Missing**: the post-PR review wait is skipped and the PR is emailed to
+    the user immediately, and codebot adds a backlog item requesting the
+    workflow.
+
+This also requires **OpenSpec (opsx) skills** in the target repo's Claude Code
+setup (`/opsx:explore`, `/opsx:propose`, `/opsx:apply`) — used for the planning
+workflow, and not auto-detected/self-healed.
 
 ## Lifecycle
 
 ```
 IDLE → pick item (non-struck ¶ in the Doc, Claude chooses) → branch codebot/<slug>
      → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
-     → IMPLEMENTING (must add Playwright e2e specs) → E2E gate (e2e/run.sh)
-     → OPEN_PR (gh) → WAIT_REVIEW ⇄ ADDRESS_REVIEW → email PR + evidence videos → WAIT_MERGE
+     → IMPLEMENTING (adds e2e coverage if a harness is present) → E2E gate (e2e/run.sh, if present)
+     → OPEN_PR (gh) → WAIT_REVIEW ⇄ ADDRESS_REVIEW (if Code Review is present) → email PR + evidence → WAIT_MERGE
      → merge → strike item through in the Doc → IDLE
 ```
 
@@ -129,12 +145,20 @@ e2e suite result, and the evidence-video harvest (which `.webm` files were found
 and their sizes — with explicit warnings if none were produced or a feature
 shipped without e2e specs). Set `CODEBOT_LOG_LEVEL=INFO` for a quieter feed.
 
-## Evidence videos
+## Evidence
 
-The implementation phase must add comprehensive Playwright specs under `e2e/tests/`.
-After the suite passes, codebot re-runs the feature's specs with `PW_VIDEO=on`
-(forces `video: "on"` in `e2e/playwright.config.ts`), then stitches the resulting
-`.webm` clips from `e2e/test-results/` into a single H.264 `evidence.mp4` with
-ffmpeg (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate
-cleanly) and attaches that one file to the PR email. If ffmpeg is unavailable or
-stitching fails, it falls back to attaching the raw `.webm` clips.
+If the target repo has an e2e harness, the implementation phase adds coverage for
+it and, once the suite passes, codebot re-runs the feature's own tests to capture
+evidence for the PR email:
+
+- **Playwright**: re-runs the feature's specs with `PW_VIDEO=on` (forces
+  `video: "on"` in `e2e/playwright.config.ts`), then stitches the resulting
+  `.webm` clips from `e2e/test-results/` into a single H.264 `evidence.mp4` with
+  ffmpeg (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate
+  cleanly). If ffmpeg is unavailable or stitching fails, it falls back to
+  attaching the raw `.webm` clips.
+- **Newman**: re-runs the feature's collection(s) and attaches the newest
+  generated report file from `e2e/test-results/`.
+
+If no e2e harness is present for the task, no evidence is produced and the PR
+email is sent without an attachment.

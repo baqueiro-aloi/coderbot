@@ -38,7 +38,7 @@ require the user. End with a concise summary of your conclusions.
 PROPOSE = """Now formalize the plan: run the /opsx:propose workflow (openspec CLI) to
 create a change named $slug with proposal.md, design.md, specs, and tasks.md,
 based on your exploration. Requirements:
-- Every user-facing feature MUST include comprehensive Playwright e2e tests in e2e/tests/.
+$e2e_note
 When done, output the full text of proposal.md and a summary of the tasks so it can
 be emailed to the user for review.
 """
@@ -68,10 +68,9 @@ explicitly approve before implementation begins.
 IMPLEMENT = """The user approved the proposal. Implement the openspec change $slug
 fully (the /opsx:apply workflow): work through every task in tasks.md, marking them
 complete. Mandatory:
-- Comprehensive Playwright e2e tests for the feature in e2e/tests/ (they must pass).
+$e2e_note
 - Commit your work on branch $branch with clear messages. Do NOT push yet.
-End with a summary of what was implemented and the list of new/changed e2e spec files
-(one per line, prefixed with `E2E_SPEC: `).
+$e2e_report_note
 """
 
 FIX_E2E = """The e2e suite failed. Fix the issues and re-commit. Failure output:

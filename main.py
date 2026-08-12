@@ -97,6 +97,102 @@ def handle_result(state: dict, result: claude_runner.ClaudeResult, phase: str) -
     return False
 
 
+# ---------------------------------------------------------------- capability detection
+
+def _has_e2e_harness() -> bool:
+    return (config.REPO_PATH / "e2e" / "run.sh").is_file()
+
+
+def _has_code_review_workflow() -> bool:
+    workflows_dir = config.REPO_PATH / ".github" / "workflows"
+    if not workflows_dir.is_dir():
+        return False
+    for pattern in ("*.yml", "*.yaml"):
+        for path in workflows_dir.glob(pattern):
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            # Anchored to column 0: a workflow's own top-level `name:`, not an
+            # indented job/step name that happens to say "Code Review" too.
+            if re.search(r'^name:\s*["\']?Code Review["\']?\s*$', text, re.MULTILINE):
+                return True
+    return False
+
+
+def _e2e_kind_of_present_harness() -> str:
+    """"playwright" | "newman" | "unknown", for a harness already known to be present."""
+    e2e_dir = config.REPO_PATH / "e2e"
+    if (e2e_dir / "playwright.config.ts").is_file():
+        return "playwright"
+    if any(e2e_dir.rglob("*.postman_collection.json")):
+        return "newman"
+    return "unknown"
+
+
+def _has_frontend() -> bool:
+    root = config.REPO_PATH
+    if (root / "frontend").is_dir() or (root / "angular.json").is_file() or (root / "index.html").is_file():
+        return True
+    return any(root.glob("vite.config.*")) or any(root.glob("next.config.*"))
+
+
+def _detect_capabilities(state: dict) -> None:
+    """Detect, once per task, whether the target repo has an e2e harness and a Code
+    Review workflow, and which e2e tool (Playwright/Newman) is present — or, if no
+    harness is present, which one self-healing should request."""
+    has_e2e = _has_e2e_harness()
+    kind = _e2e_kind_of_present_harness() if has_e2e else (
+        "playwright" if _has_frontend() else "newman")
+    state["has_e2e_harness"] = has_e2e
+    state["has_code_review"] = _has_code_review_workflow()
+    state["e2e_kind"] = kind
+    log.info("target repo capabilities: e2e_harness=%s kind=%s code_review=%s",
+             has_e2e, kind, state["has_code_review"])
+
+
+# ---------------------------------------------------------------- self-healing
+
+E2E_HARNESS_ITEMS = {
+    "playwright": "Set up a Playwright e2e harness (e2e/run.sh + Playwright specs under "
+                  "e2e/tests/) so future changes can be gated on it.",
+    "newman": "Set up a Newman/Postman e2e harness (e2e/run.sh + collections under "
+              "e2e/collections/) so future changes can be gated on it.",
+}
+CODE_REVIEW_ITEM = ("Add a 'Code Review' GitHub Actions workflow so pull requests get "
+                     "automated review.")
+
+
+def _seed_self_healing_items(state: dict) -> None:
+    """Add a backlog item for each piece of missing infrastructure, unless an
+    equivalent item is already pending or done."""
+    if not state["has_e2e_harness"]:
+        if gdoc_client.ensure_item(E2E_HARNESS_ITEMS[state["e2e_kind"]]):
+            log.info("self-healing: seeded backlog item for missing e2e harness (%s)",
+                     state["e2e_kind"])
+    if not state["has_code_review"]:
+        if gdoc_client.ensure_item(CODE_REVIEW_ITEM):
+            log.info("self-healing: seeded backlog item for missing Code Review workflow")
+
+
+def _e2e_note(state: dict) -> str:
+    if not state.get("has_e2e_harness"):
+        return ("- No e2e harness exists in this repo yet; verify the change using your own "
+                "judgment (existing test suites, manual checks, etc.) instead of writing e2e "
+                "tests.")
+    if state.get("e2e_kind") == "newman":
+        return ("- Every user-facing feature MUST include comprehensive Postman collections "
+                "under e2e/collections/, run via Newman (they must pass).")
+    return "- Every user-facing feature MUST include comprehensive Playwright e2e tests in e2e/tests/ (they must pass)."
+
+
+def _e2e_report_note(state: dict) -> str:
+    if not state.get("has_e2e_harness"):
+        return "End with a summary of what was implemented and how you verified it."
+    return ("End with a summary of what was implemented and the list of new/changed e2e test "
+            "files (one per line, prefixed with `E2E_SPEC: `).")
+
+
 # ---------------------------------------------------------------- phases
 
 def do_pick(state: dict) -> None:
@@ -108,6 +204,13 @@ def do_pick(state: dict) -> None:
               "new task. Clean it up and reply to this email to retry.", new_thread=True)
         state["state"] = "WAIT_CLEAN"
         return
+    # Sync to main before detecting target-repo capabilities and seeding any
+    # self-healing item, so both reflect main's actual current state rather than
+    # whatever branch was last checked out.
+    git("checkout", "main")
+    git("pull", "--ff-only")
+    _detect_capabilities(state)
+    _seed_self_healing_items(state)
     items = gdoc_client.list_pending_items()
     log.info("backlog has %d pending item(s)", len(items))
     if not items:
@@ -125,8 +228,6 @@ def do_pick(state: dict) -> None:
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
     branch = f"codebot-{choice['slug']}"
-    git("checkout", "main")
-    git("pull", "--ff-only")
     # -B is idempotent: if do_pick is retried after the branch was already created
     # (state not yet persisted), reset it from main rather than failing on "-b".
     git("checkout", "-B", branch)
@@ -144,7 +245,8 @@ def do_explore(state: dict) -> None:
 
 
 def do_propose(state: dict) -> None:
-    result = claude_runner.resume(state["session_id"], prompts.render(prompts.PROPOSE, slug=state["slug"]))
+    result = claude_runner.resume(state["session_id"], prompts.render(
+        prompts.PROPOSE, slug=state["slug"], e2e_note=_e2e_note(state)))
     if handle_result(state, result, "PROPOSING"):
         return
     email(state, "proposal for review",
@@ -183,7 +285,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
 def do_implement(state: dict) -> None:
     result = claude_runner.resume(
         state["session_id"],
-        prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"]))
+        prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
+                       e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
     if handle_result(state, result, "IMPLEMENTING"):
         return
     state["e2e_specs"] = [
@@ -192,12 +295,16 @@ def do_implement(state: dict) -> None:
     ]
     log.info("implementation reported %d e2e spec(s): %s",
              len(state["e2e_specs"]), state["e2e_specs"])
-    if not state["e2e_specs"]:
+    if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
     state["state"] = "E2E"
 
 
 def do_e2e(state: dict) -> None:
+    if not state.get("has_e2e_harness"):
+        log.info("no e2e harness detected for this task; skipping the e2e gate")
+        state["state"] = "OPEN_PR"
+        return
     log.info("running e2e suite (e2e/run.sh)")
     passed, output = evidence.run_suite()
     if not passed:
@@ -220,6 +327,10 @@ def do_open_pr(state: dict) -> None:
     state["pr_url"] = match.group(1)
     state["pr_summary"] = result.output  # reused by the "PR ready" email after review passes
     log.info("PR opened: %s", state["pr_url"])
+    if not state.get("has_code_review"):
+        log.info("no Code Review workflow detected for this task; finalizing without a review wait")
+        finalize_pr(state)
+        return
     # Don't notify the user yet: let the OpenCodeReview action run and address its
     # comments first (do_open_pr -> WAIT_REVIEW -> [ADDRESS_REVIEW -> WAIT_REVIEW]* -> WAIT_MERGE).
     state["review_round"] = 0
@@ -334,14 +445,17 @@ def _enter_review_wait(state: dict) -> None:
 
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
-    videos = evidence.record_videos(state.get("e2e_specs", []))
-    log.info("recorded %d evidence video(s) to attach", len(videos))
+    evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
+    log.info("recorded %d evidence file(s) to attach", len(evidence_files))
     body = f"Task: {state['item']}\nPR: {state['pr_url']}\n\n{state.get('pr_summary', '')}\n\n"
     if note:
         body += note + "\n\n"
-    body += ("Attached: a Playwright video (mp4) demonstrating the feature.\n"
-             "Reply with change requests, or tell me to merge.")
-    email(state, "PR ready for review", body, videos)
+    if evidence_files:
+        attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
+                            else "a Playwright video (mp4)")
+        body += f"Attached: {attachment_desc} demonstrating the feature.\n"
+    body += "Reply with change requests, or tell me to merge."
+    email(state, "PR ready for review", body, evidence_files)
     for key in ("review_since", "review_round", "review_run_link",
                 "review_comment_watermark", "review_comments", "pr_summary"):
         state.pop(key, None)
@@ -416,9 +530,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
         if handle_result(state, r, "IMPLEMENTING"):
             return
-        videos = evidence.record_videos(state.get("e2e_specs", []))
+        evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
         email(state, "PR updated",
-              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", videos)
+              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", evidence_files)
         return  # stay in WAIT_MERGE
     # merge
     info = json.loads(subprocess.run(
