@@ -53,12 +53,13 @@ with `ATTACH: <path>` screenshots/videos) and resumes the same session with the 
 Email codebot with a body of exactly `ABORT` (case-insensitive) to force a reset.
 Checked at the start of every tick and mailbox-wide (any thread, or a brand-new
 email), so it works even when the agent is stuck waiting on a thread. On receipt it
-discards the working-tree changes, returns to a clean, up-to-date `main`
-(`git reset --hard` + `checkout -f main` + `clean -fd` + fast-forward to
-`origin/main`), clears all task state, and goes back to IDLE — then emails a
-confirmation. It only touches the **local** checkout: remote branches and PRs are
-left as-is (clean those up on GitHub yourself if needed). The check runs between
-phases, so an abort sent mid-phase takes effect once the current Claude call returns.
+discards the working-tree changes, returns to a clean, up-to-date base branch
+(`git reset --hard` + `checkout -f $CODEBOT_BASE_BRANCH` + `clean -fd` + fast-forward
+to `origin/$CODEBOT_BASE_BRANCH`), clears all task state, and goes back to IDLE —
+then emails a confirmation. It only touches the **local** checkout: remote branches
+and PRs are left as-is (clean those up on GitHub yourself if needed). The check runs
+between phases, so an abort sent mid-phase takes effect once the current Claude call
+returns.
 
 ## Automated code review (WAIT_REVIEW ⇄ ADDRESS_REVIEW)
 
@@ -118,6 +119,9 @@ offers to run the consent flow in step 2 for you.
    CLAUDE_MODEL=claude-opus-4-8
    # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
    CODEBOT_LOG_LEVEL=DEBUG
+   # Optional; defaults to "main" — the trunk branch codebot syncs from, branches off
+   # of, opens PRs against, and resets to on abort
+   CODEBOT_BASE_BRANCH=main
    ```
    (macOS keeps Claude credentials in the Keychain, which the Linux container
    can't read — hence the explicit token.)

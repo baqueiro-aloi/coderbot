@@ -55,10 +55,16 @@
       JSON to `data/credentials.json` and press Enter (checking for the file
       each time), with a `skip` escape hatch.
 - [x] 5.4 Once `data/credentials.json` is present (whether it was already
-      there or just placed during 5.3), run `python3 setup_oauth.py`
-      automatically (installing dependencies first if needed) — no separate
-      yes/no prompt. Report failure/cancellation without aborting the rest of
-      the script.
+      there or just placed during 5.3), run `setup_oauth.py` automatically —
+      no separate yes/no prompt. Report failure/cancellation without
+      aborting the rest of the script.
+- [x] 5.5 Install `setup_oauth.py`'s Python dependencies into a dedicated
+      `.venv` (created on first use via `python3 -m venv`) rather than the
+      system Python, to avoid PEP-668 "externally-managed-environment" pip
+      refusals on modern macOS/Linux; run `setup_oauth.py` with
+      `.venv/bin/python`. If venv creation fails, fall back to `python3 -m
+      pip` / `pip3` / `pip` (each `--user`) against the system Python. Add
+      `.venv/` to `.gitignore`.
 
 ## 6. Writing .env
 
@@ -106,3 +112,14 @@
       pre-existing `data/credentials.json` skips straight to running
       `setup_oauth.py`; confirmed a pre-existing `data/token.json` skips the
       whole section with a note.
+- [x] 8.5 Verified the `.venv` dependency install in isolation: a normal run
+      creates `.venv` and installs into it (confirmed via `pyvenv.cfg` and
+      the resulting interpreter path); a run with `python3 -m venv` stubbed
+      to fail correctly falls back to the system-Python pip chain and leaves
+      no broken `.venv` behind. Caught and fixed a test-harness mistake
+      along the way (a stray `.venv` and an accidental real `pip install
+      --user` attempt landed in the actual coderbot repo, not the test
+      sandbox, when a command lost its intended working directory) —
+      confirmed no packages were actually installed on the real system
+      afterward and removed the stray directory; not a defect in `setup.sh`
+      itself.

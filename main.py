@@ -204,10 +204,10 @@ def do_pick(state: dict) -> None:
               "new task. Clean it up and reply to this email to retry.", new_thread=True)
         state["state"] = "WAIT_CLEAN"
         return
-    # Sync to main before detecting target-repo capabilities and seeding any
-    # self-healing item, so both reflect main's actual current state rather than
+    # Sync to the base branch before detecting target-repo capabilities and seeding
+    # any self-healing item, so both reflect its actual current state rather than
     # whatever branch was last checked out.
-    git("checkout", "main")
+    git("checkout", config.BASE_BRANCH)
     git("pull", "--ff-only")
     _detect_capabilities(state)
     _seed_self_healing_items(state)
@@ -229,7 +229,7 @@ def do_pick(state: dict) -> None:
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
     branch = f"codebot-{choice['slug']}"
     # -B is idempotent: if do_pick is retried after the branch was already created
-    # (state not yet persisted), reset it from main rather than failing on "-b".
+    # (state not yet persisted), reset it from the base branch rather than failing on "-b".
     git("checkout", "-B", branch)
     state["branch"] = branch
     state["state"] = "EXPLORING"
@@ -318,7 +318,8 @@ def do_e2e(state: dict) -> None:
 
 
 def do_open_pr(state: dict) -> None:
-    result = claude_runner.resume(state["session_id"], prompts.render(prompts.PR_BODY, branch=state["branch"]))
+    result = claude_runner.resume(state["session_id"], prompts.render(
+        prompts.PR_BODY, branch=state["branch"], base_branch=config.BASE_BRANCH))
     if handle_result(state, result, "IMPLEMENTING"):
         return
     match = re.search(r"PR_URL:\s*(\S+)", result.output)
@@ -542,25 +543,29 @@ def do_merge_reply(state: dict, reply: str) -> None:
     log.info("PR state=%s mergeable=%s before merge", pr_state, mergeable)
     if pr_state != "MERGED":
         if mergeable == "CONFLICTING":
-            # Main moved ahead and the branch no longer merges cleanly. Never force it:
-            # ask the user to resolve, then reply 'merge' to retry (which re-enters here).
-            log.warning("PR %s conflicts with main; asking user to resolve", state["pr_url"])
+            # The base branch moved ahead and the branch no longer merges cleanly. Never
+            # force it: ask the user to resolve, then reply 'merge' to retry (which
+            # re-enters here).
+            log.warning("PR %s conflicts with %s; asking user to resolve",
+                        state["pr_url"], config.BASE_BRANCH)
             email(state, "merge conflict — needs your help",
-                  f"Main has changed and this PR now conflicts with it, so I can't merge it "
-                  f"automatically.\nPR: {state['pr_url']}\n\nPlease resolve the conflicts on the "
-                  "branch (merge or rebase main in and push), then reply 'merge' to continue.")
+                  f"{config.BASE_BRANCH} has changed and this PR now conflicts with it, so I "
+                  f"can't merge it automatically.\nPR: {state['pr_url']}\n\nPlease resolve the "
+                  f"conflicts on the branch (merge or rebase {config.BASE_BRANCH} in and push), "
+                  "then reply 'merge' to continue.")
             return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash)", state["pr_url"])
         merge = subprocess.run(["gh", "pr", "merge", state["pr_url"], "--squash"],
                                cwd=config.REPO_PATH, capture_output=True, text=True)
         if merge.returncode != 0:
-            # A late-breaking conflict or other GitHub rejection (e.g. branch behind main).
-            # Don't crash into the retry loop — surface it and wait for the user to fix it.
+            # A late-breaking conflict or other GitHub rejection (e.g. branch behind the
+            # base branch). Don't crash into the retry loop — surface it and wait for the
+            # user to fix it.
             log.warning("gh pr merge failed (%d): %s", merge.returncode, merge.stderr.strip())
             email(state, "merge failed — needs your help",
                   f"I couldn't merge the PR; GitHub reported:\n\n{merge.stderr.strip()}\n\n"
-                  f"PR: {state['pr_url']}\n\nThis usually means main moved ahead or there are "
-                  "conflicts. Please resolve it on the branch and reply 'merge' to retry.")
+                  f"PR: {state['pr_url']}\n\nThis usually means {config.BASE_BRANCH} moved ahead "
+                  "or there are conflicts. Please resolve it on the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
     if gdoc_client.mark_done(state["item"]):
         log.info("struck item through in backlog doc; task complete")
@@ -617,26 +622,26 @@ def _git_quiet(*args: str) -> bool:
     return proc.returncode == 0
 
 
-def _reset_to_main() -> list[str]:
+def _reset_to_base_branch() -> list[str]:
     """Best-effort LOCAL reset: abort any half-finished git op, discard changes, land on a
-    clean, up-to-date main. Never touches remote branches or PRs. Returns notes about any
-    step that left the tree unclean (empty list when fully clean)."""
+    clean, up-to-date base branch. Never touches remote branches or PRs. Returns notes about
+    any step that left the tree unclean (empty list when fully clean)."""
     # Abort a half-finished operation, if any (each no-ops harmlessly when none is active).
     for op in (("merge", "--abort"), ("rebase", "--abort"),
                ("cherry-pick", "--abort"), ("am", "--abort")):
         _git_quiet(*op)
-    _git_quiet("reset", "--hard")          # drop staged/unstaged tracked changes
-    _git_quiet("checkout", "-f", "main")   # leave whatever codebot branch we were on
+    _git_quiet("reset", "--hard")                            # drop staged/unstaged tracked changes
+    _git_quiet("checkout", "-f", config.BASE_BRANCH)         # leave whatever codebot branch we were on
     _git_quiet("clean", "-fd")             # drop untracked files; .gitignore (data/, .env) is kept
-    # Branches may have merged/moved while we were away: fast-forward local main to the
-    # remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
-    if _git_quiet("fetch", "origin", "main"):
-        _git_quiet("reset", "--hard", "origin/main")
+    # Branches may have merged/moved while we were away: fast-forward the local base branch to
+    # the remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
+    if _git_quiet("fetch", "origin", config.BASE_BRANCH):
+        _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
     problems = []
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             cwd=config.REPO_PATH, capture_output=True, text=True).stdout.strip()
-    if branch != "main":
-        problems.append(f"could not switch to main (still on {branch or 'unknown'})")
+    if branch != config.BASE_BRANCH:
+        problems.append(f"could not switch to {config.BASE_BRANCH} (still on {branch or 'unknown'})")
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
                            cwd=config.REPO_PATH, capture_output=True, text=True).stdout.strip()
     if dirty:
@@ -665,13 +670,13 @@ def check_abort(state: dict) -> bool:
     aborted_task = state.get("item", "-")
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
-    problems = _reset_to_main()
+    problems = _reset_to_base_branch()
     for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
                 "return_state", "review_since", "review_round", "review_run_link",
                 "review_comment_watermark", "review_comments", "pr_summary"):
         state.pop(key, None)
     state["state"] = "IDLE"
-    status = ("The working tree was reset to a clean, up-to-date `main`." if not problems
+    status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
               else "The reset finished with issues (I'll re-check the tree before starting the "
                    "next task):\n- " + "\n- ".join(problems))
     email(state, "aborted — reset to IDLE",

@@ -15,6 +15,11 @@ REPO_PATH = Path(os.environ.get("CODEBOT_REPO_PATH") or "/unset-CODEBOT_REPO_PAT
 # Human-readable project name used in prompts; defaults to the repo dir name.
 PROJECT_NAME = os.environ.get("CODEBOT_PROJECT_NAME") or REPO_PATH.name
 
+# Branch codebot syncs from before picking a task, branches feature work off of, opens
+# PRs against, and resets to on abort. Defaults to "main" for repos that use it as their
+# trunk; set to "develop" or similar for repos with a different trunk convention.
+BASE_BRANCH = os.environ.get("CODEBOT_BASE_BRANCH") or "main"
+
 # `or` (not a get-default) so an empty env value from .env still falls back,
 # rather than passing --model "" to the claude CLI.
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-opus-4-8"

@@ -18,14 +18,15 @@ _SPEC_GLOBS = {
 
 
 def detect_branch_specs(kind: str | None) -> list[str]:
-    """Spec/collection files added/changed on this branch vs main (fallback for evidence).
+    """Spec/collection files added/changed on this branch vs the base branch (fallback
+    for evidence).
 
     Used when the implementation output never reported E2E_SPEC lines, so the
     evidence step still records evidence from the feature's own e2e tests instead
     of silently producing nothing.
     """
     glob = _SPEC_GLOBS.get(kind, _SPEC_GLOBS["playwright"])
-    for base in ("origin/main", "main"):
+    for base in (f"origin/{config.BASE_BRANCH}", config.BASE_BRANCH):
         proc = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=d", f"{base}...HEAD", "--", glob],
             cwd=config.REPO_PATH, capture_output=True, text=True,
@@ -35,7 +36,7 @@ def detect_branch_specs(kind: str | None) -> list[str]:
             if specs:
                 log.info("detect_branch_specs: %d spec(s) vs %s: %s", len(specs), base, specs)
             return specs
-    log.warning("detect_branch_specs: could not diff against main")
+    log.warning("detect_branch_specs: could not diff against %s", config.BASE_BRANCH)
     return []
 
 

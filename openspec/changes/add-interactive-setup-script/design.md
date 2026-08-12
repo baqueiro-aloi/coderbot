@@ -97,6 +97,19 @@ existing external commands this script shells out to, not code it duplicates.
   user already explicitly confirmed placing the file two prompts earlier;
   asking again would be redundant. Its failure is caught and reported as a
   note rather than aborting the rest of the script (see Risks).
+- **Python dependencies for `setup_oauth.py` install into a dedicated
+  `.venv`, not the system Python.** Modern macOS (Homebrew) and many Linux
+  distros mark their system Python as "externally managed" (PEP 668) and
+  refuse a bare `pip install`; a venv is never externally-managed, so this
+  sidesteps that failure mode entirely rather than trying to detect and work
+  around it. `setup.sh` creates `.venv` on first use (`python3 -m venv
+  .venv`) and runs `setup_oauth.py` with `.venv/bin/python`. If venv creation
+  itself fails (e.g. a minimal Python install without the `venv` module,
+  such as Debian's `python3-minimal`), it falls back to trying `python3 -m
+  pip`, then `pip3`, then `pip`, each with `--user`, against the system
+  Python — best-effort, matching the existing gh/git-config default
+  pattern, since at that point there's no better option to offer. `.venv/`
+  is added to `.gitignore`.
 - **`data/token.json` presence short-circuits the entire OAuth section.**
   Reuses `config.TOKEN_PATH` conceptually (same relative-path reasoning as
   `CREDENTIALS_PATH`). Re-running `setup.sh` after OAuth is already done
@@ -124,8 +137,15 @@ existing external commands this script shells out to, not code it duplicates.
   change (no automatic pruning).
 - [`setup_oauth.py` fails or is cancelled mid-flow (e.g. the user closes the
   consent browser tab)] → The script reports it and tells the user how to
-  retry (`python3 setup_oauth.py`) rather than aborting setup entirely — the
+  retry (`.venv/bin/python setup_oauth.py` or `python3 setup_oauth.py`,
+  whichever interpreter was used) rather than aborting setup entirely — the
   `.env` values (or the decision to keep them) are unaffected either way.
+- [`python3 -m venv` itself fails, and the system-Python fallback's `pip
+  install --user` also fails (e.g. genuinely offline, or a PEP-668-locked
+  system Python with no venv module either)] → All three fallback attempts
+  are tried before giving up; if all fail, the script prints the exact
+  manual recovery command (create the venv and install into it, or fix pip)
+  and continues without aborting the rest of setup.
 - [The Cloud Console UI changes its flow/URLs over time] → The deep links
   used (project selector, per-API library pages, credentials page) are
   Google's own stable, documented console URLs, not scraped or versioned;

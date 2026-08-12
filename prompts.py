@@ -78,7 +78,7 @@ FIX_E2E = """The e2e suite failed. Fix the issues and re-commit. Failure output:
 $output
 """
 
-PR_BODY = """Create a pull request for the current branch $branch against main using
+PR_BODY = """Create a pull request for the current branch $branch against $base_branch using
 `gh pr create` (push the branch first). Title it after the improvement; write a clear
 body describing the change, the e2e coverage added, and link the openspec change.
 End your response with the PR URL on its own line prefixed with `PR_URL: `.

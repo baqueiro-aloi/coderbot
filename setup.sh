@@ -79,6 +79,47 @@ open_url() {
   fi
 }
 
+VENV_DIR=".venv"
+PYTHON_BIN="python3"
+
+# ensure_oauth_deps: install requirements.txt into an isolated venv ($VENV_DIR),
+# sets PYTHON_BIN to the interpreter to run setup_oauth.py with. A venv sidesteps
+# "externally-managed-environment" pip refusals on modern macOS/Linux system
+# Pythons. Falls back to installing against the system python3 (pip3/pip/`python3
+# -m pip`, whichever works) only if creating the venv itself isn't possible.
+# Returns non-zero only if every strategy failed.
+ensure_oauth_deps() {
+  if [ ! -x "$VENV_DIR/bin/python" ]; then
+    echo "Creating a Python virtual environment for codebot's host-side dependencies ($VENV_DIR)..."
+    if ! python3 -m venv "$VENV_DIR" >/dev/null 2>&1; then
+      echo "  -> could not create $VENV_DIR; falling back to the system python3." >&2
+      rm -rf "$VENV_DIR"
+    fi
+  fi
+
+  if [ -x "$VENV_DIR/bin/python" ]; then
+    PYTHON_BIN="$VENV_DIR/bin/python"
+    echo "Installing Python dependencies into $VENV_DIR..."
+    if "$PYTHON_BIN" -m pip install -r requirements.txt >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "  -> pip install into $VENV_DIR failed." >&2
+  fi
+
+  PYTHON_BIN="python3"
+  echo "Installing Python dependencies for the system python3..."
+  if python3 -m pip --version >/dev/null 2>&1 && python3 -m pip install --user -r requirements.txt >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pip3 >/dev/null 2>&1 && pip3 install --user -r requirements.txt >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v pip >/dev/null 2>&1 && pip install --user -r requirements.txt >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 # ---------------------------------------------------------------- bulk reuse
 
 if [ "$HAS_EXISTING_ENV" = "yes" ]; then
@@ -173,6 +214,10 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     "Optional: Claude model codebot uses for its working sessions." \
     "claude-opus-4-8")
 
+  CODEBOT_BASE_BRANCH=$(prompt_var "CODEBOT_BASE_BRANCH" \
+    "Optional: the branch codebot treats as the trunk — it syncs from this branch before picking a task, branches feature work off of it, opens PRs against it, and resets to it on abort." \
+    "main")
+
   CODEBOT_LOG_LEVEL=$(prompt_var "CODEBOT_LOG_LEVEL" \
     "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
     "DEBUG")
@@ -229,12 +274,16 @@ else
 
   if [ -f "$CREDENTIALS_PATH" ]; then
     echo
-    echo "Running the consent flow (python3 setup_oauth.py) — one more browser window will open to sign in and grant access."
-    if ! python3 -c "import google_auth_oauthlib" >/dev/null 2>&1; then
-      echo "Installing Python dependencies (pip install -r requirements.txt)..."
-      pip install -r requirements.txt || echo "  -> pip install failed; install dependencies yourself and re-run: python3 setup_oauth.py"
+    echo "Running the consent flow — one more browser window will open to sign in and grant access."
+    if ensure_oauth_deps; then
+      "$PYTHON_BIN" setup_oauth.py || echo "  -> setup_oauth.py did not complete; re-run it yourself once ready: $PYTHON_BIN setup_oauth.py"
+    else
+      cat <<MSG
+  -> could not install Python dependencies automatically. Install them yourself, e.g.:
+       python3 -m venv $VENV_DIR && $VENV_DIR/bin/python -m pip install -r requirements.txt
+     then run: $VENV_DIR/bin/python setup_oauth.py
+MSG
     fi
-    python3 setup_oauth.py || echo "  -> setup_oauth.py did not complete; re-run it yourself once ready: python3 setup_oauth.py"
   fi
 fi
 
@@ -272,13 +321,15 @@ CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN
 CLAUDE_MODEL=$CLAUDE_MODEL
 CODEBOT_USER_EMAIL=$CODEBOT_USER_EMAIL
 CODEBOT_LOG_LEVEL=$CODEBOT_LOG_LEVEL
+CODEBOT_BASE_BRANCH=$CODEBOT_BASE_BRANCH
 EOF
   chmod 600 "$ENV_FILE"
 
   echo
   echo "Wrote $ENV_FILE with:"
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
-    GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL; do
+    GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL \
+    CODEBOT_BASE_BRANCH; do
     echo "  - $var"
   done
 fi
