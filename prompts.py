@@ -71,7 +71,9 @@ IMPLEMENT = """The user approved the proposal. Implement the openspec change $sl
 fully (the /opsx:apply workflow): work through every task in tasks.md, marking them
 complete. Mandatory:
 $e2e_note
-- Commit your work on branch $branch with clear messages. Do NOT push yet.
+- Commit your work on branch $branch with clear messages. Do NOT push yet. Do not
+  commit any evidence file (screenshot, recording, report) — those are emailed, never
+  committed to the repo (see the evidence contract above).
 $e2e_report_note
 """
 
@@ -96,8 +98,9 @@ For each comment: if it points to a genuine problem, fix it properly. If it is a
 false positive or not worth acting on, do NOT change code just to silence it — briefly
 note why you're leaving it. Keep the Playwright e2e tests passing and updated. Commit
 your changes on branch $branch with clear messages and push (the reviewer re-runs on
-the new commit). End with a short summary of what you changed and what you left as-is
-and why.
+the new commit). Do not commit any evidence file (screenshot, recording, report) —
+those are emailed, never committed to the repo (see the evidence contract above). End
+with a short summary of what you changed and what you left as-is and why.
 """
 
 CLASSIFY_PR_REPLY = """The user replied to the pull-request review email with:
@@ -122,8 +125,23 @@ $threads
 For each: if it points to a genuine problem, fix it properly. If it is not worth acting
 on, leave a brief reply explaining why (e.g. via `gh pr comment` or a reply on the
 thread) rather than silently ignoring it. Keep e2e tests passing and updated. Commit
-your changes on branch $branch with clear messages and push. End with a short summary
-of what you changed and how each thread was addressed.
+your changes on branch $branch with clear messages and push. Do not commit any
+evidence file (screenshot, recording, report) — those are emailed, never committed to
+the repo (see the evidence contract above). End with a short summary of what you
+changed and how each thread was addressed.
+"""
+
+REMOVE_EVIDENCE_FROM_REPO = """You committed evidence file(s) directly into the repo on
+branch $branch — that must never happen; evidence belongs in an email, not the git
+history:
+
+$paths
+
+For each one: remove it from git (`git rm` it, or `git rm --cached` if you want to keep
+the local file), commit the removal, and push. Then save the file(s) under
+$outbox_dir/ instead and list each one's ABSOLUTE path on its own line starting with
+`ATTACH: ` in your response, so it can be attached to the email. End with a short
+confirmation of what was removed and re-attached.
 """
 
 APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
@@ -131,5 +149,8 @@ APPLY_PR_FEEDBACK = """The user reviewed the PR and requested changes:
     $feedback
 
 Apply the requested changes on branch $branch, keep e2e tests passing and updated,
-commit and push. End with a summary of what changed.
+commit and push. If the feedback asks you to "attach" or "provide" evidence (a
+screenshot, recording, report, etc.), that means emailing it, NOT committing it to the
+repo — save it under the outbox dir and list it via an `ATTACH:` line as instructed
+above; do not add it to the branch/PR. End with a summary of what changed.
 """

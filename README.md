@@ -53,6 +53,13 @@ Any phase can detour through WAIT_REPLY: if Claude needs the user, it ends its
 output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
 with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
 
+Evidence (screenshots, recordings, reports) is always routed to email via that same
+`ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
+committed to the target repo. Every resumed turn restates this rule, and as a
+safety net, any phase that commits+pushes checks the branch's diff for
+evidence-looking files (video extensions, or paths naming "evidence"/"recording")
+and has Claude remove and re-route them via email if it finds any.
+
 ## Abort / reset (last resort)
 
 Email codebot with a body of exactly `ABORT` (case-insensitive) to force a reset.

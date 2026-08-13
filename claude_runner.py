@@ -18,16 +18,24 @@ SENTINEL = "NEED_USER_INPUT:"
 # the outbox must be referenced by absolute path.
 OUTBOX_DIR = (config.DATA_DIR / "outbox").resolve()
 
+EVIDENCE_CONTRACT = f"""
+Evidence files (screenshots, screen recordings, videos, test/run reports) must NEVER
+be committed to the git repo, added to a branch, or pushed as part of a PR — the repo
+is for application and test code only, never for recorded proof. Whenever you produce
+evidence, or the user asks you to "attach" evidence, save the file(s) under
+{OUTBOX_DIR}/ and list each one's ABSOLUTE path on its own line starting with
+`ATTACH: ` in your response; codebot attaches them to the relevant email itself. This
+applies in every phase (implementing, addressing review feedback, answering a
+question) — not only when you use the NEED_USER_INPUT mechanism below.
+"""
+
 SENTINEL_CONTRACT = f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`
 followed by the full question and all context needed to answer it by email,
 then stop working. Otherwise finish the work and summarize what you did.
-If a question is about visible UI behavior and a screenshot or short video would
-help, save the file(s) under {OUTBOX_DIR}/ and list each one's ABSOLUTE path on
-its own line starting with `ATTACH: ` before the {SENTINEL} line.
-
+{EVIDENCE_CONTRACT}
 Each of your turns is a brand-new, one-shot headless process: nothing monitors
 this session between invocations. If you start a background process (including
 via the Bash tool's run_in_background), it is orphaned the moment this turn
@@ -146,4 +154,8 @@ def run(prompt: str) -> ClaudeResult:
 
 
 def resume(session_id: str, prompt: str) -> ClaudeResult:
-    return _invoke(["--resume", session_id], prompt)
+    # Re-state the evidence rule on every resumed turn, not just the task's first
+    # run(): each phase is a fresh headless process resuming old conversation history,
+    # and a prompt several turns back (e.g. "attach the evidence file") is easy for the
+    # model to reinterpret as "commit it" without this reminder at the decision point.
+    return _invoke(["--resume", session_id], EVIDENCE_CONTRACT + "\n\n" + prompt)

@@ -97,6 +97,45 @@ def handle_result(state: dict, result: claude_runner.ClaudeResult, phase: str) -
     return False
 
 
+# Video extensions are the strongest signal on their own (repos essentially never
+# legitimately commit one); other hints only count against a path that also names an
+# evidence-ish directory/filename, to avoid flagging ordinary repo images/reports.
+_EVIDENCE_EXTENSIONS = (".mp4", ".mov", ".webm", ".avi", ".mkv")
+_EVIDENCE_PATH_HINTS = ("evidence", "recording")
+
+
+def _looks_like_evidence(path: str) -> bool:
+    lower = path.lower()
+    return lower.endswith(_EVIDENCE_EXTENSIONS) or any(h in lower for h in _EVIDENCE_PATH_HINTS)
+
+
+def _branch_evidence_paths(branch: str, base_branch: str) -> list[str]:
+    """Files added/changed on `branch` since it diverged from `base_branch` that look
+    like recorded test evidence rather than application code — these must never be
+    committed, only emailed (see claude_runner.EVIDENCE_CONTRACT)."""
+    diff = git("diff", "--name-only", f"{base_branch}...{branch}")
+    return [p for p in diff.splitlines() if _looks_like_evidence(p)]
+
+
+def _scrub_evidence_from_repo(state: dict, phase: str) -> list[Path] | None:
+    """Safety net for when the prompt-level rule against committing evidence still gets
+    missed: if evidence-looking files were committed to the branch, have the working
+    session remove them from git and re-route them through ATTACH:/email instead.
+    Returns extra attachment paths from that corrective turn (possibly empty), or None
+    if it asked the user a question instead (caller should treat like handle_result)."""
+    paths = _branch_evidence_paths(state["branch"], config.BASE_BRANCH)
+    if not paths:
+        return []
+    log.warning("[%s] evidence-looking file(s) were committed to the repo; asking "
+                "Claude to remove them and re-route via email instead: %s", phase, paths)
+    result = claude_runner.resume(state["session_id"], prompts.render(
+        prompts.REMOVE_EVIDENCE_FROM_REPO, branch=state["branch"],
+        paths="\n".join(f"- {p}" for p in paths), outbox_dir=str(claude_runner.OUTBOX_DIR)))
+    if handle_result(state, result, phase):
+        return None
+    return [Path(p) for p in result.attachments]
+
+
 def _collect_attachments(result: claude_runner.ClaudeResult, e2e_specs: list[str],
                           e2e_kind: str | None) -> list[Path]:
     """Files to attach to a post-task email: whatever Claude explicitly pointed to via
@@ -340,6 +379,8 @@ def do_implement(state: dict) -> None:
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
     if handle_result(state, result, "IMPLEMENTING"):
         return
+    if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
+        return
     state["e2e_specs"] = [
         line[len("E2E_SPEC:"):].strip()
         for line in result.output.splitlines() if line.startswith("E2E_SPEC:")
@@ -581,6 +622,8 @@ def do_address_review(state: dict) -> None:
         prompts.render(prompts.ADDRESS_REVIEW, comments=rendered, branch=state["branch"]))
     if handle_result(state, result, "ADDRESS_REVIEW"):
         return
+    if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
+        return
     state.pop("review_comments", None)
     _enter_review_wait(state)  # the push re-triggers Code Review on the new commit
 
@@ -685,7 +728,11 @@ def do_merge_reply(state: dict, reply: str) -> None:
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
         if handle_result(state, r, "IMPLEMENTING"):
             return
+        extra_attachments = _scrub_evidence_from_repo(state, "IMPLEMENTING")
+        if extra_attachments is None:
+            return
         attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
+        attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
         email(state, "PR updated",
               f"Applied your feedback.\nPR: {state['pr_url']}\n\n{r.output}", attachments)
         return  # stay in WAIT_MERGE
@@ -754,6 +801,8 @@ def do_address_pr_threads(state: dict) -> None:
         prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
                        branch=state["branch"]))
     if handle_result(state, result, "ADDRESS_PR_THREADS"):
+        return
+    if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
     _finish_address_pr_threads(state)
 
