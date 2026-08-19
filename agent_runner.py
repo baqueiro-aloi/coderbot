@@ -12,6 +12,13 @@ SENTINEL = claude_runner.SENTINEL
 OUTBOX_DIR = claude_runner.OUTBOX_DIR
 EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 
+_SESSION_RECOVERY_CONTEXT = """
+The previous OpenCode session is unavailable. Continue this task autonomously from
+the repository's current branch and working tree. Reconstruct any needed context
+from the OpenSpec change artifacts and git history before acting; do not ask the
+user to repeat information that is available there.
+"""
+
 
 class OpenCodeResult:
     def __init__(self, session_id: str, output: str):
@@ -79,5 +86,14 @@ def resume(session_id: str, prompt: str):
     if config.AGENT == "claude":
         return claude_runner.resume(session_id, prompt)
     if config.AGENT == "opencode":
-        return _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
+        try:
+            return _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
+        except RuntimeError as err:
+            if "Session not found" not in str(err):
+                raise
+            # Sessions can be lost when an in-flight task changes agents or OpenCode's
+            # local store is reset. The task artifacts and branch remain authoritative.
+            log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
+            return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
+                             _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
     raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")

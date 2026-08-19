@@ -42,6 +42,28 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertIn("--session", command)
         self.assertEqual(command[command.index("--session") + 1], "ses_123")
 
+    def test_resume_recovers_from_missing_session(self):
+        missing = subprocess.CompletedProcess([], 1, "", "Error: Session not found")
+        recovered = subprocess.CompletedProcess(
+            [], 0, '{"type":"text","sessionID":"ses_new","part":{"text":"done"}}', "")
+        with patch.object(agent_runner.config, "AGENT", "opencode"), \
+             patch("agent_runner.subprocess.run", side_effect=[missing, recovered]) as run:
+            result = agent_runner.resume("ses_missing", "continue")
+        self.assertEqual(result.session_id, "ses_new")
+        first_command = run.call_args_list[0].args[0]
+        second_command = run.call_args_list[1].args[0]
+        self.assertIn("--session", first_command)
+        self.assertNotIn("--session", second_command)
+        self.assertIn("previous OpenCode session is unavailable", second_command[-1])
+
+    def test_resume_does_not_recover_from_other_errors(self):
+        failed = subprocess.CompletedProcess([], 1, "", "Error: authentication failed")
+        with patch.object(agent_runner.config, "AGENT", "opencode"), \
+             patch("agent_runner.subprocess.run", return_value=failed) as run:
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                agent_runner.resume("ses_123", "continue")
+        self.assertEqual(run.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
