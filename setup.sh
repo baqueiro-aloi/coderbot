@@ -9,7 +9,6 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE=".env"
 CREDENTIALS_PATH="data/credentials.json"
 TOKEN_PATH="data/token.json"
-OPENCODE_HOME="$(pwd)/data/opencode"
 OPENCODE_VERSION="1.18.18"
 HAS_EXISTING_ENV="no"
 KEEP_EXISTING_ENV="no"
@@ -32,6 +31,53 @@ existing_value() {
     "$var"=*) printf '%s' "${line#"$var"=}" ;;
     esac
   done <"$ENV_FILE"
+}
+
+# print_current_settings: show the configuration a review will start from
+# without ever exposing credentials in the terminal.
+print_current_settings() {
+  local var value
+  echo "Current non-secret settings:"
+  for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GIT_AUTHOR_NAME \
+    GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_MODEL OPENCODE_PROVIDER OPENCODE_MODEL \
+    CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_BASE_BRANCH; do
+    value="$(existing_value "$var")"
+    if [ -n "$value" ]; then
+      echo "  - $var=$value"
+    else
+      echo "  - $var=(not set)"
+    fi
+  done
+  for var in GH_TOKEN CLAUDE_CODE_OAUTH_TOKEN CLAUDE_API_KEY; do
+    if [ -n "$(existing_value "$var")" ]; then
+      echo "  - $var=(set; value hidden)"
+    else
+      echo "  - $var=(not set)"
+    fi
+  done
+}
+
+# prepare_env_write: require the user to approve replacing an existing .env
+# before interactive authentication can create or update credentials.
+prepare_env_write() {
+  local backup n confirm
+  [ "$HAS_EXISTING_ENV" = "yes" ] || return 0
+
+  backup="$ENV_FILE.bak.1"
+  n=1
+  while [ -e "$backup" ]; do
+    n=$((n + 1))
+    backup="$ENV_FILE.bak.$n"
+  done
+
+  echo
+  read -r -p "$ENV_FILE will be replaced. Back it up to $backup and continue? [y/N] " confirm
+  if [[ ! "$confirm" =~ ^[Yy] ]]; then
+    echo "Aborted — $ENV_FILE was left unchanged."
+    exit 1
+  fi
+  cp "$ENV_FILE" "$backup"
+  echo "Backed up existing $ENV_FILE to $backup."
 }
 
 # prompt_var VAR "explanation" "default" [secret: yes/no]
@@ -122,44 +168,40 @@ ensure_oauth_deps() {
   return 1
 }
 
-# Keep interactive OpenCode credentials inside Codebot's ignored data directory
-# so the container can use them without mounting the host user's global config.
+# Run OpenCode in Codebot's image. Its credentials are written through the
+# bind-mounted /app/data directory, never to the host user's OpenCode config.
 run_opencode() {
-  XDG_DATA_HOME="$OPENCODE_HOME/data" XDG_CONFIG_HOME="$OPENCODE_HOME/config" \
-    XDG_CACHE_HOME="$OPENCODE_HOME/cache" XDG_STATE_HOME="$OPENCODE_HOME/state" \
-    opencode "$@"
+  docker compose run --rm --no-deps \
+    --entrypoint opencode \
+    -e XDG_DATA_HOME=/app/data/opencode/data \
+    -e XDG_CONFIG_HOME=/app/data/opencode/config \
+    -e XDG_CACHE_HOME=/app/data/opencode/cache \
+    -e XDG_STATE_HOME=/app/data/opencode/state \
+    codebot "$@"
 }
 
 ensure_opencode() {
-  local installed_opencode
-  if command -v opencode >/dev/null 2>&1; then
-    installed_opencode="$(opencode --version 2>/dev/null || true)"
-    if [ "$installed_opencode" = "$OPENCODE_VERSION" ]; then
-      return 0
-    fi
-    echo "OpenCode $OPENCODE_VERSION is required (found ${installed_opencode:-an unreadable version})."
-  fi
-  echo "OpenCode is needed for its interactive provider login flow."
-  read -r -p "Install it now with 'npm install -g opencode-ai@$OPENCODE_VERSION'? [Y/n] " install_opencode
-  if [[ "$install_opencode" =~ ^[Nn] ]]; then
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "  -> Docker Compose is required to run OpenCode authentication in the Codebot image." >&2
     return 1
   fi
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "  -> npm is required to install OpenCode. Install Node.js/npm, then run: npm install -g opencode-ai@$OPENCODE_VERSION" >&2
-    return 1
-  fi
-  npm install -g "opencode-ai@$OPENCODE_VERSION"
+  echo "Building the Codebot image with OpenCode $OPENCODE_VERSION..."
+  docker compose build codebot
 }
 
-# ---------------------------------------------------------------- bulk reuse
+# ------------------------------------------------ existing configuration
 
 if [ "$HAS_EXISTING_ENV" = "yes" ]; then
   echo
   echo "Found an existing $ENV_FILE."
-  read -r -p "Keep it as-is and skip the questions below? [Y/n] " keep_answer
-  if [[ ! "$keep_answer" =~ ^[Nn] ]]; then
+  print_current_settings
+  echo "Press Enter at a prompt to keep its current value."
+  read -r -p "Review and modify these settings? [Y/n] " review_answer
+  if [[ "$review_answer" =~ ^[Nn] ]]; then
     KEEP_EXISTING_ENV="yes"
     echo "Keeping $ENV_FILE unchanged."
+  else
+    prepare_env_write
   fi
 fi
 
@@ -240,7 +282,7 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
       "" "yes")
   else
     if ! ensure_opencode; then
-      echo "OpenCode setup cannot continue without the opencode CLI." >&2
+      echo "OpenCode setup cannot continue until the Codebot image can be built." >&2
       exit 1
     fi
     while true; do
@@ -250,8 +292,7 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
       [ -n "$OPENCODE_PROVIDER" ] && break
       echo "  -> a provider ID is required." >&2
     done
-    echo "Starting OpenCode authentication for '$OPENCODE_PROVIDER'. Complete any browser or device-code flow, then return here."
-    mkdir -p "$OPENCODE_HOME"
+    echo "Starting OpenCode authentication for '$OPENCODE_PROVIDER' in the Codebot container. Complete any browser or device-code flow, then return here."
     run_opencode auth login --provider "$OPENCODE_PROVIDER"
     if ! run_opencode auth list | grep -qi "$OPENCODE_PROVIDER"; then
       echo "  -> OpenCode did not report an authenticated '$OPENCODE_PROVIDER' provider." >&2
@@ -379,23 +420,6 @@ if [ "$KEEP_EXISTING_ENV" = "yes" ]; then
   echo
   echo "$ENV_FILE was left unchanged."
 else
-  if [ -f "$ENV_FILE" ]; then
-    backup="$ENV_FILE.bak.1"
-    n=1
-    while [ -e "$backup" ]; do
-      n=$((n + 1))
-      backup="$ENV_FILE.bak.$n"
-    done
-    echo
-    read -r -p "$ENV_FILE already exists. Back it up to $backup and overwrite? [y/N] " confirm
-    if [[ ! "$confirm" =~ ^[Yy] ]]; then
-      echo "Aborted — $ENV_FILE was left unchanged."
-      exit 1
-    fi
-    cp "$ENV_FILE" "$backup"
-    echo "Backed up existing $ENV_FILE to $backup."
-  fi
-
   cat >"$ENV_FILE" <<EOF
 CODEBOT_REPO_PATH=$CODEBOT_REPO_PATH
 CODEBOT_DOC_ID=$CODEBOT_DOC_ID

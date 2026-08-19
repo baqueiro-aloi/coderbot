@@ -92,7 +92,10 @@ case it emails anyway with a note about the unresolved review.
 **Recommended**: from the coderbot repo root, run the guided setup script. It
 walks through every value below, explains what it is and where to get it,
 pre-fills defaults where discoverable (git config, an authenticated `gh` CLI,
-an existing `.env`), validates what it can, and writes `.env` for you:
+an existing `.env`), validates what it can, and writes `.env` for you. Re-run
+it whenever you need to reconfigure codebot, such as switching from Claude Code
+to OpenCode: it shows the current non-secret settings and lets you keep or
+change each one:
 
 ```bash
 ./setup.sh
@@ -151,9 +154,10 @@ offers to run the consent flow in step 2 for you.
 </details>
 
 4. **Coding-agent authentication**: Claude Code uses the host's `~/.claude` and
-   `~/.claude.json`. OpenCode authentication is completed by `setup.sh` and stored
-   privately under `data/opencode/`; this includes browser and device-code provider
-   flows. Git pushes use HTTPS with `GH_TOKEN` (no SSH needed).
+   `~/.claude.json`. OpenCode is installed in the Codebot Docker image; `setup.sh`
+   runs its authentication flow there and stores credentials privately under
+   `data/opencode/`. This includes browser and device-code provider flows. Git pushes
+   use HTTPS with `GH_TOKEN` (no SSH needed).
 
 ## Run
 
