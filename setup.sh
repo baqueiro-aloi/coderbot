@@ -9,6 +9,8 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE=".env"
 CREDENTIALS_PATH="data/credentials.json"
 TOKEN_PATH="data/token.json"
+OPENCODE_HOME="$(pwd)/data/opencode"
+OPENCODE_VERSION="1.18.18"
 HAS_EXISTING_ENV="no"
 KEEP_EXISTING_ENV="no"
 
@@ -120,6 +122,35 @@ ensure_oauth_deps() {
   return 1
 }
 
+# Keep interactive OpenCode credentials inside Codebot's ignored data directory
+# so the container can use them without mounting the host user's global config.
+run_opencode() {
+  XDG_DATA_HOME="$OPENCODE_HOME/data" XDG_CONFIG_HOME="$OPENCODE_HOME/config" \
+    XDG_CACHE_HOME="$OPENCODE_HOME/cache" XDG_STATE_HOME="$OPENCODE_HOME/state" \
+    opencode "$@"
+}
+
+ensure_opencode() {
+  local installed_opencode
+  if command -v opencode >/dev/null 2>&1; then
+    installed_opencode="$(opencode --version 2>/dev/null || true)"
+    if [ "$installed_opencode" = "$OPENCODE_VERSION" ]; then
+      return 0
+    fi
+    echo "OpenCode $OPENCODE_VERSION is required (found ${installed_opencode:-an unreadable version})."
+  fi
+  echo "OpenCode is needed for its interactive provider login flow."
+  read -r -p "Install it now with 'npm install -g opencode-ai@$OPENCODE_VERSION'? [Y/n] " install_opencode
+  if [[ "$install_opencode" =~ ^[Nn] ]]; then
+    return 1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "  -> npm is required to install OpenCode. Install Node.js/npm, then run: npm install -g opencode-ai@$OPENCODE_VERSION" >&2
+    return 1
+  fi
+  npm install -g "opencode-ai@$OPENCODE_VERSION"
+}
+
 # ---------------------------------------------------------------- bulk reuse
 
 if [ "$HAS_EXISTING_ENV" = "yes" ]; then
@@ -189,9 +220,55 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     "GitHub personal access token with 'repo' scope; used for git pushes over HTTPS and gh pr/api calls. $gh_note" \
     "$gh_token_default" "yes")
 
-  CLAUDE_CODE_OAUTH_TOKEN=$(prompt_var "CLAUDE_CODE_OAUTH_TOKEN" \
-    "OAuth token for headless Claude Code runs inside the container (macOS keeps Claude credentials in the Keychain, which the Linux container can't read). Run 'claude setup-token' yourself — it opens a browser — then paste its output here." \
-    "" "yes")
+  while true; do
+    CODEBOT_AGENT=$(prompt_var "CODEBOT_AGENT" \
+      "Coding CLI codebot uses: enter 'claude' to use Claude Code, or 'opencode' to use OpenCode and its provider login flow." \
+      "claude")
+    if [ "$CODEBOT_AGENT" = "claude" ] || [ "$CODEBOT_AGENT" = "opencode" ]; then
+      break
+    fi
+    echo "  -> enter 'claude' or 'opencode'." >&2
+  done
+
+  CLAUDE_CODE_OAUTH_TOKEN=""
+  CLAUDE_MODEL=""
+  OPENCODE_PROVIDER=""
+  OPENCODE_MODEL=""
+  if [ "$CODEBOT_AGENT" = "claude" ]; then
+    CLAUDE_CODE_OAUTH_TOKEN=$(prompt_var "CLAUDE_CODE_OAUTH_TOKEN" \
+      "OAuth token for headless Claude Code runs inside the container (macOS keeps Claude credentials in the Keychain, which the Linux container can't read). Run 'claude setup-token' yourself — it opens a browser — then paste its output here." \
+      "" "yes")
+  else
+    if ! ensure_opencode; then
+      echo "OpenCode setup cannot continue without the opencode CLI." >&2
+      exit 1
+    fi
+    while true; do
+      OPENCODE_PROVIDER=$(prompt_var "OPENCODE_PROVIDER" \
+        "OpenCode provider ID to authenticate (for example: openai, github-copilot, gitlab, or opencode). OpenCode will show that provider's browser, device-code, or API-key methods." \
+        "")
+      [ -n "$OPENCODE_PROVIDER" ] && break
+      echo "  -> a provider ID is required." >&2
+    done
+    echo "Starting OpenCode authentication for '$OPENCODE_PROVIDER'. Complete any browser or device-code flow, then return here."
+    mkdir -p "$OPENCODE_HOME"
+    run_opencode auth login --provider "$OPENCODE_PROVIDER"
+    if ! run_opencode auth list | grep -qi "$OPENCODE_PROVIDER"; then
+      echo "  -> OpenCode did not report an authenticated '$OPENCODE_PROVIDER' provider." >&2
+      exit 1
+    fi
+    echo "Authenticated models for '$OPENCODE_PROVIDER':"
+    run_opencode models "$OPENCODE_PROVIDER" || true
+    while true; do
+      OPENCODE_MODEL=$(prompt_var "OPENCODE_MODEL" \
+        "Choose the fully-qualified model codebot should use, in provider/model form. Select one from the list above." \
+        "")
+      if [[ "$OPENCODE_MODEL" == "$OPENCODE_PROVIDER"/* && "$OPENCODE_MODEL" != */ ]]; then
+        break
+      fi
+      echo "  -> model must start with $OPENCODE_PROVIDER/ and include a model ID." >&2
+    done
+  fi
 
   git_name_default="$(git config --global user.name 2>/dev/null || true)"
   GIT_AUTHOR_NAME=$(prompt_var "GIT_AUTHOR_NAME" \
@@ -210,9 +287,11 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     "Optional: human-readable project name used in prompts. Leave blank to default to the repo directory name ($repo_basename)." \
     "")
 
-  CLAUDE_MODEL=$(prompt_var "CLAUDE_MODEL" \
-    "Optional: Claude model codebot uses for its working sessions." \
-    "claude-opus-4-8")
+  if [ "$CODEBOT_AGENT" = "claude" ]; then
+    CLAUDE_MODEL=$(prompt_var "CLAUDE_MODEL" \
+      "Optional: Claude model codebot uses for its working sessions." \
+      "claude-opus-4-8")
+  fi
 
   CODEBOT_BASE_BRANCH=$(prompt_var "CODEBOT_BASE_BRANCH" \
     "Optional: the branch codebot treats as the trunk — it syncs from this branch before picking a task, branches feature work off of it, opens PRs against it, and resets to it on abort." \
@@ -222,9 +301,12 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     "Optional: log verbosity — DEBUG traces every email, video, and git call; INFO is quieter." \
     "DEBUG")
 
-  CLAUDE_API_KEY=$(prompt_var "CLAUDE_API_KEY" \
-    "Optional: only needed if the target repo has its own .claude/settings.json with an 'apiKeyHelper' that reads this variable. Claude Code always tries apiKeyHelper before CLAUDE_CODE_OAUTH_TOKEN with no fallback, so a target repo's own apiKeyHelper convention can break codebot's OAuth auth unless this is set to a real key from https://console.anthropic.com/ (billed per-token, separate from your subscription plan). Leave blank if the target repo has no such setting." \
-    "" "yes")
+  CLAUDE_API_KEY=""
+  if [ "$CODEBOT_AGENT" = "claude" ]; then
+    CLAUDE_API_KEY=$(prompt_var "CLAUDE_API_KEY" \
+      "Optional: only needed if the target repo has its own .claude/settings.json with an 'apiKeyHelper' that reads this variable. Claude Code always tries apiKeyHelper before CLAUDE_CODE_OAUTH_TOKEN with no fallback, so a target repo's own apiKeyHelper convention can break codebot's OAuth auth unless this is set to a real key from https://console.anthropic.com/ (billed per-token, separate from your subscription plan). Leave blank if the target repo has no such setting." \
+      "" "yes")
+  fi
 fi
 
 # ---------------------------------------------------------------- Google OAuth
@@ -321,8 +403,11 @@ CODEBOT_PROJECT_NAME=$CODEBOT_PROJECT_NAME
 GH_TOKEN=$GH_TOKEN
 GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME
 GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL
+CODEBOT_AGENT=$CODEBOT_AGENT
 CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN
 CLAUDE_MODEL=$CLAUDE_MODEL
+OPENCODE_PROVIDER=$OPENCODE_PROVIDER
+OPENCODE_MODEL=$OPENCODE_MODEL
 CODEBOT_USER_EMAIL=$CODEBOT_USER_EMAIL
 CODEBOT_LOG_LEVEL=$CODEBOT_LOG_LEVEL
 CODEBOT_BASE_BRANCH=$CODEBOT_BASE_BRANCH
@@ -333,8 +418,8 @@ EOF
   echo
   echo "Wrote $ENV_FILE with:"
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
-    GIT_AUTHOR_EMAIL CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL \
-    CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
+    GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL OPENCODE_PROVIDER \
+    OPENCODE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
     echo "  - $var"
   done
 fi

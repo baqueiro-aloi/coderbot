@@ -2,7 +2,8 @@
 
 Autonomous coding agent that works the improvements backlog (a Google Doc,
 `CODEBOT_DOC_ID`) of whatever target repo you point it at (`CODEBOT_REPO_PATH`),
-plans with that repo's OpenSpec (opsx) skills via headless Claude Code, and talks
+plans with that repo's OpenSpec workflow via a selectable headless coding agent
+(Claude Code or OpenCode), and talks
 to the maintainer exclusively by email (`CODEBOT_USER_EMAIL`).
 
 ## Target repo prerequisites
@@ -35,21 +36,21 @@ missing:
     the user immediately, and codebot adds a backlog item requesting the
     workflow.
 
-This also requires **OpenSpec (opsx) skills** in the target repo's Claude Code
-setup (`/opsx:explore`, `/opsx:propose`, `/opsx:apply`) — used for the planning
-workflow, and not auto-detected/self-healed.
+This also requires OpenSpec in the target repo. Codebot directs its selected coding
+agent through the OpenSpec explore, propose, and apply workflows using the installed
+`openspec` CLI.
 
 ## Lifecycle
 
 ```
-IDLE → pick item (non-struck ¶ in the Doc, Claude chooses) → branch codebot/<slug>
-     → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
+IDLE → pick item (non-struck ¶ in the Doc, coding agent chooses) → branch codebot/<slug>
+      → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
      → IMPLEMENTING (adds e2e coverage if a harness is present) → E2E gate (e2e/run.sh, if present)
      → OPEN_PR (gh) → WAIT_REVIEW ⇄ ADDRESS_REVIEW (if Code Review is present) → email PR + evidence → WAIT_MERGE
      → merge → strike item through in the Doc → IDLE
 ```
 
-Any phase can detour through WAIT_REPLY: if Claude needs the user, it ends its
+Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
 output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
 with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
 
@@ -122,6 +123,8 @@ offers to run the consent flow in step 2 for you.
    # Required: the address codebot sends to and reads replies from
    CODEBOT_USER_EMAIL=you@example.com
    GH_TOKEN=<a PAT with repo scope, e.g. from `gh auth token`>
+   # Select "claude" (default) or "opencode".
+   CODEBOT_AGENT=claude
    CLAUDE_CODE_OAUTH_TOKEN=<output of `claude setup-token` on the host>
    GIT_AUTHOR_NAME=codebot
    GIT_AUTHOR_EMAIL=codebot@example.com
@@ -129,6 +132,10 @@ offers to run the consent flow in step 2 for you.
    CODEBOT_PROJECT_NAME=
    # Optional; defaults to claude-opus-4-8
    CLAUDE_MODEL=claude-opus-4-8
+   # Required when CODEBOT_AGENT=opencode. Run ./setup.sh to complete the
+   # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
+   OPENCODE_PROVIDER=
+   OPENCODE_MODEL=<provider/model>
    # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
    CODEBOT_LOG_LEVEL=DEBUG
    # Optional; defaults to "main" — the trunk branch codebot syncs from, branches off
@@ -143,8 +150,10 @@ offers to run the consent flow in step 2 for you.
 
 </details>
 
-4. **Claude Code**: the host's `~/.claude` and `~/.claude.json` (settings + opsx
-   skills) are mounted in; git pushes use HTTPS with `GH_TOKEN` (no SSH needed).
+4. **Coding-agent authentication**: Claude Code uses the host's `~/.claude` and
+   `~/.claude.json`. OpenCode authentication is completed by `setup.sh` and stored
+   privately under `data/opencode/`; this includes browser and device-code provider
+   flows. Git pushes use HTTPS with `GH_TOKEN` (no SSH needed).
 
 ## Run
 
@@ -164,7 +173,8 @@ git branch, restart.
 Inside the container (`docker compose exec codebot bash`):
 
 ```bash
-claude -p 'say ok' --dangerously-skip-permissions   # Claude auth works
+claude -p 'say ok' --dangerously-skip-permissions   # when CODEBOT_AGENT=claude
+opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
 gh auth status                                       # GH token works
 git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
 python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'

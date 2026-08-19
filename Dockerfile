@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npx --yes playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code opencode-ai@1.18.18 @fission-ai/openspec@latest
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt

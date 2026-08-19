@@ -118,7 +118,7 @@ def _restore_config() -> bool:
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True,
-                          timeout=config.CLAUDE_TIMEOUT_SECONDS)
+                          timeout=config.AGENT_TIMEOUT_SECONDS)
 
 
 def _invoke(args: list[str], prompt: str) -> ClaudeResult:

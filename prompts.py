@@ -29,13 +29,14 @@ implementing this improvement from the backlog:
 
     $item
 
-Use the /opsx:explore approach: investigate the codebase, clarify the requirements,
-identify integration points, risks, and the simplest solid design. Work everything
+Use the OpenSpec explore workflow: investigate the codebase, clarify the requirements,
+identify integration points, risks, and the simplest solid design. Use the installed
+`openspec` CLI and its local instructions when creating or reading change artifacts. Work everything
 out yourself; only use the NEED_USER_INPUT mechanism for decisions that genuinely
 require the user. End with a concise summary of your conclusions.
 """
 
-PROPOSE = """Now formalize the plan: run the /opsx:propose workflow (openspec CLI) to
+PROPOSE = """Now formalize the plan: use the OpenSpec proposal workflow (openspec CLI) to
 create a change named $slug with proposal.md, design.md, specs, and tasks.md,
 based on your exploration. Requirements:
 $e2e_note
@@ -68,7 +69,7 @@ explicitly approve before implementation begins.
 """
 
 IMPLEMENT = """The user approved the proposal. Implement the openspec change $slug
-fully (the /opsx:apply workflow): work through every task in tasks.md, marking them
+fully using the OpenSpec apply workflow: work through every task in tasks.md, marking them
 complete. Mandatory:
 $e2e_note
 - Commit your work on branch $branch with clear messages. Do NOT push yet. Do not

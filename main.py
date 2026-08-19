@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-import claude_runner
+import agent_runner
 import config
 import evidence
 import gdoc_client
@@ -63,7 +63,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
 
 
 def parse_json_reply(text: str) -> dict:
-    """Extract the first valid JSON object from Claude's output.
+    """Extract the first valid JSON object from the coding agent's output.
 
     Scans each '{' and uses raw_decode so surrounding prose or later brace-bearing
     text cannot corrupt the match (greedy '{.*}' did).
@@ -76,17 +76,17 @@ def parse_json_reply(text: str) -> dict:
             continue
         if isinstance(obj, dict):
             return obj
-    raise ValueError(f"no JSON object in Claude output: {text[:500]}")
+    raise ValueError(f"no JSON object in coding-agent output: {text[:500]}")
 
 
-def handle_result(state: dict, result: claude_runner.ClaudeResult, phase: str) -> bool:
-    """If Claude asked a question, email it and enter WAIT_REPLY. True if waiting."""
+def handle_result(state: dict, result, phase: str) -> bool:
+    """If the coding agent asked a question, email it and enter WAIT_REPLY."""
     state["session_id"] = result.session_id
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     question = result.question
     if question:
         attachments = [Path(p) for p in result.attachments if Path(p).exists()]
-        log.info("[%s] Claude asked a question (%d validated attachment(s)); emailing user",
+        log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
                  phase, len(attachments))
         email(state, f"question during {phase}",
               f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n{question}\n\n"
@@ -112,7 +112,7 @@ def _looks_like_evidence(path: str) -> bool:
 def _branch_evidence_paths(branch: str, base_branch: str) -> list[str]:
     """Files added/changed on `branch` since it diverged from `base_branch` that look
     like recorded test evidence rather than application code — these must never be
-    committed, only emailed (see claude_runner.EVIDENCE_CONTRACT)."""
+    committed, only emailed (see agent_runner.EVIDENCE_CONTRACT)."""
     diff = git("diff", "--name-only", f"{base_branch}...{branch}")
     return [p for p in diff.splitlines() if _looks_like_evidence(p)]
 
@@ -127,18 +127,18 @@ def _scrub_evidence_from_repo(state: dict, phase: str) -> list[Path] | None:
     if not paths:
         return []
     log.warning("[%s] evidence-looking file(s) were committed to the repo; asking "
-                "Claude to remove them and re-route via email instead: %s", phase, paths)
-    result = claude_runner.resume(state["session_id"], prompts.render(
+                "the coding agent to remove them and re-route via email instead: %s", phase, paths)
+    result = agent_runner.resume(state["session_id"], prompts.render(
         prompts.REMOVE_EVIDENCE_FROM_REPO, branch=state["branch"],
-        paths="\n".join(f"- {p}" for p in paths), outbox_dir=str(claude_runner.OUTBOX_DIR)))
+        paths="\n".join(f"- {p}" for p in paths), outbox_dir=str(agent_runner.OUTBOX_DIR)))
     if handle_result(state, result, phase):
         return None
     return [Path(p) for p in result.attachments]
 
 
-def _collect_attachments(result: claude_runner.ClaudeResult, e2e_specs: list[str],
+def _collect_attachments(result, e2e_specs: list[str],
                           e2e_kind: str | None) -> list[Path]:
-    """Files to attach to a post-task email: whatever Claude explicitly pointed to via
+    """Files to attach to a post-task email: whatever the coding agent explicitly pointed to via
     ATTACH: lines in its own (non-question) output, plus whatever the evidence pipeline
     separately records. Claude may have already captured and converted its own evidence
     (e.g. mid-review, outside the dedicated E2E phase) — trust that over re-deriving
@@ -304,12 +304,12 @@ def do_pick(state: dict) -> None:
         log.info("no pending items; staying idle")
         state["state"] = "IDLE"
         return
-    result = claude_runner.run(prompts.render(
+    result = agent_runner.run(prompts.render(
         prompts.PICK, project=config.PROJECT_NAME, items="\n".join(f"- {i}" for i in items)))
     choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
-    log.info("Claude picked %r (slug=%s): %s",
+    log.info("coding agent picked %r (slug=%s): %s",
              choice["item"][:80], choice["slug"], choice.get("reason", ""))
     state.update(item=choice["item"], slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
@@ -324,7 +324,7 @@ def do_pick(state: dict) -> None:
 
 
 def do_explore(state: dict) -> None:
-    result = claude_runner.run(prompts.render(
+    result = agent_runner.run(prompts.render(
         prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"]))
     if handle_result(state, result, "EXPLORING"):
         return
@@ -332,7 +332,7 @@ def do_explore(state: dict) -> None:
 
 
 def do_propose(state: dict) -> None:
-    result = claude_runner.resume(state["session_id"], prompts.render(
+    result = agent_runner.resume(state["session_id"], prompts.render(
         prompts.PROPOSE, slug=state["slug"], e2e_note=_e2e_note(state)))
     if handle_result(state, result, "PROPOSING"):
         return
@@ -347,7 +347,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
     verdict = parse_json_reply(
-        claude_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)).output)
+        agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)).output)
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
     if action not in ("approve", "changes", "abort"):
@@ -363,7 +363,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
         state["state"] = "IMPLEMENTING"
         return
     # changes: revise the proposal in the working session and go back to waiting.
-    result = claude_runner.resume(
+    result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"]))
     if handle_result(state, result, "PROPOSING"):
@@ -373,7 +373,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
 
 
 def do_implement(state: dict) -> None:
-    result = claude_runner.resume(
+    result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
@@ -417,7 +417,7 @@ def do_e2e(state: dict) -> None:
             state["return_state"] = "E2E"
             state["state"] = "WAIT_REPLY"
             return
-        result = claude_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E, output=output))
+        result = agent_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E, output=output))
         if handle_result(state, result, "IMPLEMENTING"):
             return
         return  # loop re-enters E2E and re-runs the suite
@@ -427,7 +427,7 @@ def do_e2e(state: dict) -> None:
 
 
 def do_open_pr(state: dict) -> None:
-    result = claude_runner.resume(state["session_id"], prompts.render(
+    result = agent_runner.resume(state["session_id"], prompts.render(
         prompts.PR_BODY, branch=state["branch"], base_branch=config.BASE_BRANCH))
     if handle_result(state, result, "IMPLEMENTING"):
         return
@@ -617,7 +617,7 @@ def do_address_review(state: dict) -> None:
     state["review_round"] = state.get("review_round", 0) + 1
     log.info("addressing %d review comment(s), round %d", len(comments), state["review_round"])
     rendered = format_review_comments(comments, review_summary(state))
-    result = claude_runner.resume(
+    result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.ADDRESS_REVIEW, comments=rendered, branch=state["branch"]))
     if handle_result(state, result, "ADDRESS_REVIEW"):
@@ -706,7 +706,7 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
-    result = claude_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply))
+    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply))
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r", action)
@@ -723,7 +723,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                                 f"slate.\n\nPR: {pr_url}")
         return
     if action == "changes":
-        r = claude_runner.resume(
+        r = agent_runner.resume(
             state["session_id"],
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
         if handle_result(state, r, "IMPLEMENTING"):
@@ -796,7 +796,7 @@ def do_address_pr_threads(state: dict) -> None:
     threads = state.get("pr_threads", [])
     state["pr_thread_round"] = state.get("pr_thread_round", 0) + 1
     log.info("addressing %d unresolved review thread(s), round %d", len(threads), state["pr_thread_round"])
-    result = claude_runner.resume(
+    result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
                        branch=state["branch"]))
@@ -963,7 +963,7 @@ def _handle_reply(state: dict, reply: str) -> None:
         # Read return_state without popping: if a later step here raises, the state
         # stays WAIT_REPLY with return_state intact so the retry re-runs cleanly.
         phase = state["return_state"]
-        result = claude_runner.resume(state["session_id"], reply)
+        result = agent_runner.resume(state["session_id"], reply)
         if handle_result(state, result, phase):
             return  # re-questioned; handle_result reset return_state for the new phase
         next_state = {"EXPLORING": "PROPOSING", "PROPOSING": "WAIT_APPROVAL",
@@ -985,6 +985,11 @@ def _handle_reply(state: dict, reply: str) -> None:
 
 
 def main() -> None:
+    if config.AGENT not in ("claude", "opencode"):
+        raise SystemExit("CODEBOT_AGENT must be 'claude' or 'opencode'")
+    if config.AGENT == "opencode" and (
+            "/" not in config.OPENCODE_MODEL or config.OPENCODE_MODEL.endswith("/")):
+        raise SystemExit("OPENCODE_MODEL must be set to provider/model when CODEBOT_AGENT=opencode")
     if not config.USER_EMAIL:
         raise SystemExit("CODEBOT_USER_EMAIL must be set in .env")
     if not config.DOC_ID:
@@ -993,7 +998,7 @@ def main() -> None:
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
-    log.info("codebot starting; repo=%s doc=%s", config.REPO_PATH, config.DOC_ID)
+    log.info("codebot starting; agent=%s repo=%s doc=%s", config.AGENT, config.REPO_PATH, config.DOC_ID)
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
         try:
