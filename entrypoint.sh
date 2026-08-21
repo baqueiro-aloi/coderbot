@@ -4,6 +4,15 @@ set -euo pipefail
 : "${CODEBOT_REPO_PATH:?CODEBOT_REPO_PATH must be set in .env (absolute path of the target repo)}"
 : "${GH_TOKEN:?GH_TOKEN must be set in .env (git/gh use it for HTTPS auth)}"
 
+# Keep OpenCode credentials and resumable sessions in Codebot's bind-mounted data
+# directory rather than sharing the host user's global OpenCode configuration.
+export XDG_DATA_HOME=/app/data/opencode/data
+export XDG_CONFIG_HOME=/app/data/opencode/config
+export XDG_CACHE_HOME=/app/data/opencode/cache
+export XDG_STATE_HOME=/app/data/opencode/state
+mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+chown -R bot:bot /app/data/opencode
+
 # Let the non-root user talk to the mounted docker socket.
 if [ -S /var/run/docker.sock ]; then
   sock_gid="$(stat -c %g /var/run/docker.sock)"
@@ -32,6 +41,15 @@ if [ ! -s "$local_cfg" ] || ! valid_json "$local_cfg"; then
   fi
 fi
 chown bot:bot "$local_cfg"
+
+if [ "${CODEBOT_AGENT:-claude}" = "opencode" ]; then
+  : "${OPENCODE_MODEL:?OPENCODE_MODEL must be provider/model when CODEBOT_AGENT=opencode}"
+  command -v opencode >/dev/null || { echo "OpenCode is not installed in this image" >&2; exit 1; }
+  # Inline configuration is applied after any target-repo config, preventing a
+  # project from changing Codebot's selected model or enabling transcript sharing.
+  export OPENCODE_CONFIG_CONTENT
+  OPENCODE_CONFIG_CONTENT="$(python3 -c 'import json, os; print(json.dumps({"model": os.environ["OPENCODE_MODEL"], "share": "disabled", "autoupdate": False}))')"
+fi
 
 exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
   set -euo pipefail

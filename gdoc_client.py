@@ -51,6 +51,39 @@ def list_pending_items() -> list[str]:
     return items
 
 
+def has_item(item_text: str) -> bool:
+    """Whether item_text exists among ALL paragraphs, pending or struck through."""
+    doc = _docs_service().documents().get(documentId=config.DOC_ID).execute()
+    target = _normalize(item_text)
+    return any(_normalize(text) == target for text, _s, _e, _struck in _iter_paragraphs(doc))
+
+
+def add_item(item_text: str) -> None:
+    """Append item_text as a new pending paragraph at the end of the document."""
+    service = _docs_service()
+    doc = service.documents().get(documentId=config.DOC_ID).execute()
+    # Insert before the document's always-present trailing newline, so the new
+    # paragraph lands at the end without disturbing the doc's final empty paragraph.
+    end_index = doc["body"]["content"][-1]["endIndex"]
+    service.documents().batchUpdate(
+        documentId=config.DOC_ID,
+        body={
+            "requests": [
+                {"insertText": {"location": {"index": end_index - 1}, "text": f"{item_text}\n"}}
+            ]
+        },
+    ).execute()
+
+
+def ensure_item(item_text: str) -> bool:
+    """Add item_text as a pending backlog item unless an equivalent one (pending or
+    done) already exists. Returns True if it was added."""
+    if has_item(item_text):
+        return False
+    add_item(item_text)
+    return True
+
+
 def mark_done(item_text: str) -> bool:
     """Strike through the paragraph matching item_text. Returns False if not found."""
     service = _docs_service()
