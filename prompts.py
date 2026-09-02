@@ -256,7 +256,9 @@ The user reviewed the PR and requested changes. Their feedback is below.
 """ + fenced("user feedback", "$feedback") + """
 
 Apply the requested changes on branch $branch, keep e2e tests passing and updated,
-and commit without pushing; coderbot will push afterward. If the feedback asks you to "attach" or "provide" Playwright or
+and commit without pushing; coderbot will push afterward. If the feature's UI or flow
+changed, update its `@evidence` demo test too — it is re-recorded as the video sent to
+the user and must still show the feature working. If the feedback asks you to "attach" or "provide" Playwright or
 Newman evidence, run the requested verification but do NOT create or list `ATTACH:`
 evidence files: codebot's dedicated evidence collector will re-run the feature tests
 and attach its single canonical artifact. Do not add evidence to the branch/PR. End

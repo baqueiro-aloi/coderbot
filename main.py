@@ -362,6 +362,19 @@ _EVIDENCE_CONTRACT = (
     "self-skip by default, or no evidence will be captured for the PR.")
 
 
+_DEMO_TEST_CONTRACT = (
+    "\n- ONE of those tests must be a demo test whose title contains the tag `@evidence`. "
+    "Codebot records ONLY this test as the video evidence emailed to the user, so it must "
+    "show THIS feature working, on its own, as a watchable walkthrough:\n"
+    "  - Navigate to where the feature lives and exercise it end-to-end in one continuous flow.\n"
+    "  - Before and after each key interaction, make sure the relevant UI is actually visible "
+    "in the viewport (e.g. `scrollIntoViewIfNeeded()`) — a correct assertion on an "
+    "off-screen element makes a useless video.\n"
+    "  - Hold each state that demonstrates the feature's effect on screen for a moment "
+    "(e.g. `page.waitForTimeout(1000)`) so a human watching the video can see it.\n"
+    "  - Keep unrelated setup minimal and off-camera where possible; assert the visible outcome.")
+
+
 def _e2e_note(state: dict) -> str:
     if not state.get("has_e2e_harness"):
         return ("- No e2e harness exists in this repo yet; verify the change using your own "
@@ -371,7 +384,7 @@ def _e2e_note(state: dict) -> str:
         return ("- Every user-facing feature MUST include comprehensive Postman collections "
                 "under e2e/collections/, run via Newman (they must pass)." + _EVIDENCE_CONTRACT)
     return ("- Every user-facing feature MUST include comprehensive Playwright e2e tests in "
-            "e2e/tests/ (they must pass)." + _EVIDENCE_CONTRACT)
+            "e2e/tests/ (they must pass)." + _EVIDENCE_CONTRACT + _DEMO_TEST_CONTRACT)
 
 
 def _e2e_report_note(state: dict) -> str:
