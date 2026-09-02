@@ -376,15 +376,38 @@ def do_pick(state: dict) -> None:
         log.info("no pending items; staying idle")
         state["state"] = "IDLE"
         return
+    # A claim of ours that outlived state.json (e.g. the data dir was rebuilt) is
+    # resumed before anything new is started, so no task is left claimed but unworked.
+    mine = [i for i in items if i.get("claimed_by_me")]
+    if mine:
+        log.info("resuming from %d item(s) already claimed by this instance", len(mine))
+        items = mine
     result = agent_runner.run(prompts.render(
-        prompts.PICK, project=config.PROJECT_NAME, items="\n".join(f"- {i}" for i in items)),
+        prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)),
         contract=False)
     choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
-    log.info("coding agent picked %r (slug=%s): %s",
-             choice["item"][:80], choice["slug"], choice.get("reason", ""))
-    state.update(item=choice["item"], slug=choice["slug"], thread_id=None)
+    chosen = next((i for i in items
+                   if gdoc_client.normalize(i["text"]) == gdoc_client.normalize(choice["item"])),
+                  None)
+    if chosen is None:
+        # The bullet's own text is the identity mark_done matches on later, so a paraphrase
+        # (or a sub-bullet picked as an item) must not become the task. Fail the tick; PICK
+        # runs again next time.
+        raise ValueError(f"PICK chose text that is not a pending item: {choice['item'][:200]!r}")
+    # Claim the item in the doc BEFORE any local work: the atomic marker write is what
+    # keeps two instances off the same task. Losing the race just means repicking.
+    if not gdoc_client.claim_task(chosen["text"]):
+        log.info("item was claimed by another instance meanwhile; repicking next tick: %r",
+                 chosen["text"][:80])
+        return  # stay IDLE
+    log.info("coding agent picked %r (slug=%s, %d clarification line(s), %d screenshot(s)): %s",
+             chosen["text"][:80], choice["slug"], len(chosen["detail"].splitlines()),
+             len(chosen.get("images", [])), choice.get("reason", ""))
+    state.update(item=chosen["text"], item_detail=chosen["detail"],
+                 item_images=chosen.get("images", []),
+                 slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
     branch = f"{config.INSTANCE_ID}-{choice['slug']}"
@@ -392,13 +415,42 @@ def do_pick(state: dict) -> None:
     # (state not yet persisted), reset it from the base branch rather than failing on "-b".
     git("checkout", "-B", branch)
     state["branch"] = branch
+    # The branch's starting point: later phases measure overreach against it.
+    state["base_sha"] = git("rev-parse", "HEAD")
     state["state"] = "EXPLORING"
     log.info("picked %r -> %s", choice["item"], branch)
 
 
+def render_items(items: list[dict]) -> str:
+    """The backlog as a nested bullet list: one line per task, clarifications indented."""
+    lines = []
+    for item in items:
+        lines.append(f"- {item['text']}")
+        if item.get("detail"):
+            lines.append(item["detail"])
+    return "\n".join(lines)
+
+
+def render_images(paths: list[str]) -> str:
+    """The prompt block pointing the session at the item's screenshots ("" when none)."""
+    existing = [p for p in paths if Path(p).exists()]
+    if len(existing) < len(paths):
+        log.warning("%d of %d item screenshot(s) missing on disk",
+                    len(paths) - len(existing), len(paths))
+    if not existing:
+        return ""
+    log.info("EXPLORE prompt includes %d screenshot(s): %s", len(existing), existing)
+    return ("\nThe user attached screenshot(s) to this item in the backlog doc. They show "
+            "the exact UI/behavior the item refers to — view EACH one with the Read tool "
+            "before drawing conclusions:\n"
+            + "\n".join(f"- {p}" for p in existing) + "\n")
+
+
 def do_explore(state: dict) -> None:
     result = agent_runner.run(prompts.render(
-        prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"]))
+        prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"],
+        detail=state.get("item_detail", ""),
+        images=render_images(state.get("item_images", []))))
     if handle_result(state, result, "EXPLORING"):
         return
     state["state"] = "PROPOSING"
@@ -1295,7 +1347,7 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
+RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary",
               "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
@@ -1315,6 +1367,13 @@ def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
         subj = "task complete"
     else:
         log.warning("could not locate item in doc to strike through: %r", item[:80])
+        # Also release the claim: a leftover self-claim would make do_pick's resume
+        # filter re-pick this FINISHED task deterministically on the next idle tick,
+        # long before the user can act on this email.
+        try:
+            gdoc_client.unclaim_task(item)
+        except Exception:  # noqa: BLE001 — best-effort; the email below covers it
+            log.exception("could not unclaim the unmatched item")
         subj = "task complete — mark the item manually"
         body = (f"{note}\n\nBut I could not find this item in the doc to strike it "
                 f"through:\n\n{item}\n\nPlease strike it through (or delete it) promptly "
@@ -1340,6 +1399,18 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
     problems = _reset_to_base_branch()
+    # The task goes back to the pool, so its claim marker must go too — otherwise no
+    # instance (including this one, if its state was wiped) would ever pick it again.
+    if aborted_task and aborted_task != "-":
+        try:
+            if not gdoc_client.unclaim_task(aborted_task):
+                problems.append("could not find the backlog item to remove its "
+                                "[implementing] claim marker — remove it manually")
+        except Exception:  # noqa: BLE001 — a doc hiccup must not block the reset
+            log.exception("unclaim failed during reset")
+            problems.append("could not remove the item's [implementing] claim marker in "
+                            "the backlog doc — remove it manually or no instance will "
+                            "pick the task")
     status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
               else "The reset finished with issues (I'll re-check the tree before starting the "
                    "next task):\n- " + "\n- ".join(problems))
@@ -1560,6 +1631,17 @@ def main() -> None:
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
     log.info("codebot starting; instance=%s agent=%s repo=%s doc=%s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.DOC_ID)
+    # Re-assert the doc claim for an in-flight task: one picked before claim markers
+    # existed (or whose marker was hand-deleted) is invisible protection-wise, and a
+    # newly spawned instance could pick it too. Best-effort — a claim now held by
+    # ANOTHER instance is only logged (claim_task does); the user sorts out that
+    # pre-existing split-brain.
+    try:
+        startup_state = load_state()
+        if startup_state.get("item"):
+            gdoc_client.claim_task(startup_state["item"])
+    except Exception:  # noqa: BLE001 — an unreachable doc must not block startup
+        log.exception("could not re-assert the in-flight task's claim at startup")
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
         try:

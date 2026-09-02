@@ -42,6 +42,22 @@ supplies managed, pinned OpenSpec 1.9.0 and Superpowers v6.3.0 integrations for
 both Claude Code and OpenCode. Target repos and host profiles do not need their
 own Superpowers installation.
 
+## Backlog doc format
+
+The backlog is a Google Doc (`CODEBOT_DOC_ID`). Each **top-level bullet** is one task.
+Indented sub-bullets under it are the user's clarifications and sub-requirements of
+that task (any nesting level) and are shown to the agent with it — never picked on
+their own. Inline images pasted under a bullet (as their own paragraph or inside a
+sub-bullet) are downloaded to `data/doc_images/` and handed to the exploration
+session as screenshots. Struck-through bullets are done; codebot strikes a task
+through (sub-bullets included) when its PR merges or on `DONE`.
+
+Set `CODEBOT_DOC_SECTION` to a heading text (e.g. `New:`) to make only the bullets
+under that heading pickable — items under other headings (say, "Under review:") are
+left alone. Unset, every top-level bullet in the doc is a candidate. Picking a task
+appends `[implementing: <instance>]` to its bullet so other instances sharing the doc
+skip it; the marker is removed when the task completes or is aborted.
+
 ## Lifecycle
 
 ```
@@ -216,6 +232,13 @@ generates a stable identity on first start and persists it in `data/instance_id`
 (e.g. `codebot-x7k2`). That id tags the instance's email subjects (`[codebot-x7k2]`)
 and its git branches (`codebot-x7k2-<slug>`). `CODEBOT_INSTANCE` in `.env` overrides
 the generated name — but then it must be **unique per installation**.
+
+Instances coordinate only through the backlog doc: picking a task atomically
+appends `[implementing: <instance>]` to its bullet (the write carries the doc revision
+it was read at, so two instances can't both win); claimed tasks are invisible to the
+others' PICK until the marker is removed on completion or abort. If an installation
+is retired mid-task, send it `ABORT <name>` first (which unclaims) or delete the
+marker by hand.
 
 All instances share the Gmail account; each one only reads replies on its own
 threads (subjects carry its prefix). Address mailbox commands to one instance —

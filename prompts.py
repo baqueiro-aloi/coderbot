@@ -17,17 +17,26 @@ PICK = """Here is the list of pending improvements for the $project project (fro
 backlog Google Doc). Some items may depend on others; pick the single item that
 makes most sense to implement NEXT (prerequisites first, easier enablers first).
 
+Each top-level bullet is one item. Indented sub-bullets under an item are the user's
+clarifications and sub-requirements OF THAT ITEM — they are part of it, never items of
+their own, so never pick one as the item.
+
 Pending items:
 $items
 
-Respond with ONLY a JSON object, no other text:
-{"item": "<exact text of the chosen item>", "slug": "<short-kebab-case-slug>", "reason": "<one sentence>"}
+Respond with ONLY a JSON object, no other text. "item" must be the text of the chosen
+top-level bullet copied EXACTLY, with none of its sub-bullets:
+{"item": "<exact text of the chosen top-level bullet>", "slug": "<short-kebab-case-slug>", "reason": "<one sentence>"}
 """
 
 EXPLORE = """You are working autonomously on the $project repo, on branch $branch,
 exploring this improvement from the backlog:
 
-    $item
+- $item
+$detail
+$images
+Any indented sub-bullets above are the user's own clarifications and sub-requirements
+for this item: treat them as part of the requirement and cover every one of them.
 
 This phase is exploration only. Do not implement the change or modify project code.
 Invoke `coderbot-openspec-workflow`, `openspec-explore`, and `brainstorming`.
