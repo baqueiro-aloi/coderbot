@@ -1648,7 +1648,6 @@ def do_push(state: dict) -> None:
         state.pop("review_comments", None)
         _enter_review_wait(state)
     elif continuation == "conflicts":
-        state.pop("stale_replies", None) if not state.get("stale_replies") else None
         _enter_review_wait(state)  # the resolved branch needs its re-review
     elif continuation == "feedback":
         attachments = [Path(path) for path in context.get("attachments", [])]
