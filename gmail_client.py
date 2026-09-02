@@ -164,11 +164,32 @@ def mark_processed(message_id: str) -> None:
         _save_processed(processed)
 
 
-COMMANDS = ("ABORT", "STATUS", "DONE")
+COMMANDS = ("ABORT", "STATUS", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME")
+# Canonical command per accepted spelling.
+_ALIASES = {"PAUSE": "HOLD", "RESUME": "CONTINUE"}
 # Trailing punctuation ("status ?", "STATUS!") is tolerated: users naturally add it,
 # and an unmatched command falls through to the reply classifiers as ordinary text.
-_CMD_RE = re.compile(r"^(ABORT|STATUS|DONE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
+_CMD_RE = re.compile(r"^(ABORT|STATUS|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
                      re.IGNORECASE)
+# CONTINUE/RESUME may carry a free-form note after the word ("continue, but use option
+# B"), which is handed to the resumed task. An optional instance target comes first.
+_CONTINUE_RE = re.compile(
+    r"^(CONTINUE|RESUME)\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",
+    re.IGNORECASE | re.DOTALL)
+
+
+def parse_command(body: str) -> tuple[str, str, str] | None:
+    """(COMMAND, target, note) for a command-shaped body, else None. `target` is the
+    lower-cased instance name when the user named one ("" otherwise); `note` is the
+    free text after a CONTINUE ("" for every other command)."""
+    text = body.strip()
+    m = _CMD_RE.match(text)
+    if m:
+        return _ALIASES.get(m.group(1).upper(), m.group(1).upper()), (m.group(2) or "").lower(), ""
+    m = _CONTINUE_RE.match(text)
+    if m:
+        return "CONTINUE", (m.group(2) or "").lower(), m.group(3).strip()
+    return None
 # The leading "[<instance>]" tag every codebot subject starts with (after Re:/Fwd:).
 _THREAD_TAG_RE = re.compile(r"^\s*(?:(?:re|fwd?):\s*)*\[([a-z0-9-]+)\]", re.IGNORECASE)
 
@@ -182,13 +203,13 @@ def command_for_me(body: str, subject: str) -> str | None:
       replying a bare ABORT on one bot's thread must not reset the whole fleet.
     - A bare ABORT or STATUS anywhere else (fresh mail, untagged subject) is the
       mailbox-wide last resort: every instance sharing the mailbox acts (fleet-wide
-      stop / fleet status). A bare DONE elsewhere is ignored: "mark the current task
-      done" is inherently per-instance, and guessing which instance was meant could
-      strike the wrong item in the backlog doc."""
-    m = _CMD_RE.match(body.strip())
-    if not m:
+      stop / fleet status). A bare DONE / HOLD / CONTINUE elsewhere is ignored: they
+      act on one instance's task, and guessing which instance was meant could strike
+      or pause the wrong item in the backlog doc."""
+    parsed = parse_command(body)
+    if not parsed:
         return None
-    command, target = m.group(1).upper(), (m.group(2) or "").lower()
+    command, target, _note = parsed
     if target:
         return command if target == config.INSTANCE_ID else None
     tag = _THREAD_TAG_RE.match(subject or "")
@@ -203,10 +224,10 @@ def foreign_command(body: str) -> str | None:
     this to keep a command aimed at ANOTHER instance — replied on one of OUR threads —
     from being classified as the user's answer (an "ABORT <other>" read as a
     conversational reply could abort the wrong task)."""
-    m = _CMD_RE.match(body.strip())
-    if not m:
+    parsed = parse_command(body)
+    if not parsed:
         return None
-    target = (m.group(2) or "").lower()
+    target = parsed[1]
     return target if target and target != config.INSTANCE_ID else None
 
 
@@ -217,10 +238,11 @@ def _from_matches(from_header: str, user_email: str) -> bool:
     return bool(allowed) and parseaddr(from_header)[1].lower() in allowed
 
 
-def poll_command() -> tuple[str, str, str, bool] | None:
+def poll_command() -> tuple[str, str, str, bool, str] | None:
     """Scan recent mail for a user command; returns (message_id, thread_id, COMMAND,
-    targeted) or None — `targeted` is True when the body named this instance
-    explicitly ("DONE codebot-x7k2"), which callers treat as unambiguous.
+    targeted, note) or None — `targeted` is True when the body named this instance
+    explicitly ("DONE codebot-x7k2"), which callers treat as unambiguous; `note` is
+    the free text after a CONTINUE.
 
     Mailbox-wide (any thread, or a brand-new email) rather than thread-scoped, so it works
     as a last resort even when the agent is stuck on a thread it no longer polls. Only honors
@@ -233,7 +255,8 @@ def poll_command() -> tuple[str, str, str, bool] | None:
     service = _gmail()
     processed = _load_processed()
     listing = service.users().messages().list(
-        userId="me", q="(ABORT OR STATUS OR DONE) newer_than:2d", maxResults=25).execute()
+        userId="me", q="(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) "
+                       "newer_than:2d", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
             continue
@@ -247,10 +270,10 @@ def poll_command() -> tuple[str, str, str, bool] | None:
         body = _strip_quoted(_extract_body(message.get("payload", {})))
         command = command_for_me(body, headers.get("subject", ""))
         if command:
-            targeted = bool(_CMD_RE.match(body.strip()).group(2))
+            _cmd, target, note = parse_command(body)
             log.warning("%s command received (msg %s, thread %s, targeted=%s)",
-                        command, meta["id"], message.get("threadId"), targeted)
-            return meta["id"], message.get("threadId"), command, targeted
+                        command, meta["id"], message.get("threadId"), bool(target))
+            return meta["id"], message.get("threadId"), command, bool(target), note
     return None
 
 

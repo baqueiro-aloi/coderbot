@@ -63,6 +63,26 @@ class ReplyCandidates(unittest.TestCase):
         self.assertEqual(ids, ["m1", "m2"])
 
 
+class ParseCommand(unittest.TestCase):
+    def test_aliases_and_notes(self):
+        self.assertEqual(gmail_client.parse_command("pause"), ("HOLD", "", ""))
+        self.assertEqual(gmail_client.parse_command("HOLD codebot-x7k2!"), ("HOLD", "codebot-x7k2", ""))
+        self.assertEqual(gmail_client.parse_command("Continue"), ("CONTINUE", "", ""))
+        self.assertEqual(gmail_client.parse_command("resume, but use option B\nthanks"),
+                         ("CONTINUE", "", "but use option B\nthanks"))
+        self.assertEqual(gmail_client.parse_command("continue codebot-x7k2: skip tests"),
+                         ("CONTINUE", "codebot-x7k2", "skip tests"))
+        self.assertIsNone(gmail_client.parse_command("continued from before"))
+        self.assertIsNone(gmail_client.parse_command("please hold on"))
+
+    def test_hold_and_continue_are_per_instance(self):
+        subj = f"Re: {config.SUBJECT_PREFIX} slug — question"
+        self.assertEqual(gmail_client.command_for_me("hold", subj), "HOLD")
+        self.assertEqual(gmail_client.command_for_me("continue with X", subj), "CONTINUE")
+        self.assertIsNone(gmail_client.command_for_me("hold", "unrelated"))
+        self.assertIsNone(gmail_client.command_for_me("continue", "unrelated"))
+
+
 class CommandScoping(unittest.TestCase):
     def test_done_is_a_command(self):
         self.assertIn("DONE", gmail_client.COMMANDS)

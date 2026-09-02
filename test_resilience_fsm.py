@@ -1,10 +1,11 @@
 """Failure budgets, WAIT_STUCK, reply classification and task finishing — the I/O edges
 (agent, email, git, doc) are stubbed and the handlers driven directly."""
+import json
 import pathlib
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
     import main
@@ -248,7 +249,7 @@ class Commands(unittest.TestCase):
     def test_bare_done_on_active_thread_is_deferred(self):
         state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
         with patch.object(main.gmail_client, "poll_command",
-                          return_value=("m1", "t1", "DONE", False)), \
+                          return_value=("m1", "t1", "DONE", False, "")), \
              patch.object(main, "_finish_task") as finish, \
              patch.object(main.gmail_client, "mark_processed") as mark:
             self.assertFalse(main.check_commands(state))
@@ -259,7 +260,7 @@ class Commands(unittest.TestCase):
         state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
         order = []
         with patch.object(main.gmail_client, "poll_command",
-                          return_value=("m1", "t1", "DONE", True)), \
+                          return_value=("m1", "t1", "DONE", True, "")), \
              patch.object(main, "_finish_task", side_effect=lambda *a, **k: order.append("finish")), \
              patch.object(main.gmail_client, "mark_processed",
                           side_effect=lambda *a: order.append("mark")):
@@ -270,7 +271,7 @@ class Commands(unittest.TestCase):
         state = {"state": "EXPLORING", "item": "task", "last_email": {
             "subject": "s", "body": "b", "sent_at": 0}}
         with patch.object(main.gmail_client, "poll_command",
-                          return_value=("m1", "t9", "STATUS", False)), \
+                          return_value=("m1", "t9", "STATUS", False, "")), \
              patch.object(main.gmail_client, "mark_processed"), \
              patch.object(main.gmail_client, "send") as send:
             self.assertFalse(main.check_commands(state))
@@ -282,7 +283,7 @@ class Commands(unittest.TestCase):
     def test_abort_resets(self):
         state = {"state": "EXPLORING", "item": "task"}
         with patch.object(main.gmail_client, "poll_command",
-                          return_value=("m1", "t9", "ABORT", False)), \
+                          return_value=("m1", "t9", "ABORT", False, "")), \
              patch.object(main.gmail_client, "mark_processed"), \
              patch.object(main, "_abort_and_reset") as reset:
             self.assertTrue(main.check_commands(state))
@@ -297,6 +298,120 @@ class Commands(unittest.TestCase):
             main.handle_wait(state)
         handle.assert_not_called()
         mark.assert_called_once_with("m1")
+
+
+class HoldAndContinue(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.holds = pathlib.Path(self.tmp.name) / "holds.json"
+        self.p = patch.object(main.config, "HOLDS_PATH", self.holds)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+        self.tmp.cleanup()
+
+    def task_state(self):
+        return {"state": "WAIT_APPROVAL", "item": "task A", "slug": "a", "branch": "codebot-a",
+                "session_id": "sid", "thread_id": "t1", "last_email": {
+                    "subject": "s", "body": "please approve", "sent_at": 0}}
+
+    def test_hold_commits_marks_saves_and_goes_idle(self):
+        state = self.task_state()
+        with patch.object(main.gmail_client, "poll_command",
+                          return_value=("m1", "t1", "HOLD", False, "")), \
+             patch.object(main.gmail_client, "mark_processed") as mark, \
+             patch.object(main, "_commit_pending_work", return_value=["committed pending work"]), \
+             patch.object(main.gdoc_client, "hold_task", return_value=True) as hold, \
+             patch.object(main, "_reset_to_base_branch", return_value=[]), \
+             patch.object(main, "email") as email:
+            self.assertTrue(main.check_commands(state))
+        hold.assert_called_once_with("task A")
+        mark.assert_called_once_with("m1")
+        self.assertEqual(state["state"], "IDLE")
+        self.assertNotIn("item", state)
+        holds = json.loads(self.holds.read_text())
+        self.assertEqual(holds[0]["thread_id"], "t1")
+        self.assertEqual(holds[0]["saved"]["state"], "WAIT_APPROVAL")
+        self.assertEqual(holds[0]["saved"]["session_id"], "sid")
+        self.assertFalse(holds[0]["requested"])
+        self.assertIn("on hold", email.call_args.args[1])
+
+    def test_hold_without_task_is_ignored(self):
+        state = {"state": "IDLE"}
+        with patch.object(main.gmail_client, "poll_command",
+                          return_value=("m1", "t9", "HOLD", False, "")), \
+             patch.object(main.gmail_client, "mark_processed"), \
+             patch.object(main.gmail_client, "send") as send:
+            self.assertFalse(main.check_commands(state))
+        self.assertIn("nothing to hold", send.call_args.args[0])
+
+    def test_continue_flags_hold_and_acks(self):
+        self.holds.write_text(json.dumps([{"thread_id": "t1", "item": "task A", "requested": False}]))
+        state = {"state": "EXPLORING", "item": "other", "thread_id": "t2"}
+        with patch.object(main.gmail_client, "poll_command",
+                          return_value=("m1", "t1", "CONTINUE", False, "use option B")), \
+             patch.object(main.gmail_client, "mark_processed") as mark, \
+             patch.object(main.gmail_client, "send") as send:
+            self.assertFalse(main.check_commands(state))
+        mark.assert_called_once_with("m1")
+        self.assertIn("will continue", send.call_args.args[0])
+        hold = json.loads(self.holds.read_text())[0]
+        self.assertTrue(hold["requested"])
+        self.assertEqual(hold["note"], "use option B")
+        self.assertEqual(state["state"], "EXPLORING")  # current work is not interrupted
+
+    def test_continue_on_active_thread_is_conversation(self):
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        with patch.object(main.gmail_client, "poll_command",
+                          return_value=("m1", "t1", "CONTINUE", False, "")), \
+             patch.object(main.gmail_client, "mark_processed") as mark:
+            self.assertFalse(main.check_commands(state))
+        mark.assert_not_called()
+
+    def test_pick_resumes_requested_hold_first(self):
+        saved = {"state": "WAIT_APPROVAL", "item": "task A", "slug": "a", "branch": "codebot-a",
+                 "session_id": "sid", "thread_id": "t1"}
+        self.holds.write_text(json.dumps([
+            {"thread_id": "t1", "item": "task A", "branch": "codebot-a", "requested": True,
+             "requested_at": 5, "note": "approved, go ahead", "saved": saved}]))
+        state = {"state": "IDLE"}
+        with patch.object(main, "git", return_value="") as git, \
+             patch.object(main.gdoc_client, "unhold_task", return_value=True), \
+             patch.object(main.gdoc_client, "claim_task", return_value=True), \
+             patch.object(main.gdoc_client, "list_pending_items") as listing, \
+             patch.object(main, "_detect_capabilities"), \
+             patch.object(main, "_seed_self_healing_items"), \
+             patch.object(main, "email"), \
+             patch.object(main, "_handle_reply") as reply:
+            main.do_pick(state)
+        listing.assert_not_called()
+        self.assertIn(call("checkout", "codebot-a"), git.call_args_list)
+        self.assertEqual(state["item"], "task A")
+        self.assertEqual(state["session_id"], "sid")
+        reply.assert_called_once_with(state, "approved, go ahead")
+        self.assertEqual(json.loads(self.holds.read_text()), [])
+
+    def test_resume_without_note_restates_last_email(self):
+        saved = {"state": "WAIT_MERGE", "item": "task A", "branch": "codebot-a", "thread_id": "t1",
+                 "last_email": {"subject": "s", "body": "PR ready", "sent_at": 0}}
+        hold = {"thread_id": "t1", "item": "task A", "branch": "codebot-a", "requested": True,
+                "note": "", "saved": saved}
+        self.holds.write_text(json.dumps([hold]))
+        state = {"state": "IDLE"}
+        with patch.object(main, "git"), \
+             patch.object(main.gdoc_client, "unhold_task", return_value=True), \
+             patch.object(main.gdoc_client, "claim_task", return_value=True), \
+             patch.object(main, "email") as email:
+            main._resume_held_task(state, hold)
+        self.assertEqual(state["state"], "WAIT_MERGE")
+        self.assertIn("PR ready", email.call_args.args[2])
+
+    def test_status_lists_holds(self):
+        self.holds.write_text(json.dumps([{"thread_id": "t1", "slug": "a", "requested": True}]))
+        with patch.object(main.gmail_client, "send") as send:
+            main._send_status({"state": "IDLE"}, "t9")
+        self.assertIn("On hold: a (continue requested)", send.call_args.args[1])
 
 
 class PromptContracts(unittest.TestCase):

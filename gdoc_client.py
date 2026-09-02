@@ -36,6 +36,16 @@ def normalize(text: str) -> str:
 
 # Claim marker an instance appends to a task's bullet line when it picks the task.
 CLAIM_RE = re.compile(r"\s*\[implementing:\s*([^\]]*?)\s*\]", re.IGNORECASE)
+# Hold marker: the task was paused by the user (HOLD command) and waits for CONTINUE.
+# Held tasks are not pickable by any instance; the holding instance resumes it.
+HOLD_RE = re.compile(r"\s*\[on hold:\s*([^\]]*?)\s*\]", re.IGNORECASE)
+_MARKER_RE = re.compile(r"\s*\[(?:implementing|on hold):\s*[^\]]*?\s*\]", re.IGNORECASE)
+
+
+def held_by(text: str) -> str | None:
+    """The instance named in the text's hold marker, or None when not on hold."""
+    m = HOLD_RE.search(text)
+    return (m.group(1).lower() or "?") if m else None
 # Optional ordering tag the user writes in a task's text ("Codebot[1]", "codebot[2]"):
 # tagged tasks are picked before untagged ones, in ascending order.
 PRIORITY_RE = re.compile(r"\bcodebot\s*\[\s*(\d+)\s*\]", re.IGNORECASE)
@@ -48,8 +58,8 @@ def priority_of(text: str) -> int | None:
 
 
 def strip_claims(text: str) -> str:
-    """The task text with any [implementing: ...] markers removed."""
-    return CLAIM_RE.sub("", text)
+    """The task text with any [implementing: ...] / [on hold: ...] markers removed."""
+    return _MARKER_RE.sub("", text)
 
 
 def claimed_by(text: str) -> str | None:
@@ -169,6 +179,8 @@ def _pending(tasks: list[dict]) -> list[dict]:
         owner = claimed_by(t["text"])
         if owner and owner != config.INSTANCE_ID:
             continue  # another instance is implementing it
+        if held_by(t["text"]):
+            continue  # paused by the user; resumed only through CONTINUE
         items.append({"text": strip_claims(t["text"]).strip(), "detail": t["detail"],
                       "images": t["images"], "claimed_by_me": owner is not None,
                       "priority": priority_of(t["text"])})
@@ -243,7 +255,8 @@ def _utf16_len(s: str) -> int:
     return len(s.encode("utf-16-be")) // 2
 
 
-def _marker_ranges(document: dict, task: dict, instance: str | None = None) -> list[tuple[int, int]]:
+def _marker_ranges(document: dict, task: dict, instance: str | None = None,
+                   pattern: re.Pattern = CLAIM_RE) -> list[tuple[int, int]]:
     """Doc index ranges of the task's claim markers (all instances, or just one).
 
     Docs indexes are UTF-16 code units, so offsets inside a run are accumulated in
@@ -267,7 +280,7 @@ def _marker_ranges(document: dict, task: dict, instance: str | None = None) -> l
                 chars.append((ch, idx))
                 idx += _utf16_len(ch)
         joined = "".join(ch for ch, _i in chars)
-        for m in CLAIM_RE.finditer(joined):
+        for m in pattern.finditer(joined):
             if instance is not None and m.group(1).lower() != instance:
                 continue
             last_ch, last_idx = chars[m.end() - 1]
@@ -302,7 +315,7 @@ def _find_task(doc: dict, item_text: str) -> dict | None:
     def rank(task: dict) -> int:
         if task["struck"]:
             return 3
-        owner = claimed_by(task["text"])
+        owner = claimed_by(task["text"]) or held_by(task["text"])
         if owner == config.INSTANCE_ID:
             return 0
         return 1 if owner is None else 2
@@ -426,6 +439,59 @@ def ensure_item(item_text: str) -> bool:
     return True
 
 
+def hold_task(item_text: str) -> bool:
+    """Replace this instance's claim marker with an [on hold: <instance>] marker so no
+    instance picks the task until CONTINUE. False when the task could not be found."""
+    marker = f" [on hold: {config.INSTANCE_ID}]"
+    service = _docs_service()
+    for _attempt in range(CAS_ATTEMPTS):
+        doc = service.documents().get(documentId=config.DOC_ID).execute()
+        task = _find_task(doc, item_text) or _find_mine(doc)
+        if task is None or task["struck"]:
+            log.warning("no unstruck doc task to put on hold for: %r", item_text[:80])
+            return False
+        if held_by(task["text"]) == config.INSTANCE_ID:
+            return True
+        requests = [{"deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}}
+                    for s, e in sorted(_marker_ranges(doc, task, pattern=_MARKER_RE),
+                                       reverse=True)]
+        # Deletions run first (deepest-first), so the insert index must account for
+        # the removed text before it on the same line; insert before them instead by
+        # placing it at the line end computed AFTER deletions: simplest is two writes.
+        if requests and _cas_update(service, doc, requests):
+            continue  # re-read and insert on a clean line next attempt
+        if requests:
+            continue  # doc changed; retry
+        insert = {"insertText": {"location": {"index": task["ranges"][0][1] - 1},
+                                 "text": marker}}
+        if _cas_update(service, doc, [insert]):
+            log.info("put backlog task on hold for %s: %r", config.INSTANCE_ID, item_text[:80])
+            return True
+    log.warning("could not put task on hold after %d attempts: %r", CAS_ATTEMPTS, item_text[:80])
+    return False
+
+
+def unhold_task(item_text: str) -> bool:
+    """Remove this instance's hold marker (the caller then claims the task as usual)."""
+    service = _docs_service()
+    for _attempt in range(CAS_ATTEMPTS):
+        doc = service.documents().get(documentId=config.DOC_ID).execute()
+        task = _find_task(doc, item_text)
+        if task is None:
+            log.warning("no doc task to take off hold for: %r", item_text[:80])
+            return False
+        ranges = _marker_ranges(doc, task, config.INSTANCE_ID, pattern=HOLD_RE)
+        if not ranges:
+            return True
+        deletes = [{"deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}}
+                   for s, e in sorted(ranges, reverse=True)]
+        if _cas_update(service, doc, deletes):
+            log.info("took backlog task off hold: %r", item_text[:80])
+            return True
+    log.warning("could not take task off hold after %d attempts: %r", CAS_ATTEMPTS, item_text[:80])
+    return False
+
+
 def mark_done(item_text: str) -> bool:
     """Strike through the task matching item_text, sub-bullets included, and drop its
     claim markers (the strikethrough itself now marks it done). False if not found."""
@@ -461,7 +527,8 @@ def mark_done(item_text: str) -> bool:
             for start, end in task["ranges"]
         ] + [
             {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}}
-            for start, end in sorted(_marker_ranges(doc, task), reverse=True)
+            for start, end in sorted(_marker_ranges(doc, task, pattern=_MARKER_RE),
+                                     reverse=True)
         ]
         if _cas_update(service, doc, requests):
             return True

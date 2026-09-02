@@ -414,6 +414,12 @@ def do_pick(state: dict) -> None:
     git("pull", "--ff-only")
     _detect_capabilities(state)
     _seed_self_healing_items(state)
+    requested = sorted((h for h in _load_holds() if h.get("requested")),
+                       key=lambda h: h.get("requested_at", 0))
+    if requested:
+        _resume_held_task(state, requested[0])
+        if state["state"] != "IDLE":
+            return
     items = gdoc_client.list_pending_items()
     log.info("backlog has %d pending item(s)", len(items))
     if not items:
@@ -1966,6 +1972,146 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     state["state"] = "IDLE"
 
 
+# ---------------------------------------------------------------- on-hold tasks
+
+def _load_holds() -> list[dict]:
+    try:
+        return json.loads(config.HOLDS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_holds(holds: list[dict]) -> None:
+    tmp = config.HOLDS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(holds, indent=2))
+    tmp.replace(config.HOLDS_PATH)
+
+
+def _commit_pending_work(state: dict) -> list[str]:
+    """Leave nothing dangling before parking a task: abort any half-finished git
+    operation, then commit every tracked change and every untracked file that is not
+    evidence on the task branch. Returns notes about anything that could not be saved."""
+    notes = []
+    branch = state.get("branch")
+    if not branch:
+        return notes
+    for op in (("merge", "--abort"), ("rebase", "--abort"),
+               ("cherry-pick", "--abort"), ("am", "--abort")):
+        _git_quiet(*op)
+    if git("rev-parse", "--abbrev-ref", "HEAD") != branch:
+        if not _git_quiet("checkout", branch):
+            notes.append(f"could not switch back to {branch} to save pending work")
+            return notes
+    _git_quiet("add", "-u")  # every tracked change
+    untracked = [p for p in git("ls-files", "--others", "--exclude-standard").splitlines()
+                 if p.strip()]
+    kept = [p for p in untracked if not _looks_like_evidence(p)]
+    if kept:
+        _git_quiet("add", "--", *kept)
+    if git("status", "--porcelain", "--untracked-files=no"):
+        if _git_quiet("commit", "-q", "-m", "wip: task put on hold by the user"):
+            notes.append("committed pending work as 'wip: task put on hold by the user'")
+        else:
+            notes.append("could not commit the pending work — it stays in the working tree")
+    return notes
+
+
+def _hold_task(state: dict, thread_id: str | None) -> None:
+    """Park the current task: save its work and state, mark it on hold in the backlog
+    doc, and return to IDLE so the next task can start. CONTINUE on the task's thread
+    brings it back with top priority."""
+    item = state.get("item", "")
+    notes = _commit_pending_work(state)
+    try:
+        if not gdoc_client.hold_task(item):
+            notes.append("could not mark the item on hold in the backlog doc — another "
+                         "instance may pick it up; add [on hold: me] by hand")
+    except Exception:  # noqa: BLE001 — a doc hiccup must not lose the hold
+        log.exception("hold marker failed")
+        notes.append("could not update the backlog doc (see logs)")
+    resume_state = state["state"]
+    saved = {k: state[k] for k in RESET_KEYS if k in state}
+    saved["state"] = resume_state
+    holds = [h for h in _load_holds() if h.get("thread_id") != state.get("thread_id")]
+    holds.append({"thread_id": state.get("thread_id") or thread_id, "item": item,
+                  "slug": state.get("slug"), "branch": state.get("branch"),
+                  "held_at": time.time(), "requested": False, "note": "", "saved": saved})
+    _save_holds(holds)
+    body = (f"Task on hold: {item}\nBranch: {state.get('branch', '-')} (all work "
+            f"committed there)\nIt was in state {resume_state}.\n\n"
+            "I'm moving on to the next backlog item. Reply 'continue' on THIS thread "
+            "(optionally followed by instructions) and I'll pick this task back up "
+            "first thing after my current work.")
+    if notes:
+        body += "\n\nNotes:\n- " + "\n- ".join(notes)
+    email(state, "on hold", body)
+    problems = _reset_to_base_branch()
+    if problems:
+        log.warning("reset after hold left issues: %s", problems)
+    for key in RESET_KEYS:
+        state.pop(key, None)
+    state["state"] = "IDLE"
+    log.info("task on hold: %r (resume at %s)", item[:80], resume_state)
+
+
+def _request_continue(thread_id: str, note: str) -> bool:
+    """Flag the held task on this thread as requested; it is restored at the next pick.
+    False when no held task lives on the thread."""
+    holds = _load_holds()
+    for hold in holds:
+        if hold.get("thread_id") == thread_id:
+            hold["requested"] = True
+            hold["note"] = note
+            hold["requested_at"] = time.time()
+            _save_holds(holds)
+            log.info("continue requested for held task %r", hold.get("item", "")[:80])
+            return True
+    return False
+
+
+def _resume_held_task(state: dict, hold: dict) -> None:
+    """Restore a held task into `state` (branch, session, wait/phase state) and apply
+    the user's CONTINUE note, if any, as the reply the task was waiting for."""
+    saved = dict(hold.get("saved") or {})
+    resume_state = saved.pop("state", "EXPLORING")
+    note = hold.get("note", "")
+    item = hold.get("item", "")
+    log.info("resuming held task %r at %s", item[:80], resume_state)
+    try:
+        gdoc_client.unhold_task(item)
+    except Exception:  # noqa: BLE001
+        log.exception("could not remove the hold marker")
+    if not gdoc_client.claim_task(item):
+        log.warning("held task could not be re-claimed (struck or claimed elsewhere); dropping "
+                    "the hold: %r", item[:80])
+        _save_holds([h for h in _load_holds() if h is not hold and h.get("thread_id") != hold.get("thread_id")])
+        return
+    branch = hold.get("branch") or saved.get("branch")
+    if branch:
+        git("checkout", branch)
+    state.update(saved)
+    state["state"] = resume_state
+    _save_holds([h for h in _load_holds() if h.get("thread_id") != hold.get("thread_id")])
+    if note and state["state"] in WAITS and state["state"] != "WAIT_REVIEW":
+        # The note answers whatever the task was waiting on (approval, question, merge).
+        email(state, "resumed", f"Resuming this task with your note:\n\n{note}")
+        _handle_reply(state, note)
+        return
+    if note and state.get("session_id"):
+        result = agent_runner.resume(state["session_id"], prompts.render(
+            prompts.ANSWER_REPLY, reply=f"(task resumed after a pause) {note}",
+            rules=prompts.PHASE_RULES.get(state["state"], "")))
+        if handle_result(state, result, state["state"]):
+            return
+    last = state.get("last_email") or {}
+    if state["state"] in WAITS:
+        email(state, "resumed",
+              "Resuming this task; I'm still waiting on your reply to my last message"
+              + (f":\n\n{last.get('body', '')}" if last.get("body") else "."))
+    else:
+        email(state, "resumed", f"Resuming this task from state {state['state']}.")
+
+
 def check_commands(state: dict) -> bool:
     """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
     the tick should skip normal dispatch (an ABORT reset or a DONE completion).
@@ -1983,7 +2129,35 @@ def check_commands(state: dict) -> bool:
         return False
     if polled is None:
         return False
-    msg_id, thread_id, command, targeted = polled
+    msg_id, thread_id, command, targeted, note = polled
+    if command == "CONTINUE":
+        if not _request_continue(thread_id, note):
+            if thread_id and thread_id == state.get("thread_id"):
+                # "continue" on the ACTIVE task thread is ordinary conversation
+                # ("carry on"); leave it for handle_wait's classifiers.
+                log.debug("CONTINUE-shaped reply on the active thread; deferring")
+                return False
+            gmail_client.mark_processed(msg_id)
+            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing on hold here",
+                              "CONTINUE received, but no task is on hold on this thread.",
+                              thread_id)
+            return False
+        gmail_client.mark_processed(msg_id)
+        gmail_client.send(f"{config.SUBJECT_PREFIX} general — will continue",
+                          "Got it — this task is next: I'll resume it as soon as my current "
+                          "work is done (right away if I'm idle).", thread_id)
+        return False
+    if command == "HOLD":
+        if not state.get("item"):
+            log.warning("HOLD command received but no task is in progress; ignoring")
+            gmail_client.mark_processed(msg_id)
+            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to hold",
+                              "HOLD received, but no task is in progress.", thread_id)
+            return False
+        # Consume only AFTER handling (multi-step side effects, like DONE).
+        _hold_task(state, thread_id)
+        gmail_client.mark_processed(msg_id)
+        return True
     if command == "DONE":
         if not targeted and thread_id and thread_id == state.get("thread_id"):
             # A BARE "Done"-bodied reply on the ACTIVE task thread is normal
@@ -2055,6 +2229,11 @@ def _send_status(state: dict, thread_id: str) -> None:
     age = _heartbeat_age()
     if age is not None:
         lines.append(f"Heartbeat age: {age:.0f}s")
+    holds = _load_holds()
+    if holds:
+        lines.append("On hold: " + "; ".join(
+            f"{h.get('slug') or h.get('item', '?')[:40]}"
+            + (" (continue requested)" if h.get("requested") else "") for h in holds))
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
     for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),

@@ -146,6 +146,23 @@ class ClaimMarkers(unittest.TestCase):
         self.assertEqual(gdoc_client._marker_ranges(doc, {"ranges": [(10, 41)]}, "otherbot"), [])
 
 
+class HoldMarkers(unittest.TestCase):
+    def test_held_tasks_are_not_pickable_and_markers_stripped(self):
+        with patch.object(config, "DOC_SECTION", SECTION):
+            pend = gdoc_client._pending([_task("paused [on hold: codebot-x]"), _task("free")])
+        self.assertEqual([t["text"] for t in pend], ["free"])
+        self.assertEqual(gdoc_client.held_by("x [On Hold: Bot2]"), "bot2")
+        self.assertIsNone(gdoc_client.held_by("x [implementing: bot2]"))
+        self.assertEqual(gdoc_client.strip_claims("t [implementing: a] [on hold: b]").strip(), "t")
+
+    def test_find_task_prefers_own_hold(self):
+        doc = {"body": {"content": [
+            _para("dup", 20, level=0),
+            _para(f"dup [on hold: {config.INSTANCE_ID}]", 60, level=0),
+        ]}}
+        self.assertEqual(gdoc_client._find_task(doc, "dup")["ranges"][0][0], 60)
+
+
 class PriorityTags(unittest.TestCase):
     def test_priority_parsed_case_and_space_insensitive(self):
         self.assertEqual(gdoc_client.priority_of("Fix header Codebot[2]"), 2)

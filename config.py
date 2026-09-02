@@ -147,6 +147,8 @@ ENVIRONMENT_NOTES = _environment_notes()
 TOKEN_PATH = DATA_DIR / "token.json"
 CREDENTIALS_PATH = DATA_DIR / "credentials.json"
 STATE_PATH = DATA_DIR / "state.json"
+# Tasks paused with the HOLD command, keyed by their email thread (see main._hold_task).
+HOLDS_PATH = DATA_DIR / "holds.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",

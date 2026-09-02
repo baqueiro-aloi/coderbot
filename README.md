@@ -158,6 +158,14 @@ is logged and ignored.
 - **STATUS** replies with a snapshot — instance, current state, task/slug/branch, PR
   URL, pending question, last transition time, round counters, and the full text of
   the last email codebot sent — without changing anything.
+- **HOLD** (or **PAUSE**) parks the current task: any half-finished git operation is
+  aborted, all pending work is committed on the task branch (evidence files excluded),
+  the task's state is saved in `data/holds.json`, its bullet in the doc gets an
+  `[on hold: <instance>]` marker (no instance picks it), and codebot returns to IDLE
+  to take the next item. Reply **CONTINUE** (or **RESUME**, optionally followed by
+  instructions) on the held task's thread to bring it back: it becomes the very next
+  task codebot picks, restored on its branch and session; the instructions are handed
+  to the task as the reply to whatever it was waiting on.
 - **DONE** marks the current task complete: strikes the item through in the backlog
   doc, resets the local checkout to a clean base branch, and returns to IDLE to pick
   the next item. Use it when the work turned out to already be done (e.g. an earlier
