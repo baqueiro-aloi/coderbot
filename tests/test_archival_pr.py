@@ -172,6 +172,34 @@ class ArchivalTests(unittest.TestCase):
                 self.assertEqual(self.state["state"], "ARCHIVING")
                 self.assertEqual(self.state["archive_round"], 1)
 
+    def test_stripped_first_status_line_is_still_recognized_as_archive_output(self):
+        # git() strips its output, so the first porcelain line loses its leading status
+        # column (" D path" -> "D path"). That must not read as an unrelated change.
+        self.state["archive_path"] = "openspec/changes/archive/2026-09-02-api-version"
+        status = (
+            "D openspec/changes/api-version/proposal.md\n"
+            " D openspec/changes/api-version/tasks.md\n"
+            "?? openspec/changes/archive/2026-09-02-api-version/proposal.md\n"
+            "?? openspec/specs/api/spec.md"
+        )
+        self.assertEqual(main._unrelated_archive_changes(self.state, status), [])
+        self.assertEqual(
+            main._unrelated_archive_changes(self.state, status + "\n M src/app.py"),
+            ["src/app.py"])
+
+    def test_unrelated_archive_change_is_named_in_error(self):
+        def run(command, **kwargs):
+            return self.ok(command)
+
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main, "save_state"), \
+             patch.object(main.subprocess, "run", side_effect=run), \
+             patch.object(main, "git", side_effect=["", "", "M src/app.py"]):
+            main.do_archive(self.state)
+
+        self.assertEqual(self.state["state"], "ARCHIVING")
+        self.assertIn("src/app.py", self.state["archive_error"])
+
     def test_archive_command_success_without_expected_target_does_not_advance(self):
         def run(command, **kwargs):  # archive "succeeds" but moves nothing
             return self.report() if "--archived" in command else self.completed(command, "{}")

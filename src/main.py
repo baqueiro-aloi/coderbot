@@ -879,18 +879,29 @@ def _archive_failed(state: dict, error: Exception) -> None:
     state["state"] = "WAIT_REPLY"
 
 
-def _changes_are_archive_outputs(state: dict, status: str) -> bool:
+def _unrelated_archive_changes(state: dict, status: str) -> list[str]:
+    """Paths in a `git status --porcelain` listing outside the archive's outputs.
+
+    `git()` strips its output, which removes the leading status column of the first
+    line (" D path" -> "D path"), so parse each line by the first whitespace after the
+    XY status field instead of a fixed offset.
+    """
     allowed = (
         "openspec/specs",
         f"openspec/changes/{state['slug']}",
         state["archive_path"],
     )
+    unrelated = []
     for line in status.splitlines():
-        paths = line[3:].split(" -> ")
-        if any(not any(path.strip('"') == root or path.strip('"').startswith(root + "/")
-                       for root in allowed) for path in paths):
-            return False
-    return True
+        if not line.strip():
+            continue
+        match = re.match(r"^ ?[A-Z?!]{1,2} (.*)$", line)
+        rest = match.group(1) if match else line
+        for path in rest.split(" -> "):
+            path = path.strip().strip('"')
+            if not any(path == root or path.startswith(root + "/") for root in allowed):
+                unrelated.append(path)
+    return unrelated
 
 
 def _validate_archived_change(target: Path) -> None:
@@ -947,8 +958,10 @@ def do_archive(state: dict) -> None:
         _run_checked(["openspec", "validate", "--specs", "--strict", "--no-interactive"])
         _validate_archived_change(target)
         status = git("status", "--porcelain", "--untracked-files=all")
-        if status and not _changes_are_archive_outputs(state, status):
-            raise RuntimeError("archival produced unrelated tracked changes")
+        unrelated = _unrelated_archive_changes(state, status) if status else []
+        if unrelated:
+            raise RuntimeError("archival produced unrelated tracked changes: "
+                               + ", ".join(unrelated[:10]))
         if status:
             paths = ("openspec/specs", f"openspec/changes/{state['slug']}",
                      state["archive_path"])
