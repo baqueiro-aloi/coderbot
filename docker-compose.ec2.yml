@@ -2,7 +2,7 @@
 # with the base file:
 #   docker compose -f docker-compose.ec2.yml up -d --build
 # Assumes this repo is cloned at /opt/coderbot and the target repo at
-# $CODEBOT_REPO_PATH (default /opt/riverly-style path set in the env file), with the
+# $CODEBOT_REPO_PATH (set in the env file, e.g. /opt/<target-repo>), with the
 # host-side credential files provisioned under /opt/codebot/:
 #   /opt/codebot/codebot.env          -> the .env (see .env.example)
 #   /opt/codebot/claude/               -> ~/.claude for the bot (contains .credentials.json)
