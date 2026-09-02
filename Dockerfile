@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npx --yes playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code@2.1.209 opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
+RUN npm install -g @anthropic-ai/claude-code@2.1.257 opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
     && npm install --prefix /opt/coderbot/plugins \
         "superpowers@git+https://github.com/obra/superpowers.git#v6.3.0"
 
