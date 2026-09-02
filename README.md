@@ -2,9 +2,9 @@
 
 Autonomous coding agent that works the improvements backlog (a Google Doc,
 `CODEBOT_DOC_ID`) of whatever target repo you point it at (`CODEBOT_REPO_PATH`),
-plans with that repo's OpenSpec workflow via a selectable headless coding agent
-(Claude Code or OpenCode), and talks
-to the maintainer exclusively by email (`CODEBOT_USER_EMAIL`).
+plans with the managed OpenSpec workflow via a selectable headless coding agent
+(Claude Code or OpenCode), and talks to the maintainer exclusively by email
+(`CODEBOT_USER_EMAIL`). Several instances can share one mailbox and backlog doc.
 
 ## Target repo prerequisites
 
@@ -31,7 +31,7 @@ missing:
   (OpenCodeReview), an Anthropic-backed automated PR reviewer, with the
   workflow named `Code Review` (not OpenCodeReview's own suggested workflow
   name) and posting under the default `github-actions[bot]` identity — both
-  required for codebot's detection and comment-polling to see it.
+  required for codebot's detection and review-thread polling to see it.
   - **Missing**: the post-PR review wait is skipped and the PR is emailed to
     the user immediately, and codebot adds a backlog item requesting the
     workflow.
@@ -60,12 +60,19 @@ Set `CODEBOT_DOC_SECTION` to a heading text (e.g. `New:`) to make only the bulle
 under that heading pickable — items under other headings (say, "Under review:") are
 left alone. Unset, every top-level bullet in the doc is a candidate. Picking a task
 appends `[implementing: <instance>]` to its bullet so other instances sharing the doc
-skip it; the marker is removed when the task completes or is aborted.
+skip it; the marker is removed when the task completes or is aborted. A task parked
+with the HOLD command carries `[on hold: <instance>]` instead and is skipped by everyone
+until CONTINUE (see "Mailbox commands").
+
+When codebot is idle it picks, in this order: a held task whose CONTINUE was requested;
+a task it already claimed but lost track of (e.g. `data/` was rebuilt); the
+`Codebot[n]` tagged task(s) with the lowest number; otherwise the coding agent chooses
+among all pending items (prerequisites and enablers first).
 
 ## Lifecycle
 
 ```
-IDLE → pick item (non-struck ¶ in the Doc, coding agent chooses) → branch codebot-<slug>
+IDLE → pick item (see "Backlog doc format") → claim it → branch <instance>-<slug>
       → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
      → IMPLEMENTING → VERIFYING → INTERNAL_REVIEW → E2E (when present)
      → ARCHIVING → OPEN_PR → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING (if review fixes exist)
@@ -85,7 +92,9 @@ the validated spec, active-change, and archive paths. If archive recovery needs 
 guidance, the existing agent session may repair and commit only OpenSpec planning/spec
 files before coderbot retries archival.
 
-Any state that keeps failing detours through WAIT_STUCK (see "Failure handling").
+Every tick starts by checking the mailbox for commands (ABORT / STATUS / DONE / HOLD /
+CONTINUE, see below). Any state that keeps failing detours through WAIT_STUCK (see
+"Failure handling"), and HOLD parks a task from any state.
 Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
 output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
 with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
@@ -136,11 +145,13 @@ container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted te
 (e2e output, review comments, email bodies) is fenced as data inside prompts so an
 embedded instruction cannot hijack the flow.
 
-## Mailbox commands: ABORT / STATUS / DONE (last resort)
+## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
 
-Email codebot with a body of exactly `ABORT`, `STATUS`, or `DONE` (case-insensitive),
-optionally followed by an instance name (`ABORT codebot-x7k2`) when several instances
-share the mailbox — see "Multiple instances" below for how bare commands are scoped.
+Email codebot with a body of exactly `ABORT`, `STATUS`, `DONE`, `HOLD` (or `PAUSE`),
+or `CONTINUE` (or `RESUME`, which may be followed by a note) — case-insensitive,
+trailing punctuation tolerated — optionally with an instance name (`ABORT codebot-x7k2`)
+when several instances share the mailbox — see "Multiple instances" below for how bare
+commands are scoped.
 All are checked at the start of every tick and mailbox-wide (any thread, or a brand-new
 email), so they work even when the agent is stuck waiting on a thread — or in
 WAIT_REVIEW, which never polls the inbox. **Only mail from `CODEBOT_USER_EMAIL` is
@@ -156,16 +167,21 @@ is logged and ignored.
   between phases, so an abort sent mid-phase takes effect once the current agent call
   returns.
 - **STATUS** replies with a snapshot — instance, current state, task/slug/branch, PR
-  URL, pending question, last transition time, round counters, and the full text of
-  the last email codebot sent — without changing anything.
+  URL, pending question, stuck state and failure counters, last transition time, round
+  counters, heartbeat age, tasks on hold, and the full text of the last email codebot
+  sent — without changing anything.
 - **HOLD** (or **PAUSE**) parks the current task: any half-finished git operation is
   aborted, all pending work is committed on the task branch (evidence files excluded),
   the task's state is saved in `data/holds.json`, its bullet in the doc gets an
   `[on hold: <instance>]` marker (no instance picks it), and codebot returns to IDLE
   to take the next item. Reply **CONTINUE** (or **RESUME**, optionally followed by
   instructions) on the held task's thread to bring it back: it becomes the very next
-  task codebot picks, restored on its branch and session; the instructions are handed
-  to the task as the reply to whatever it was waiting on.
+  task codebot picks (after the one in progress, or immediately when idle), restored
+  on its branch and session; the instructions are handed to the task as the reply to
+  whatever it was waiting on, and without them codebot re-sends its last message so
+  you know what it is still waiting for. Held tasks are listed in `data/holds.json`
+  and by STATUS. A bare "continue" on the **active** task's thread is ordinary
+  conversation, not this command.
 - **DONE** marks the current task complete: strikes the item through in the backlog
   doc, resets the local checkout to a clean base branch, and returns to IDLE to pick
   the next item. Use it when the work turned out to already be done (e.g. an earlier
@@ -253,8 +269,10 @@ offers to run the consent flow in step 2 for you.
    GIT_AUTHOR_EMAIL=codebot@example.com
    # Optional: project name used in prompts; defaults to the repo dir name
    CODEBOT_PROJECT_NAME=
-   # Optional; defaults to claude-opus-4-8
-   CLAUDE_MODEL=claude-opus-4-8
+   # Optional; defaults to claude-fable-5 / medium (the claude CLI pin in the
+   # Dockerfile must support the model you choose — see "Troubleshooting")
+   CLAUDE_MODEL=claude-fable-5
+   CLAUDE_EFFORT=medium
    # Required when CODEBOT_AGENT=opencode. Run ./setup.sh to complete the
    # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
    OPENCODE_PROVIDER=
@@ -271,7 +289,14 @@ offers to run the consent flow in step 2 for you.
    # Optional; only needed if the target repo's own .claude/settings.json defines an
    # "apiKeyHelper" that reads this variable — see "Troubleshooting" below
    CLAUDE_API_KEY=
+   # Optional; only bullets under this heading of the backlog doc are picked
+   CODEBOT_DOC_SECTION=
+   # Optional; hand-picked instance name (see "Multiple instances")
+   CODEBOT_INSTANCE=
    ```
+   Every other knob (failure budgets, timeouts, review/conflict round caps, heartbeat
+   thresholds, project-specific environment notes) is optional and documented with its
+   default in `.env.example`.
    (macOS keeps Claude credentials in the Keychain, which the Linux container
    can't read — hence the explicit token.)
 
@@ -294,7 +319,8 @@ docker compose logs -f
 
 State lives in `data/state.json`; the container restarts safely from any state.
 To abort the current task, email `ABORT` (see "Mailbox commands") — or stop the
-container, delete `data/state.json`, clean the git branch, restart.
+container, delete `data/state.json`, remove the task's `[implementing: …]` marker in
+the doc, clean the git branch, restart.
 
 Everything codebot must remember across restarts lives in `data/` — the Google
 token, `state.json`, `holds.json` (tasks on hold), `instance_id`, the processed-mail
@@ -341,11 +367,13 @@ marker by hand.
 
 All instances share the Gmail account; each one only reads replies on its own
 threads (subjects carry its prefix). Address mailbox commands to one instance —
-`ABORT codebot-x7k2`, `STATUS codebot-x7k2`, `DONE codebot-x7k2` — or reply with the
-bare command on one of its threads. A bare `ABORT` or `STATUS` sent anywhere else is
-honored by **every** instance (fleet-wide stop / fleet status — their last-resort
-role); a bare `DONE` outside an instance's threads is ignored, since "mark the
-current task done" is per-instance.
+`ABORT codebot-x7k2`, `STATUS codebot-x7k2`, `DONE codebot-x7k2`, `HOLD codebot-x7k2`
+— or reply with the bare command on one of its threads. A bare `ABORT` or `STATUS`
+sent anywhere else is honored by **every** instance (fleet-wide stop / fleet status —
+their last-resort role); a bare `DONE`, `HOLD` or `CONTINUE` outside an instance's
+threads is ignored, since they act on one instance's task. Only the instance that put
+a task on hold can resume it; delete its `[on hold: …]` marker by hand to free the task
+for anyone.
 
 ## Toolchain versions
 
@@ -363,7 +391,7 @@ CLI behavior change between rebuilds is exactly what the pins prevent.
 Inside the container (`docker compose exec codebot bash`):
 
 ```bash
-claude -p 'say ok' --dangerously-skip-permissions   # when CODEBOT_AGENT=claude
+claude -p 'say ok' --model "$CLAUDE_MODEL" --dangerously-skip-permissions  # CODEBOT_AGENT=claude
 opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
 gh auth status                                       # GH token works
 git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
@@ -378,6 +406,12 @@ the image's managed Superpowers or coderbot/OpenSpec bridge files are absent. Re
 the image from this repository and check that no volume mount replaces
 `/opt/coderbot/plugins` or `/opt/coderbot/agent-plugin`; do not install Superpowers in
 the target repo or host profile as a workaround.
+
+**`Claude Code X does not support this model; version Y or newer is required`** (or
+`There's an issue with the selected model`): the `@anthropic-ai/claude-code@<version>`
+pin in the `Dockerfile` predates `CLAUDE_MODEL`. Bump the pin to a version that knows
+the model (see "Toolchain versions") and rebuild; also double-check the model id
+spelling (`claude-fable-5-1`, dashes only).
 
 **OpenCode provider authentication fails or returns `401 Unauthorized`**: rerun
 `./setup.sh` and complete authentication for `OPENCODE_PROVIDER`, then retry the
@@ -403,13 +437,15 @@ hand-editing the file.
 ## Logs
 
 All activity is logged to stdout (visible via `docker compose logs -f`). At the
-default `DEBUG` level you see every state transition, each Claude invocation
-(model, prompt size, returned session/output size, whether it hit the
+default `DEBUG` level you see every state transition, each coding-agent invocation
+(model, effort, prompt size, returned session/output size, whether it hit the
 `NEED_USER_INPUT` sentinel), every email sent (subject, thread, attachment count
-and byte totals, any size-skipped files) and reply received, git commands, the
-e2e suite result, and the evidence-video harvest (which `.webm` files were found
-and their sizes — with explicit warnings if none were produced or a feature
-shipped without e2e specs). Set `CODEBOT_LOG_LEVEL=INFO` for a quieter feed.
+and byte totals, any size-skipped files), reply and command received, git/gh
+commands, the e2e suite result, review-thread activity, and the evidence-video
+harvest (which `.webm` files were found and their sizes — with explicit warnings if
+none were produced or a feature shipped without e2e specs). Failures are logged with
+their per-state count (`cycle failed in E2E (2/5)`). Set `CODEBOT_LOG_LEVEL=INFO` for
+a quieter feed; STATUS by email gives the same picture without the logs.
 
 ## Evidence
 
@@ -417,14 +453,23 @@ If the target repo has an e2e harness, the implementation phase adds coverage fo
 it and, once the suite passes, codebot re-runs the feature's own tests to capture
 evidence for the PR email:
 
-- **Playwright**: re-runs the feature's specs with `PICA_E2E_VIDEO=on` (forces
-  `video: "on"` in `e2e/playwright.config.ts`), then stitches the resulting
-  `.webm` clips from `e2e/test-results/` into a single H.264 `evidence.mp4` with
-  ffmpeg (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate
-  cleanly). If ffmpeg is unavailable or stitching fails, it falls back to
-  attaching the raw `.webm` clips.
+- **Playwright**: the implementation must include one demo test tagged `@evidence`
+  that walks through the feature visibly. Codebot first re-runs only that test
+  (`./run.sh <spec> --grep @evidence`), falling back to the feature's full specs when
+  no clip appears, with `PICA_E2E_VIDEO=on` and `PW_VIDEO=on` exported (either forces
+  `video: "on"` in `e2e/playwright.config.ts`). The resulting `.webm` clips from
+  `e2e/test-results/` are stitched into a single H.264 `data/evidence.mp4` with ffmpeg
+  (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate cleanly).
+  If ffmpeg is unavailable or stitching fails, it falls back to attaching the raw
+  `.webm` clips.
 - **Newman**: re-runs the feature's collection(s) and attaches the newest
   generated report file from `e2e/test-results/`.
 
 If no e2e harness is present for the task, no evidence is produced and the PR
 email is sent without an attachment.
+
+A `run.sh` that exceeds `CODEBOT_E2E_TIMEOUT` is killed, which skips its own cleanup
+trap; codebot then tears down the harness's compose stack itself
+(`docker compose -f $CODEBOT_E2E_COMPOSE_FILE down -v`, default
+`docker-compose.e2e.yaml`, skipped when the file doesn't exist) so leaked containers
+don't collide with the next run.
