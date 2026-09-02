@@ -1,4 +1,5 @@
 """Startup behavior tests for the managed agent runtime."""
+import pathlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,10 @@ with patch.dict("sys.modules", {
     "gmail_client": MagicMock(),
 }):
     import main
+
+# Never let a test that reaches save_state() write the real data/state.json (it would
+# poison a live deployment sharing this checkout).
+main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):

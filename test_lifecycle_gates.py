@@ -1,13 +1,19 @@
 """State-machine tests for persisted verification and internal-review gates."""
 import json
 import subprocess
+import pathlib
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
     import main
+
+# Never let a test that reaches save_state() write the real data/state.json (it would
+# poison a live deployment sharing this checkout).
+main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 def result(output, question=None):
