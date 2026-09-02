@@ -41,7 +41,8 @@ print_current_settings() {
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_MODEL OPENCODE_PROVIDER OPENCODE_MODEL \
     CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
-    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH; do
+    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_EFFORT CODEBOT_DOC_SECTION \
+    CODEBOT_INSTANCE; do
     value="$(existing_value "$var")"
     if [ -n "$value" ]; then
       echo "  - $var=$value"
@@ -275,6 +276,7 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
 
   CLAUDE_CODE_OAUTH_TOKEN=""
   CLAUDE_MODEL=""
+  CLAUDE_EFFORT=""
   OPENCODE_PROVIDER=""
   OPENCODE_MODEL=""
   if [ "$CODEBOT_AGENT" = "claude" ]; then
@@ -332,8 +334,19 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
   if [ "$CODEBOT_AGENT" = "claude" ]; then
     CLAUDE_MODEL=$(prompt_var "CLAUDE_MODEL" \
       "Optional: Claude model codebot uses for its working sessions." \
-      "claude-opus-4-8")
+      "claude-fable-5")
+    CLAUDE_EFFORT=$(prompt_var "CLAUDE_EFFORT" \
+      "Optional: Claude effort level for working sessions (low / medium / high)." \
+      "medium")
   fi
+
+  CODEBOT_DOC_SECTION=$(prompt_var "CODEBOT_DOC_SECTION" \
+    "Optional: heading text in the backlog doc; only bullets under it are picked (e.g. New:). Leave blank to use every top-level bullet in the doc." \
+    "")
+
+  CODEBOT_INSTANCE=$(prompt_var "CODEBOT_INSTANCE" \
+    "Optional: hand-picked instance name ([a-z0-9-]) that tags email subjects and branches. Leave blank to keep the generated id in data/instance_id." \
+    "")
 
   CODEBOT_BASE_BRANCH=$(prompt_var "CODEBOT_BASE_BRANCH" \
     "Optional: the branch codebot treats as the trunk — it syncs from this branch before picking a task, branches feature work off of it, opens PRs against it, and resets to it on abort." \
@@ -455,6 +468,9 @@ CODEBOT_QUALITY_GATE_MAX_ROUNDS=$CODEBOT_QUALITY_GATE_MAX_ROUNDS
 CODEBOT_ARCHIVE_MAX_ROUNDS=$CODEBOT_ARCHIVE_MAX_ROUNDS
 CODEBOT_BASE_BRANCH=$CODEBOT_BASE_BRANCH
 CLAUDE_API_KEY=$CLAUDE_API_KEY
+CLAUDE_EFFORT=$CLAUDE_EFFORT
+CODEBOT_DOC_SECTION=$CODEBOT_DOC_SECTION
+CODEBOT_INSTANCE=$CODEBOT_INSTANCE
 EOF
   chmod 600 "$ENV_FILE"
 
@@ -463,7 +479,8 @@ EOF
   for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL OPENCODE_PROVIDER \
     OPENCODE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
-    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_API_KEY; do
+    CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_API_KEY CLAUDE_EFFORT \
+    CODEBOT_DOC_SECTION CODEBOT_INSTANCE; do
     echo "  - $var"
   done
 fi

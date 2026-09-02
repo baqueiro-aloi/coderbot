@@ -120,6 +120,15 @@ CONFLICT_MAX_ROUNDS = int(os.environ.get("CODEBOT_CONFLICT_MAX_ROUNDS", "3"))
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
 
+# Liveness heartbeat. A daemon thread touches HEARTBEAT_PATH every poll interval as
+# long as the current tick has run for less than HEARTBEAT_MAX_TICK (so a legitimate
+# multi-hour agent call stays healthy); once a tick exceeds that ceiling the process
+# is wedged beyond any plausible real operation and the heartbeat is allowed to go
+# stale so the container healthcheck can force a restart.
+HEARTBEAT_PATH = DATA_DIR / "heartbeat"
+HEARTBEAT_MAX_TICK_SECONDS = int(
+    os.environ.get("CODEBOT_HEARTBEAT_MAX_TICK", str(AGENT_TIMEOUT_SECONDS + 900)))
+
 # Project-specific runtime facts prepended to every agentic prompt (how to run the
 # tests, what is NOT available in the container, ...). Either the env var or the file
 # data/environment.md; the generic facts in prompts.ENVIRONMENT always apply.

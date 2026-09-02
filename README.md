@@ -281,8 +281,29 @@ docker compose logs -f
 ```
 
 State lives in `data/state.json`; the container restarts safely from any state.
-To abort the current task: stop the container, delete `data/state.json`, clean the
-git branch, restart.
+To abort the current task, email `ABORT` (see "Mailbox commands") — or stop the
+container, delete `data/state.json`, clean the git branch, restart.
+
+Only one codebot may run against a `data/` dir: startup takes a lock on
+`data/state.lock` and a second process exits immediately. The container reports
+Docker health from a heartbeat the tick loop maintains (`docker inspect --format
+'{{.State.Health.Status}}' coderbot-codebot-1`); a loop wedged beyond any plausible
+operation (past `CODEBOT_HEARTBEAT_HARD`, ~2.5h) is force-restarted via the
+`restart: unless-stopped` policy.
+
+### On a Linux server (EC2)
+
+`docker-compose.ec2.yml` is the same stack with fixed host paths: this repo at
+`/opt/coderbot`, the `.env` at `/opt/codebot/codebot.env`, the bot's `~/.claude` at
+`/opt/codebot/claude` (with `.credentials.json`), a read-only `~/.claude.json` seed at
+`/opt/codebot/claude.json`, and the Google OAuth files in `/opt/coderbot/data/`. The
+target repo path comes from `CODEBOT_REPO_PATH` in the env file. Provision those files
+(e.g. from a secrets manager in the instance's user-data), `chown -R 501` both trees,
+then:
+
+```bash
+cd /opt/coderbot && docker compose -f docker-compose.ec2.yml up -d --build
+```
 
 ## Multiple instances
 

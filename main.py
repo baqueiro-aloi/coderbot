@@ -1,9 +1,11 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
+import fcntl
 import json
 import logging
 import re
 import subprocess
+import threading
 import time
 import traceback
 from datetime import date
@@ -2005,6 +2007,13 @@ def _fmt_ts(epoch: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
 
 
+def _heartbeat_age() -> float | None:
+    try:
+        return time.time() - config.HEARTBEAT_PATH.stat().st_mtime
+    except OSError:
+        return None
+
+
 def _send_status(state: dict, thread_id: str) -> None:
     """Reply to a STATUS command with a snapshot of the FSM. Never mutates state."""
     lines = [
@@ -2028,6 +2037,9 @@ def _send_status(state: dict, thread_id: str) -> None:
         lines.append(f"Consecutive question rounds: {state['question_rounds']}")
     if state.get("conflict_rounds"):
         lines.append(f"Merge-conflict resolution attempts: {state['conflict_rounds']}")
+    age = _heartbeat_age()
+    if age is not None:
+        lines.append(f"Heartbeat age: {age:.0f}s")
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
     for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
@@ -2212,6 +2224,37 @@ def _handle_reply(state: dict, reply: str) -> None:
         do_question_reply(state, reply)
 
 
+# Loop liveness for the heartbeat thread: the main loop stamps this at the start of every
+# tick. The daemon touches the heartbeat file only while a tick is younger than the max
+# plausible duration, so a legit multi-hour agent call stays healthy but a wedged loop
+# eventually lets the heartbeat go stale (see config.HEARTBEAT_MAX_TICK_SECONDS).
+_liveness = {"tick_started": time.time()}
+_lock_handle = None  # kept alive for the process lifetime so the flock is held
+
+
+def _heartbeat_loop() -> None:
+    while True:
+        try:
+            if time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS:
+                config.HEARTBEAT_PATH.write_text(str(int(time.time())))
+        except Exception:
+            log.exception("heartbeat write failed")
+        time.sleep(config.POLL_INTERVAL_SECONDS)
+
+
+def _acquire_single_instance_lock() -> None:
+    """Refuse to start a second codebot against the same data/ dir — two processes would
+    interleave state.json writes. The lock is released automatically when the process exits."""
+    global _lock_handle
+    lock_path = config.DATA_DIR / "state.lock"
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _lock_handle = open(lock_path, "w")
+    try:
+        fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(f"another codebot already holds {lock_path}; refusing to start")
+
+
 def validate_managed_runtime() -> None:
     required = [
         ("Superpowers skill tree",
@@ -2252,6 +2295,8 @@ def main() -> None:
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
+    _acquire_single_instance_lock()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s doc=%s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.DOC_ID)
     # Re-assert the doc claim for an in-flight task: one picked before claim markers
@@ -2267,6 +2312,7 @@ def main() -> None:
         log.exception("could not re-assert the in-flight task's claim at startup")
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
+        _liveness["tick_started"] = time.time()
         try:
             state = load_state()
         except (json.JSONDecodeError, OSError):
