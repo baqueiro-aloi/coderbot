@@ -1,0 +1,271 @@
+"""Review-thread model, merge gate and conflict routing — I/O edges stubbed."""
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
+    import main
+
+main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
+
+PR = "https://github.com/acme/project/pull/42"
+
+
+def verdict(**fields):
+    return Mock(output=json.dumps(fields))
+
+
+def ocr(tid="T1"):
+    return {"id": tid, "comment_id": 7, "path": "a.py", "line": 3, "outdated": False,
+            "author": "github-actions", "body": "nit"}
+
+
+def human(tid="H1"):
+    return {"id": tid, "comment_id": 8, "path": "b.py", "line": 9, "outdated": False,
+            "author": "alice", "body": "please rename"}
+
+
+class ThreadHelpers(unittest.TestCase):
+    def test_is_ocr_thread_accepts_both_spellings(self):
+        self.assertTrue(main._is_ocr_thread({"author": "github-actions"}))
+        self.assertTrue(main._is_ocr_thread({"author": "github-actions[bot]"}))
+        self.assertFalse(main._is_ocr_thread({"author": "alice"}))
+        self.assertFalse(main._is_ocr_thread({}))
+
+    def test_format_with_ids_for_the_worker(self):
+        text = main.format_unresolved_threads([ocr(), human()], ids=True)
+        self.assertIn("thread_id: T1", text)
+        self.assertIn("a.py:3 (github-actions)", text)
+        self.assertIn("(alice)", text)
+
+    def test_query_failure_returns_none(self):
+        proc = subprocess.CompletedProcess([], 1, "", "boom")
+        with patch.object(main.subprocess, "run", return_value=proc):
+            self.assertIsNone(main.unresolved_review_threads(PR))
+
+    def test_query_parses_and_paginates(self):
+        page1 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            "nodes": [{"id": "T1", "isResolved": False, "isOutdated": False, "path": "a.py",
+                       "line": 3, "comments": {"nodes": [{"author": {"login": "github-actions"},
+                                                          "body": "nit", "databaseId": 7}]}},
+                      {"id": "T2", "isResolved": True, "comments": {"nodes": []}}]}}}}}
+        page2 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False},
+            "nodes": [{"id": "H1", "isResolved": False, "isOutdated": True, "path": "b.py",
+                       "line": None, "comments": {"nodes": [{"author": {"login": "alice"},
+                                                             "body": "x", "databaseId": 8}]}}]}}}}}
+        procs = [subprocess.CompletedProcess([], 0, json.dumps(page1), ""),
+                 subprocess.CompletedProcess([], 0, json.dumps(page2), "")]
+        with patch.object(main.subprocess, "run", side_effect=procs) as run:
+            threads = main.unresolved_review_threads(PR)
+        self.assertEqual([t["id"] for t in threads], ["T1", "H1"])
+        self.assertTrue(threads[1]["outdated"])
+        self.assertIn("cursor=c1", run.call_args_list[1].args[0])
+
+    def test_resolve_honors_only_known_threads(self):
+        state = {"pr_url": PR, "review_threads": [ocr("T1")]}
+        output = "done\nRESOLVE: T1 fixed: renamed\nRESOLVE: EVIL not yours\n"
+        ok = subprocess.CompletedProcess([], 0, "{}", "")
+        with patch.object(main.subprocess, "run", return_value=ok) as run:
+            resolved = main._resolve_review_threads(state, output)
+        self.assertEqual(resolved, 1)
+        commands = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(len(commands), 2)  # reply + resolve for T1 only
+        self.assertIn("comments/7/replies", commands[0][2])
+        self.assertIn("body=fixed: renamed", commands[0])
+        self.assertTrue(any("resolveReviewThread" in arg for arg in commands[1]))
+
+    def test_resolve_without_known_threads_is_noop(self):
+        with patch.object(main.subprocess, "run") as run:
+            self.assertEqual(main._resolve_review_threads({"pr_url": PR}, "RESOLVE: T1 x"), 0)
+        run.assert_not_called()
+
+
+class MergeGate(unittest.TestCase):
+    def state(self):
+        return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
+                "session_id": "sid", "pr_url": PR}
+
+    def run_merge(self, state, threads, force=None, mergeable="MERGEABLE"):
+        v = {"action": "merge"}
+        if force is not None:
+            v["force"] = force
+        with patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
+             patch.object(main, "_pr_merge_state", return_value=("OPEN", mergeable)), \
+             patch.object(main, "unresolved_review_threads", return_value=threads), \
+             patch.object(main, "email") as email, \
+             patch.object(main, "_finish_task") as finish, \
+             patch.object(main.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 0, "", "")) as merge:
+            main.do_merge_reply(state, "merge")
+        return email, finish, merge
+
+    def test_failed_thread_query_blocks(self):
+        email, finish, merge = self.run_merge(self.state(), threads=None)
+        merge.assert_not_called()
+        finish.assert_not_called()
+        self.assertIn("could not verify", email.call_args.args[1])
+
+    def test_unresolved_threads_block(self):
+        state = self.state()
+        email, finish, merge = self.run_merge(state, threads=[human()])
+        merge.assert_not_called()
+        self.assertIn("unresolved review comments", email.call_args.args[1])
+        self.assertTrue(state["pr_thread_notified"])
+
+    def test_non_boolean_force_does_not_bypass(self):
+        email, finish, merge = self.run_merge(self.state(), threads=[human()], force="false")
+        merge.assert_not_called()
+
+    def test_force_true_merges_despite_threads(self):
+        email, finish, merge = self.run_merge(self.state(), threads=[human()], force=True)
+        merge.assert_called_once()
+        finish.assert_called_once()
+
+    def test_clean_pr_merges(self):
+        email, finish, merge = self.run_merge(self.state(), threads=[])
+        merge.assert_called_once()
+        self.assertIn("--squash", merge.call_args.args[0])
+        finish.assert_called_once()
+
+    def test_conflicting_pr_enters_resolution(self):
+        state = self.state()
+        email, finish, merge = self.run_merge(state, threads=[], mergeable="CONFLICTING")
+        merge.assert_not_called()
+        self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
+        self.assertTrue(state["stale_replies"])
+        self.assertEqual(state["conflict_return"], "WAIT_MERGE")
+        self.assertIn("resolving automatically", email.call_args.args[1])
+
+    def test_unknown_pr_state_blocks(self):
+        state = self.state()
+        with patch.object(main.agent_runner, "run", return_value=verdict(action="merge")), \
+             patch.object(main, "_pr_merge_state", return_value=(None, None)), \
+             patch.object(main, "email") as email, \
+             patch.object(main.subprocess, "run") as merge:
+            main.do_merge_reply(state, "merge")
+        merge.assert_not_called()
+        self.assertEqual(state["state"], "WAIT_MERGE")
+
+
+class Conflicts(unittest.TestCase):
+    def test_check_routes_conflicting_pr(self):
+        state = {"state": "WAIT_REVIEW", "pr_url": PR}
+        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "CONFLICTING")):
+            self.assertTrue(main.check_pr_conflicts(state))
+        self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
+        self.assertEqual(state["conflict_return"], "WAIT_REVIEW")
+        self.assertNotIn("stale_replies", state)
+
+    def test_check_ignores_unknown_and_resets_on_mergeable(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "conflict_rounds": 2}
+        with patch.object(main, "_pr_merge_state", return_value=(None, None)):
+            self.assertFalse(main.check_pr_conflicts(state))
+        self.assertEqual(state["conflict_rounds"], 2)
+        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "MERGEABLE")):
+            self.assertFalse(main.check_pr_conflicts(state))
+        self.assertNotIn("conflict_rounds", state)
+
+    def test_cap_escalates_to_stuck(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "conflict_rounds": 3, "item": "t"}
+        with patch.object(main.config, "CONFLICT_MAX_ROUNDS", 3), \
+             patch.object(main, "email"):
+            self.assertFalse(main._enter_conflict_resolution(state))
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertEqual(state["stuck_return"], "WAIT_MERGE")
+
+    def test_resolution_with_commit_queues_push_for_re_review(self):
+        state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
+                 "conflict_return": "WAIT_MERGE", "stale_replies": True}
+        with patch.object(main, "git", side_effect=["head-1", "head-2"]), \
+             patch.object(main.agent_runner, "resume", return_value=Mock(
+                 session_id="sid", output="merged", question=None, attachments=[])), \
+             patch.object(main, "save_state"):
+            main.do_resolve_conflicts(state)
+        self.assertEqual(state["state"], "PUSHING")
+        self.assertEqual(state["push_context"]["continuation"], "conflicts")
+        with patch.object(main, "git"):
+            main.do_push(state)
+        self.assertEqual(state["state"], "WAIT_REVIEW")
+        self.assertTrue(state["await_new_run"])
+        self.assertTrue(state["stale_replies"])
+
+    def test_resolution_without_commit_returns_to_origin(self):
+        state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
+                 "conflict_return": "WAIT_MERGE", "stale_replies": True}
+        with patch.object(main, "git", return_value="head-1"), \
+             patch.object(main.agent_runner, "resume", return_value=Mock(
+                 session_id="sid", output="nothing to do", question=None, attachments=[])):
+            main.do_resolve_conflicts(state)
+        self.assertEqual(state["state"], "WAIT_MERGE")
+        self.assertNotIn("stale_replies", state)
+        self.assertNotIn("conflict_head", state)
+
+
+class ReviewWait(unittest.TestCase):
+    def state(self):
+        return {"state": "WAIT_REVIEW", "item": "t", "pr_url": PR, "review_since": 0,
+                "e2e_specs": [], "await_new_run": True}
+
+    def test_new_run_with_ocr_threads_enters_address_review(self):
+        state = self.state()
+        with patch.object(main, "code_review_check", return_value={"bucket": "fail", "link": "L1"}), \
+             patch.object(main, "unresolved_review_threads", return_value=[ocr(), human()]):
+            main.handle_review_wait(state)
+        self.assertEqual(state["state"], "ADDRESS_REVIEW")
+        self.assertEqual([t["id"] for t in state["review_threads"]], ["T1"])
+        self.assertEqual(state["review_run_link"], "L1")
+
+    def test_query_failure_does_not_consume_the_run(self):
+        state = self.state()
+        with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
+             patch.object(main, "unresolved_review_threads", return_value=None), \
+             patch.object(main, "finalize_pr") as finalize:
+            main.handle_review_wait(state)
+        finalize.assert_not_called()
+        self.assertNotIn("review_run_link", state)
+
+    def test_resolution_only_round_finalizes_from_processed_run(self):
+        state = self.state() | {"review_run_link": "L1", "await_new_run": False}
+        with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
+             patch.object(main, "unresolved_review_threads", return_value=[human()]), \
+             patch.object(main, "finalize_pr") as finalize:
+            main.handle_review_wait(state)
+        finalize.assert_called_once()
+
+    def test_awaiting_new_run_never_concludes_from_old_run(self):
+        state = self.state() | {"review_run_link": "L1", "review_since": main.time.time()}
+        with patch.object(main, "code_review_check", return_value={"bucket": "pass", "link": "L1"}), \
+             patch.object(main, "unresolved_review_threads", return_value=[]), \
+             patch.object(main, "finalize_pr") as finalize:
+            main.handle_review_wait(state)
+        finalize.assert_not_called()
+
+
+class MergeWait(unittest.TestCase):
+    def test_failed_query_only_checks_inbox(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_thread_round": 1}
+        with patch.object(main, "unresolved_review_threads", return_value=None), \
+             patch.object(main, "handle_wait") as wait:
+            main.handle_merge_wait(state)
+        wait.assert_called_once()
+        self.assertEqual(state["state"], "WAIT_MERGE")
+        self.assertEqual(state["pr_thread_round"], 1)
+
+    def test_threads_are_addressed_proactively(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR}
+        with patch.object(main, "unresolved_review_threads", return_value=[human()]), \
+             patch.object(main, "handle_wait") as wait:
+            main.handle_merge_wait(state)
+        wait.assert_not_called()
+        self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
+        self.assertEqual(state["pr_threads"][0]["id"], "H1")
+
+
+if __name__ == "__main__":
+    unittest.main()

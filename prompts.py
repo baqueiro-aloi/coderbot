@@ -179,21 +179,27 @@ those fixes. Do not modify project code, do not run `openspec archive`, do not p
 and do not create a PR. Coderbot will retry archival after this turn.
 """
 
-ADDRESS_REVIEW = ENVIRONMENT + """
-An automated code reviewer (OpenCodeReview) reviewed your pull
-request and left the comments below. Evaluate each one on its merits — the reviewer
-is helpful but pattern-based and not always right.
-
-""" + fenced("review comments", "$comments") + """
-
-For each comment: if it points to a genuine problem, fix it properly. If it is a
-false positive or not worth acting on, do NOT change code just to silence it — briefly
-note why you're leaving it. Keep the Playwright e2e tests passing and updated. Commit
-your changes on branch $branch with clear messages; coderbot will push afterward.
-Do not commit any evidence file (screenshot, recording, report) —
-those are emailed, never committed to the repo (see the evidence contract above). End
-with a short summary of what you changed and what you left as-is and why.
+_RESOLVE_CONTRACT = """
+Then end your response with exactly ONE line per thread listed above:
+RESOLVE: <thread_id> <short reason — e.g. "fixed: <what changed>" or why it won't be fixed>
+Coderbot posts each reason as a reply on its thread and marks the thread resolved, so
+every thread above MUST get a RESOLVE line.
 """
+
+ADDRESS_REVIEW = ENVIRONMENT + """
+The automated code reviewer (OpenCodeReview) has unresolved inline comment threads on
+your pull request, listed below with their thread ids. Evaluate each one on its
+merits — the reviewer is helpful but pattern-based and not always right.
+
+""" + fenced("review threads", "$threads") + """
+
+For each thread: if it points to a genuine problem, fix it properly, keep the e2e
+tests passing and updated, and commit on branch $branch with clear messages; coderbot
+will push afterward (do NOT push, do NOT merge). If it is a false positive or not
+worth acting on, do NOT change code just to silence it. Do not commit any evidence
+file (screenshot, recording, report) — those are emailed, never committed to the repo
+(see the evidence contract above).
+""" + _RESOLVE_CONTRACT
 
 CLASSIFY_PR_REPLY = """The user replied to the pull-request review email. Their reply
 is below.
@@ -201,10 +207,12 @@ is below.
 """ + fenced("user reply", "$reply") + """
 
 Classify their intent. Respond with ONLY a JSON object, no other text:
-{"action": "merge" | "changes" | "complete" | "abort" | "unclear", "feedback": "<the change requests, empty otherwise>"}
+{"action": "merge" | "changes" | "complete" | "abort" | "unclear", "force": false, "feedback": "<the change requests, empty otherwise>"}
 
 Merging is IRREVERSIBLE, so:
 - "merge" ONLY when the reply is a clear, explicit instruction to merge the PR as-is.
+  Set "force": true ONLY when they explicitly insist on merging despite known problems
+  (e.g. "merge anyway", "force merge", "merge regardless of the comments"); otherwise false.
 - "changes" when they request any modification; put the substance in "feedback". Choose
   "changes" even if they also ask to close/withdraw the PR as part of those changes.
 - "complete" ONLY when the reply explicitly says to mark the task done WITHOUT codebot
@@ -216,19 +224,18 @@ When in doubt, choose "unclear" rather than guessing.
 """
 
 ADDRESS_PR_THREADS = ENVIRONMENT + """
-The pull request still has unresolved review conversation(s) that
-must be resolved before merging:
+The pull request still has unresolved review conversation(s) that must be resolved
+before merging, listed below with their thread ids. Evaluate each on its merits.
 
 """ + fenced("review threads", "$threads") + """
 
-For each: if it points to a genuine problem, fix it properly. If it is not worth acting
-on, leave a brief reply explaining why (e.g. via `gh pr comment` or a reply on the
-thread) rather than silently ignoring it. Keep e2e tests passing and updated. Commit
-your changes on branch $branch with clear messages; coderbot will push afterward. Do not commit any
+For each thread: if it points to a genuine problem, fix it properly, keep e2e tests
+passing and updated, and commit on branch $branch with clear messages; coderbot will
+push afterward (do NOT push, do NOT merge). If it is not worth acting on, do NOT change
+code just to silence it — the RESOLVE reason below is your reply. Do not commit any
 evidence file (screenshot, recording, report) — those are emailed, never committed to
-the repo (see the evidence contract above). End with a short summary of what you
-changed and how each thread was addressed.
-"""
+the repo (see the evidence contract above).
+""" + _RESOLVE_CONTRACT
 
 REMOVE_EVIDENCE_FROM_REPO = """You committed evidence file(s) directly into the repo on
 branch $branch — that must never happen; evidence belongs in an email, not the git
@@ -254,6 +261,28 @@ Newman evidence, run the requested verification but do NOT create or list `ATTAC
 evidence files: codebot's dedicated evidence collector will re-run the feature tests
 and attach its single canonical artifact. Do not add evidence to the branch/PR. End
 with a summary of what changed.
+"""
+
+RESOLVE_CONFLICTS = ENVIRONMENT + """
+The base branch `$base_branch` has moved ahead (typically another PR merged) and your
+pull request now has merge conflicts with it.
+
+On branch $branch: run `git fetch origin $base_branch`, then `git merge
+origin/$base_branch` and resolve every conflict. Merge, do NOT rebase — the branch is
+already pushed and its history must not be rewritten. A correct resolution preserves
+BOTH the intent of the new changes on `$base_branch` and the intent of this branch's
+changes.
+
+If a conflict genuinely has more than one reasonable resolution with different
+behavior (real alternatives, not just formatting), do NOT guess: use the
+NEED_USER_INPUT mechanism to ask which resolution is wanted, describing each
+alternative concretely.
+
+After resolving: re-run the feature's tests (the e2e specs if the repo has an e2e
+harness; the full suite if the conflicts touched shared code) and make sure they pass,
+then commit the merge on branch $branch. Coderbot pushes afterward: do NOT push, and
+do NOT merge the PR.
+End with a short summary of each conflict and how you resolved it.
 """
 
 CLASSIFY_STUCK_REPLY = """Codebot got stuck on a task, emailed the user for help, and is
@@ -321,12 +350,19 @@ PHASE_RULES = {
                   "commit OpenSpec planning/spec files only — do NOT run `openspec "
                   "archive`, do NOT modify project code, do NOT push."),
     "ADDRESS_REVIEW": ("You are addressing review comments: commit on the task branch; "
-                       "coderbot pushes afterward — do NOT push, do NOT merge the PR."),
+                       "coderbot pushes afterward — do NOT push, do NOT merge the PR. End "
+                       "with the RESOLVE: lines for every review thread you were given."),
     "ADDRESS_PR_THREADS": ("You are addressing unresolved PR review threads: commit on the "
                            "task branch; coderbot pushes afterward — do NOT push, do NOT "
-                           "merge the PR."),
+                           "merge the PR. End with the RESOLVE: lines for every review "
+                           "thread you were given."),
     "APPLY_PR_FEEDBACK": ("You are applying PR feedback: commit on the task branch; "
                           "coderbot pushes afterward — do NOT push, do NOT merge the PR."),
+    "RESOLVE_CONFLICTS": ("You are resolving merge conflicts between the task branch "
+                          "and the base branch: merge the base branch into the task "
+                          "branch (do NOT rebase), resolve the conflicts, keep tests "
+                          "passing, and commit the merge; coderbot pushes afterward — "
+                          "do NOT push, do NOT merge the PR."),
 }
 
 # Unlike fenced() blocks, the reply IS instructions (it comes from the verified user and

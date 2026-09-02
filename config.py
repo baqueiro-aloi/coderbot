@@ -113,6 +113,9 @@ REVIEW_MAX_ROUNDS = int(os.environ.get("CODEBOT_REVIEW_MAX_ROUNDS", "3"))
 # review conversation threads (e.g. a human reviewer's) and fixes them proactively. Cap
 # that fix<->recheck loop so a thread codebot can't resolve doesn't stall the merge.
 PR_THREAD_MAX_ROUNDS = int(os.environ.get("CODEBOT_PR_THREAD_MAX_ROUNDS", "3"))
+# Cap consecutive merge-conflict resolution attempts on one PR (the base branch can keep
+# moving while other PRs merge); past this the task escalates to WAIT_STUCK.
+CONFLICT_MAX_ROUNDS = int(os.environ.get("CODEBOT_CONFLICT_MAX_ROUNDS", "3"))
 
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))

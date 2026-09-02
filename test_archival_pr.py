@@ -605,7 +605,7 @@ class NativePullRequestTests(unittest.TestCase):
     def test_post_pr_agent_fix_queues_coderbot_push(self):
         review = self.state() | {
             "state": "ADDRESS_REVIEW", "session_id": "session-1",
-            "review_comments": [], "review_round": 0,
+            "review_threads": [], "review_round": 0,
             "pr_url": "https://github.com/acme/project/pull/42",
         }
         agent_result = Mock(
@@ -614,10 +614,11 @@ class NativePullRequestTests(unittest.TestCase):
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
              patch.object(main, "review_summary", return_value=""), \
              patch.object(main, "save_state") as save, \
-             patch.object(main, "git") as git, patch.object(main, "_enter_review_wait"):
+             patch.object(main, "git", side_effect=["head-1", "head-2"]) as git, \
+             patch.object(main, "_enter_review_wait"):
             main.do_address_review(review)
 
-        git.assert_not_called()
+        self.assertNotIn(call("push", "origin", "codebot-api-version"), git.call_args_list)
         self.assertEqual(review["state"], "PUSHING")
         self.assertEqual(review["push_context"]["continuation"], "review")
         save.assert_called_once_with(review)
@@ -695,16 +696,18 @@ class PushPhaseTests(unittest.TestCase):
         }
 
     def test_review_push_continues_to_review_wait_without_agent_resume(self):
-        state = self.state("review") | {"review_comments": [{"body": "fix"}]}
+        state = self.state("review") | {"review_threads": [{"id": "T1", "body": "fix"}]}
         with patch.object(main, "git") as git, \
              patch.object(main.agent_runner, "resume") as resume, \
+             patch.object(main, "_resolve_review_threads") as resolve, \
              patch.object(main, "_enter_review_wait") as enter:
             main.do_push(state)
 
         git.assert_called_once_with("push", "origin", "codebot-api-version")
         resume.assert_not_called()
+        resolve.assert_called_once()
         enter.assert_called_once_with(state)
-        self.assertNotIn("review_comments", state)
+        self.assertNotIn("review_threads", state)
         self.assertNotIn("push_context", state)
 
     def test_feedback_push_restores_paths_emails_and_waits_for_merge(self):

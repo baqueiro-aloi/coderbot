@@ -65,8 +65,9 @@ IDLE → pick item (non-struck ¶ in the Doc, coding agent chooses) → branch c
       → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
      → IMPLEMENTING → VERIFYING → INTERNAL_REVIEW → E2E (when present)
      → ARCHIVING → OPEN_PR → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING (if review fixes exist)
-     → email PR + evidence → WAIT_MERGE
+     → email PR + evidence → WAIT_MERGE ⇄ ADDRESS_PR_THREADS → PUSHING
      → merge → strike item through in the Doc → IDLE
+WAIT_REVIEW / WAIT_MERGE ⇄ RESOLVE_CONFLICTS → PUSHING   (when the base branch moves)
 ```
 
 If an E2E repair changes tracked files, coderbot repeats verification and internal
@@ -163,17 +164,36 @@ is logged and ignored.
 
 ## Automated code review (WAIT_REVIEW ⇄ ADDRESS_REVIEW)
 
-Opening the PR triggers the `Code Review` GitHub Action (OpenCodeReview, see
-`.github/workflows/code-review.yml`), which leaves inline comments. Codebot does
-**not** email the user yet: it enters `WAIT_REVIEW` and polls that action's check on
-the PR head. When a run finishes, it fetches the `github-actions[bot]` inline comments
-posted since the last round (plus the sticky summary for context) and, if any are new,
-hands them to the same coding-agent session (`ADDRESS_REVIEW`) to fix genuine issues
-and commit. Coderbot pushes the commit, which re-triggers the action. The loop repeats
-until a run leaves no new
-comments (then it records evidence and emails the PR), or until `CODEBOT_REVIEW_MAX_ROUNDS`
-(default 3) or `CODEBOT_REVIEW_WAIT_TIMEOUT` (default 45 min per run) is hit, in which
-case it emails anyway with a note about the unresolved review.
+After opening the PR, codebot waits for the target repo's **`Code Review`** GitHub
+Action (OpenCodeReview) to finish (`CODEBOT_REVIEW_WAIT_TIMEOUT`, default 45 min per
+run). The work queue is the PR's **unresolved review threads** (queried through
+GraphQL, so a thread the agent skipped or one posted after a run stays in the queue
+instead of silently accumulating until merge time). For each thread opened by the
+reviewer bot the working session either fixes the issue (commit; codebot pushes via
+PUSHING, which re-triggers the action) or declares it not worth fixing — and either way
+emits `RESOLVE: <thread_id> <reason>`; codebot posts the reason as a reply on the
+thread and marks it resolved. Only thread ids codebot itself fetched are honored. The
+loop is capped by `CODEBOT_REVIEW_MAX_ROUNDS` (default 3); leftovers are mentioned in
+the "PR ready" email. A failed thread query is never read as "no threads".
+
+While waiting for your merge decision (WAIT_MERGE) codebot keeps polling the PR for
+unresolved threads from anyone (a human reviewer included) and addresses them the same
+way (ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). On `merge` it
+re-checks: unresolved threads (or a failed query) **block the merge** with an email
+listing them; reply `merge anyway` to force. Merging is irreversible, so the classifier
+must return an explicit `force: true` for that.
+
+## Base-branch conflicts (RESOLVE_CONFLICTS)
+
+While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks its
+mergeability. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
+through RESOLVE_CONFLICTS: the working session merges `origin/$CODEBOT_BASE_BRANCH`
+into the branch (**merge, never rebase** — the branch is pushed), re-runs the tests and
+commits; codebot pushes and the automated review re-runs before the PR can merge. A
+conflict with genuinely different reasonable resolutions is emailed as a question
+instead of guessed at. Attempts are capped by `CODEBOT_CONFLICT_MAX_ROUNDS` (default 3),
+then the task escalates to WAIT_STUCK. Replies the user sent against the pre-conflict
+PR content are set aside and the "PR ready" email says so.
 
 ## One-time setup
 

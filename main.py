@@ -987,9 +987,14 @@ def code_review_check(pr_url: str) -> dict | None:
     surfaces promptly instead of masquerading as "not started" and stalling the poll loop
     until the review timeout.
     """
-    proc = subprocess.run(
-        ["gh", "pr", "checks", pr_url, "--json", "name,bucket,workflow,link"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "checks", pr_url, "--json", "name,bucket,workflow,link"],
+            cwd=config.REPO_PATH, capture_output=True, text=True,
+            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.warning("gh pr checks timed out after %ss", config.SUBPROCESS_TIMEOUT_SECONDS)
+        return None
     try:
         checks = json.loads(proc.stdout) if proc.stdout.strip() else []
     except json.JSONDecodeError:
@@ -1015,9 +1020,14 @@ def code_review_check(pr_url: str) -> dict | None:
 
 def _bot_comments(endpoint: str) -> list[dict]:
     """github-actions[bot] comments from a PR comments endpoint ([] on any failure)."""
-    proc = subprocess.run(
-        ["gh", "api", f"{endpoint}?per_page=100"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    try:
+        proc = subprocess.run(
+            ["gh", "api", f"{endpoint}?per_page=100"],
+            cwd=config.REPO_PATH, capture_output=True, text=True,
+            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.warning("gh api %s timed out after %ss", endpoint, config.SUBPROCESS_TIMEOUT_SECONDS)
+        return []
     if proc.returncode != 0:
         log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:])
         return []
@@ -1026,24 +1036,6 @@ def _bot_comments(endpoint: str) -> list[dict]:
     except json.JSONDecodeError:
         return []
     return [c for c in items if c.get("user", {}).get("login") == "github-actions[bot]"]
-
-
-def new_review_comments(state: dict) -> list[dict]:
-    """OCR inline comments created after the watermark: [{path, line, body, created_at}]."""
-    owner_repo, number = _pr_owner_number(state["pr_url"])
-    watermark = state.get("review_comment_watermark", "")
-    fresh = []
-    for c in _bot_comments(f"repos/{owner_repo}/pulls/{number}/comments"):
-        # ISO-8601 Zulu timestamps sort lexicographically, so a string compare is chronological.
-        if c.get("created_at", "") <= watermark:
-            continue
-        fresh.append({
-            "path": c.get("path"),
-            "line": c.get("line") or c.get("original_line"),
-            "body": c.get("body", ""),
-            "created_at": c.get("created_at", ""),
-        })
-    return fresh
 
 
 def review_summary(state: dict) -> str:
@@ -1055,20 +1047,20 @@ def review_summary(state: dict) -> str:
     return max(summaries, key=lambda c: c.get("updated_at", "")).get("body", "")
 
 
-def format_review_comments(comments: list[dict], summary: str) -> str:
-    lines = []
-    if summary:
-        lines.append("Reviewer summary:\n" + summary + "\n")
-    lines.append(f"{len(comments)} inline comment(s):")
-    for i, c in enumerate(comments, 1):
-        loc = f"{c['path']}:{c['line']}" if c.get("line") else (c.get("path") or "(general)")
-        lines.append(f"\n[{i}] {loc}\n{c['body']}")
-    return "\n".join(lines)
-
-
-def _enter_review_wait(state: dict) -> None:
+def _enter_review_wait(state: dict, expect_new_run: bool = True) -> None:
     state["review_since"] = time.time()  # per-run wait clock (survives restarts via state.json)
+    # True when a push should trigger a fresh Code Review run: the poll must then wait
+    # for a NEW run link and never conclude from the already-processed run's state.
+    state["await_new_run"] = expect_new_run
     state["state"] = "WAIT_REVIEW"
+
+
+def _render_review_threads(state: dict, key: str = "review_threads") -> str:
+    rendered = format_unresolved_threads(state.get(key, []), ids=True)
+    summary = review_summary(state)
+    if summary:
+        rendered = "Reviewer summary (context):\n" + summary + "\n\n" + rendered
+    return rendered
 
 
 def finalize_pr(state: dict, note: str = "") -> None:
@@ -1085,20 +1077,70 @@ def finalize_pr(state: dict, note: str = "") -> None:
     elif state.get("has_e2e_harness"):
         body += ("Note: no e2e evidence could be captured for this PR (the spec/collection may "
                  "have skipped itself when re-run bare, or none matched — see codebot logs).\n")
+    # Surface unresolved threads early — inline comments can land after the review run
+    # finishes, and the merge gate re-checks before merging.
+    threads = unresolved_review_threads(state["pr_url"])
+    if threads is None:
+        body += ("Note: I could not check the PR's review threads just now; "
+                 "I will re-check before any merge.\n\n")
+    elif threads:
+        human = [t for t in threads if not _is_ocr_thread(t)]
+        ocr = [t for t in threads if _is_ocr_thread(t)]
+        if human:
+            body += (f"Heads up: the PR has {len(human)} unresolved review comment(s) "
+                     "from human reviewers; I'll address them while waiting, and I will "
+                     "not merge until they are resolved (or you say 'merge anyway'):\n\n"
+                     f"{format_unresolved_threads(human)}\n\n")
+        if ocr:
+            body += (f"Note: {len(ocr)} automated (OCR) review comment(s) are still "
+                     "unresolved; I'll address them automatically — fixing or resolving "
+                     "with an explanation — while waiting for your reply.\n\n")
+    # A conflict resolution rewrote the PR after the user was invited to reply to it:
+    # replies written against the OLD content (worst case a pending 'merge') must not
+    # be executed against the new one. Set them aside and say so.
+    if state.pop("stale_replies", None) and state.get("thread_id"):
+        try:
+            drained = gmail_client.drain_thread(state["thread_id"])
+        except Exception:  # noqa: BLE001 — a gmail hiccup must not block the finalize
+            log.exception("could not check the thread for stale replies")
+            drained = 0
+        if drained:
+            body += (f"Note: the PR changed while I resolved merge conflicts with "
+                     f"{config.BASE_BRANCH}, so {drained} earlier repl(y/ies) on this thread "
+                     "were set aside — please re-send your instruction against the updated "
+                     "PR.\n\n")
     body += "Reply with change requests, or tell me to merge."
     email(state, "PR ready for review", body, evidence_files)
-    for key in ("review_since", "review_round", "review_run_link",
-                "review_comment_watermark", "review_comments", "pr_summary"):
+    # pr_summary is kept (until the task ends) so a later re-finalize — e.g. after a
+    # conflict resolution — doesn't email an empty summary.
+    for key in ("review_since", "review_round", "review_run_link", "review_threads",
+                "await_new_run"):
         state.pop(key, None)
     state["state"] = "WAIT_MERGE"
 
 
 def handle_review_wait(state: dict) -> None:
-    """Poll the Code Review action; when a new run finishes, address its comments or finalize."""
+    """Poll the Code Review action; when a new run finishes, work the PR's UNRESOLVED
+    OCR threads (fix or resolve-with-comment) until none remain, then finalize.
+
+    Unresolved threads — not "comments newer than a watermark" — are the work queue:
+    a thread the worker skipped, or one posted after a run was processed, stays in the
+    queue instead of silently accumulating until merge time."""
     check = code_review_check(state["pr_url"])
     bucket = check.get("bucket") if check else None
     same_run = check is not None and check.get("link") == state.get("review_run_link")
     if check is None or bucket == "pending" or same_run:
+        if same_run and bucket and bucket != "pending" and not state.get("await_new_run"):
+            # No new run is coming (a resolution-only round pushes nothing) and the
+            # processed run is finished. If every OCR thread is resolved, the PR is
+            # clean — finalize now instead of waiting out the review timeout. When a
+            # push IS expected (await_new_run), never conclude from the old run: the
+            # fixes still need their re-review.
+            threads = unresolved_review_threads(state["pr_url"])
+            if threads is not None and not [t for t in threads if _is_ocr_thread(t)]:
+                log.info("no unresolved OCR threads on the processed run; PR is clean")
+                finalize_pr(state)
+                return
         # Not started, still running, or the previous run's result — keep waiting, but
         # don't block the PR forever if the action is stuck or never triggered.
         if time.time() - state.get("review_since", time.time()) > config.REVIEW_WAIT_TIMEOUT_SECONDS:
@@ -1109,113 +1151,319 @@ def handle_review_wait(state: dict) -> None:
         else:
             log.debug("waiting for Code Review (bucket=%s, same_run=%s)", bucket, same_run)
         return
-    # A new Code Review run finished (pass/fail/skip/cancel). Read what it flagged.
+    # A new Code Review run finished (pass/fail/skip/cancel). Read what is unresolved.
+    threads = unresolved_review_threads(state["pr_url"])
+    if threads is None:
+        # Transient query failure: don't record the run as processed, so the next tick
+        # re-reads it (the review timeout still bounds the wait).
+        log.warning("could not fetch review threads; retrying next tick")
+        return
     state["review_run_link"] = check.get("link")
-    comments = new_review_comments(state)
-    if not comments:
-        log.info("Code Review left no new comments; PR is clean")
+    ocr = [t for t in threads if _is_ocr_thread(t)]
+    if not ocr:
+        log.info("no unresolved OCR threads; PR is clean")
         finalize_pr(state)
         return
     if state.get("review_round", 0) >= config.REVIEW_MAX_ROUNDS:
-        log.warning("review round limit (%d) reached with %d open comment(s); finalizing",
-                    config.REVIEW_MAX_ROUNDS, len(comments))
+        log.warning("review round limit (%d) reached with %d open thread(s); finalizing",
+                    config.REVIEW_MAX_ROUNDS, len(ocr))
         finalize_pr(state, note=(
-            f"Note: the automated reviewer still has {len(comments)} open comment(s) after "
+            f"Note: the automated reviewer still has {len(ocr)} unresolved thread(s) after "
             f"{config.REVIEW_MAX_ROUNDS} rounds of fixes. I've left them on the PR for you."))
         return
-    # Advance the watermark so the next round only sees feedback on the upcoming push.
-    state["review_comment_watermark"] = max(c["created_at"] for c in comments)
-    state["review_comments"] = comments
+    state["review_threads"] = ocr
     state["state"] = "ADDRESS_REVIEW"
-    log.info("Code Review left %d new comment(s); addressing them", len(comments))
+    log.info("%d unresolved OCR thread(s); addressing them", len(ocr))
 
 
 def do_address_review(state: dict) -> None:
-    comments = state.get("review_comments", [])
+    threads = state.get("review_threads", [])
     state["review_round"] = state.get("review_round", 0) + 1
-    log.info("addressing %d review comment(s), round %d", len(comments), state["review_round"])
-    rendered = format_review_comments(comments, review_summary(state))
+    log.info("addressing %d review thread(s), round %d", len(threads), state["review_round"])
+    head_before = git("rev-parse", state["branch"])
     result = agent_runner.resume(
         state["session_id"],
-        prompts.render(prompts.ADDRESS_REVIEW, comments=rendered, branch=state["branch"]))
+        prompts.render(prompts.ADDRESS_REVIEW, threads=_render_review_threads(state),
+                       branch=state["branch"]))
     if handle_result(state, result, "ADDRESS_REVIEW"):
         return
+    _finish_address_review(state, result, head_before)
+
+
+def _finish_address_review(state: dict, result, head_before: str | None) -> None:
+    """Success tail of ADDRESS_REVIEW: new commits are pushed (via PUSHING) and re-reviewed;
+    a resolution-only round resolves the threads right away and re-checks the PR."""
     if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
         return
-    _queue_push(state, "review")
+    committed = head_before is None or git("rev-parse", state["branch"]) != head_before
+    if committed:
+        # The RESOLVE lines are acted on after the push lands (see do_push), so the
+        # thread replies never describe a fix that isn't on GitHub yet.
+        _queue_push(state, "review", result.output)
+        return
+    # Resolution-only round: no new review run is coming. Re-check and either finish
+    # or hand the leftovers straight back (the round cap bounds this loop).
+    _resolve_review_threads(state, result.output)
+    state.pop("review_threads", None)
+    remaining = unresolved_review_threads(state["pr_url"])
+    if remaining is None:
+        # Could not verify — never conclude "clean" from a failed query. The review
+        # wait's clean-check retries the query each tick (bounded by its timeout).
+        _enter_review_wait(state, expect_new_run=False)
+        return
+    ocr = [t for t in remaining if _is_ocr_thread(t)]
+    if ocr:
+        log.info("%d OCR thread(s) still unresolved after the round; re-addressing", len(ocr))
+        state["review_threads"] = ocr
+        state["state"] = "ADDRESS_REVIEW"
+        return
+    finalize_pr(state)
+
+
+# ---------------------------------------------------------------- base-branch conflicts
+
+def _pr_merge_state(pr_url: str) -> tuple[str | None, str | None]:
+    """(state, mergeable) of the PR — e.g. ("OPEN", "CONFLICTING") — or (None, None)
+    when the query fails. Callers treat that as "unknown", never as "clean"."""
+    try:
+        proc = subprocess.run(["gh", "pr", "view", pr_url, "--json", "state,mergeable"],
+                              cwd=config.REPO_PATH, capture_output=True, text=True,
+                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.warning("gh pr view timed out checking mergeability")
+        return None, None
+    if proc.returncode != 0:
+        log.warning("gh pr view failed checking mergeability: %s", proc.stderr[-300:])
+        return None, None
+    try:
+        info = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        log.warning("gh pr view returned non-JSON checking mergeability: %s", proc.stdout[:200])
+        return None, None
+    return info.get("state"), info.get("mergeable")
+
+
+def _enter_conflict_resolution(state: dict) -> bool:
+    """Route the task into RESOLVE_CONFLICTS, bounded by CONFLICT_MAX_ROUNDS: the base
+    branch can keep moving while other PRs merge, so a resolution that never converges
+    must escalate to the user instead of looping forever. Returns True when the
+    resolution state was actually entered (False = escalated to WAIT_STUCK instead)."""
+    rounds = state.get("conflict_rounds", 0) + 1
+    state["conflict_rounds"] = rounds
+    if rounds > config.CONFLICT_MAX_ROUNDS:
+        _enter_stuck(state, state["state"],
+                     f"The PR still conflicts with {config.BASE_BRANCH} after "
+                     f"{config.CONFLICT_MAX_ROUNDS} resolution attempt(s).\nPR: "
+                     f"{state.get('pr_url', '?')}\n\n"
+                     f"Please resolve the conflicts on the branch yourself (merge "
+                     f"{config.BASE_BRANCH} in and push), then reply 'retry'.")
+        return False
+    log.warning("PR %s conflicts with %s (attempt %d/%d); entering RESOLVE_CONFLICTS",
+                state.get("pr_url"), config.BASE_BRANCH, rounds, config.CONFLICT_MAX_ROUNDS)
+    # Where a no-op resolution returns to. From WAIT_MERGE the user was already invited
+    # to reply on the current PR content; a reply written before the resolution rewrote
+    # the PR must not be acted on later — finalize_pr sets those aside (stale_replies).
+    state["conflict_return"] = state["state"]
+    if state["state"] == "WAIT_MERGE":
+        state["stale_replies"] = True
+    state["state"] = "RESOLVE_CONFLICTS"
+    return True
+
+
+def check_pr_conflicts(state: dict) -> bool:
+    """While waiting with an open PR, watch for the base branch having moved under it
+    (another PR merged). A CONFLICTING PR is routed to RESOLVE_CONFLICTS; returns True
+    when the state changed. Query failures (and GitHub's transient "UNKNOWN" while it
+    recomputes mergeability) change nothing — the next tick re-checks."""
+    if not state.get("pr_url"):
+        return False
+    pr_state, mergeable = _pr_merge_state(state["pr_url"])
+    if pr_state != "OPEN":
+        return False  # merged/closed/unknown: nothing to resolve here
+    if mergeable != "CONFLICTING":
+        if mergeable == "MERGEABLE":
+            state.pop("conflict_rounds", None)  # healthy again; reset the attempt cap
+        return False
+    _enter_conflict_resolution(state)
+    return True
+
+
+def do_resolve_conflicts(state: dict) -> None:
+    """Merge the base branch into the task branch in the working session. A conflict
+    with genuinely different reasonable resolutions comes back as a NEED_USER_INPUT
+    question and is emailed like any other; a clean resolution is pushed and goes
+    through the automated review again before it can merge."""
+    # Persisted (not a local) so the WAIT_REPLY question detour can also tell whether
+    # the answer-informed session ended up committing.
+    state["conflict_head"] = git("rev-parse", state["branch"])
+    result = agent_runner.resume(
+        state["session_id"],
+        prompts.render(prompts.RESOLVE_CONFLICTS, branch=state["branch"],
+                       base_branch=config.BASE_BRANCH))
+    if handle_result(state, result, "RESOLVE_CONFLICTS"):
+        return
+    _leave_conflict_resolution(state)
+
+
+def _leave_conflict_resolution(state: dict) -> None:
+    """Exit RESOLVE_CONFLICTS based on whether the session committed. A commit is pushed
+    (PUSHING) and goes through the automated review again (never merge unreviewed
+    commits). No commit returns to the state the conflict preempted — NOT to WAIT_REVIEW,
+    which after a finalize (review_run_link already popped) would misread the old
+    finished run as new and re-finalize with a duplicate email; the per-tick conflict
+    check re-detects a leftover conflict from either wait state, bounded by the cap."""
+    committed = git("rev-parse", state["branch"]) != state.get("conflict_head")
+    state.pop("conflict_head", None)
+    if committed:
+        log.info("conflict resolution produced new commits; pushing them for re-review")
+        state.pop("conflict_return", None)
+        _queue_push(state, "conflicts")
+        return
+    origin = state.pop("conflict_return", "WAIT_MERGE")
+    log.warning("conflict-resolution session committed nothing; returning to %s", origin)
+    if origin == "WAIT_REVIEW":
+        _enter_review_wait(state, expect_new_run=False)
+    else:
+        state.pop("stale_replies", None)  # the PR did not change; replies are not stale
+        state["state"] = origin
 
 
 # ---------------------------------------------------------------- pre-merge thread resolution
 
-def unresolved_review_threads(pr_url: str) -> list[dict]:
-    """Open (unresolved) PR review conversation threads: [{id, comments: [{path, line,
-    body, author}]}]. GitHub's REST API has no notion of thread resolution, so this goes
-    through the GraphQL API (unlike the rest of this file's gh calls)."""
+def unresolved_review_threads(pr_url: str) -> list[dict] | None:
+    """All unresolved review threads on the PR — ANY author, not just the OCR bot — via
+    GraphQL (REST doesn't expose thread resolution). Returns None when the query fails,
+    which callers must treat as "could not verify", never as "no threads": this gates an
+    irreversible merge, so it fails closed."""
     owner_repo, number = _pr_owner_number(pr_url)
     owner, repo = owner_repo.split("/", 1)
     query = """
-    query($owner: String!, $repo: String!, $number: Int!) {
+    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
-          reviewThreads(first: 100) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
             nodes {
-              id
-              isResolved
-              comments(first: 50) {
-                nodes { path line originalLine body author { login } }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    proc = subprocess.run(
-        ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
-         "-F", f"repo={repo}", "-F", f"number={number}"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
-    if proc.returncode != 0:
-        log.warning("gh api graphql (reviewThreads) failed: %s", proc.stderr[-300:])
-        return []
-    try:
-        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
-    except json.JSONDecodeError:
-        return []
-    repository = (data.get("data") or {}).get("repository") or {}
-    pull_request = repository.get("pullRequest") or {}
-    nodes = (pull_request.get("reviewThreads") or {}).get("nodes") or []
-    threads = []
-    for t in nodes:
-        if t.get("isResolved"):
-            continue
-        comments = [{
-            "path": c.get("path"),
-            "line": c.get("line") or c.get("originalLine"),
-            "body": c.get("body", ""),
-            "author": (c.get("author") or {}).get("login", "?"),
-        } for c in (t.get("comments") or {}).get("nodes") or []]
-        threads.append({"id": t["id"], "comments": comments})
+              id isResolved isOutdated path line
+              comments(first: 1) { nodes { author { login } body databaseId } } } } } } }"""
+    threads: list[dict] = []
+    cursor = None
+    while True:
+        # -f passes raw strings; only $number (an Int in the query) uses -F's type
+        # coercion. An all-digit cursor or owner under -F would coerce to Int and make
+        # the GraphQL call fail its String! variable types.
+        cmd = ["gh", "api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
+               "-f", f"repo={repo}", "-F", f"number={number}"]
+        if cursor:
+            cmd += ["-f", f"cursor={cursor}"]
+        try:
+            proc = subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True,
+                                  timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            log.warning("gh api graphql (review threads) timed out")
+            return None
+        if proc.returncode != 0:
+            log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:])
+            return None
+        try:
+            conn = (json.loads(proc.stdout)["data"]["repository"]["pullRequest"]
+                    ["reviewThreads"])
+        except (json.JSONDecodeError, KeyError, TypeError) as err:
+            log.warning("unexpected review-threads payload (%s): %s", err, proc.stdout[:300])
+            return None
+        for node in conn.get("nodes") or []:
+            if node.get("isResolved"):
+                continue
+            first = ((node.get("comments") or {}).get("nodes") or [{}])[0]
+            threads.append({
+                "id": node.get("id"),
+                "comment_id": first.get("databaseId"),
+                "path": node.get("path"),
+                "line": node.get("line"),
+                "outdated": bool(node.get("isOutdated")),
+                "author": (first.get("author") or {}).get("login", "?"),
+                "body": first.get("body", ""),
+            })
+        page = conn.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            break
+        cursor = page.get("endCursor")
+    log.info("PR has %d unresolved review thread(s)", len(threads))
     return threads
 
 
-def format_review_threads(threads: list[dict]) -> str:
-    lines = [f"{len(threads)} unresolved review thread(s):"]
+def format_unresolved_threads(threads: list[dict], ids: bool = False) -> str:
+    lines = []
     for i, t in enumerate(threads, 1):
-        comments = t["comments"]
-        first = comments[0] if comments else {}
-        loc = f"{first.get('path')}:{first.get('line')}" if first.get("line") else (first.get("path") or "(general)")
-        lines.append(f"\n[{i}] {loc}")
-        for c in comments:
-            lines.append(f"  {c['author']}: {c['body']}")
-    return "\n".join(lines)
+        loc = f"{t['path']}:{t['line']}" if t.get("line") else (t.get("path") or "(general)")
+        tag = " [outdated code]" if t.get("outdated") else ""
+        head = f"[{i}] {loc} ({t.get('author', '?')}){tag}"
+        if ids:
+            head += f"\nthread_id: {t.get('id')}"
+        body = (t.get("body") or "").strip()
+        if len(body) > 400 and not ids:  # full text when the worker must act on it
+            body = body[:400] + "…"
+        lines.append(f"{head}\n{body}")
+    return "\n\n".join(lines)
+
+
+def _is_ocr_thread(thread: dict) -> bool:
+    """True when the thread was opened by the OCR workflow's bot account (GraphQL says
+    'github-actions', REST says 'github-actions[bot]' — accept both)."""
+    author = (thread.get("author") or "").strip()
+    return author.removesuffix("[bot]") == "github-actions"
+
+
+def _resolve_review_threads(state: dict, output: str, key: str = "review_threads") -> int:
+    """Act on the worker's `RESOLVE: <thread_id> <reason>` lines: post the reason as a
+    reply on the thread and mark the thread resolved. Only thread ids the orchestrator
+    itself fetched (state[key]) are honored — model output cannot resolve arbitrary
+    threads. Failures are logged and skipped; an unresolved thread is caught again by
+    the next round or the merge gate. Returns the number resolved."""
+    known = {t["id"]: t for t in state.get(key, []) if t.get("id")}
+    if not known:
+        return 0
+    owner_repo, number = _pr_owner_number(state["pr_url"])
+    resolved = 0
+    for line in output.splitlines():
+        if not line.startswith("RESOLVE:"):
+            continue
+        thread_id, _, reason = line[len("RESOLVE:"):].strip().partition(" ")
+        thread = known.get(thread_id)
+        if thread is None:
+            log.warning("ignoring RESOLVE for unknown thread %r", thread_id[:80])
+            continue
+        reason = reason.strip() or "Resolved by codebot."
+        try:
+            if thread.get("comment_id"):
+                reply = subprocess.run(
+                    ["gh", "api", f"repos/{owner_repo}/pulls/{number}/comments/"
+                     f"{thread['comment_id']}/replies", "-f", f"body={reason}"],
+                    cwd=config.REPO_PATH, capture_output=True, text=True,
+                    timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+                if reply.returncode != 0:
+                    log.warning("could not reply on thread %s: %s",
+                                thread_id, reply.stderr[-300:])
+            if resolve_review_thread(thread_id):
+                resolved += 1
+                log.info("resolved review thread %s (%s)", thread_id, reason[:100])
+        except subprocess.TimeoutExpired:
+            log.warning("resolving thread %s timed out", thread_id)
+    log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
+    return resolved
 
 
 def resolve_review_thread(thread_id: str) -> bool:
-    proc = subprocess.run(
-        ["gh", "api", "graphql",
-         "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
-         "-F", f"id={thread_id}"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    try:
+        proc = subprocess.run(
+            ["gh", "api", "graphql",
+             "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
+             "-f", f"id={thread_id}"],
+            cwd=config.REPO_PATH, capture_output=True, text=True,
+            timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.warning("gh api graphql (resolveReviewThread %s) timed out", thread_id)
+        return False
     if proc.returncode != 0:
         log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id, proc.stderr[-300:])
         return False
@@ -1227,7 +1475,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                               contract=False)
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
-    log.info("classified PR reply as action=%r", action)
+    log.info("classified PR reply as action=%r force=%r", action, verdict.get("force"))
     if action not in ("merge", "changes", "abort", "complete"):
         # Merging is irreversible: never fall through to it on unexpected output.
         email(state, "clarification needed",
@@ -1258,24 +1506,58 @@ def do_merge_reply(state: dict, reply: str) -> None:
         _queue_push(state, "feedback", r.output, attachments)
         return
     # merge
-    info = json.loads(subprocess.run(
-        ["gh", "pr", "view", state["pr_url"], "--json", "state,mergeable"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS, check=True).stdout)
-    pr_state, mergeable = info.get("state"), info.get("mergeable")
+    pr_state, mergeable = _pr_merge_state(state["pr_url"])
     log.info("PR state=%s mergeable=%s before merge", pr_state, mergeable)
+    if pr_state is None:
+        email(state, "merge blocked — could not check the PR",
+              f"I did not merge: I couldn't query the PR's state just now.\nPR: "
+              f"{state['pr_url']}\n\nReply 'merge' to retry.")
+        return  # stay in WAIT_MERGE
     if pr_state != "MERGED":
         if mergeable == "CONFLICTING":
-            # The base branch moved ahead and the branch no longer merges cleanly. Never
-            # force it: ask the user to resolve, then reply 'merge' to retry (which
-            # re-enters here).
-            log.warning("PR %s conflicts with %s; asking user to resolve",
+            # The base branch moved ahead and the branch no longer merges cleanly.
+            # Resolve the conflicts in the working session; genuinely ambiguous
+            # resolutions come back as an emailed question. The resolution push then
+            # needs its re-review before the user's next 'merge'. The announcement is
+            # sent only if resolution actually starts — past the attempt cap
+            # _enter_conflict_resolution emails the (opposite) stuck instructions instead.
+            log.warning("PR %s conflicts with %s; resolving before the merge",
                         state["pr_url"], config.BASE_BRANCH)
-            email(state, "merge conflict — needs your help",
-                  f"{config.BASE_BRANCH} has changed and this PR now conflicts with it, so I "
-                  f"can't merge it automatically.\nPR: {state['pr_url']}\n\nPlease resolve the "
-                  f"conflicts on the branch (merge or rebase {config.BASE_BRANCH} in and push), "
-                  "then reply 'merge' to continue.")
-            return  # stay in WAIT_MERGE
+            if _enter_conflict_resolution(state):
+                email(state, "merge conflict — resolving automatically",
+                      f"`{config.BASE_BRANCH}` has changed and this PR now conflicts with "
+                      f"it, so I can't merge it yet.\nPR: {state['pr_url']}\n\n"
+                      "I'm resolving the conflicts now. If any conflict has genuinely "
+                      "different reasonable resolutions I'll email you the alternatives; "
+                      "otherwise the automated review re-runs on the resolved branch and "
+                      "I'll email when it's clean — reply 'merge' then.")
+            return
+        # Review-thread gate: inline review threads may appear at any time, including
+        # after the "PR ready" email (handle_merge_wait addresses them proactively, but
+        # only up to its round cap). Never squash-merge over unresolved feedback unless
+        # the user explicitly forces it. Fails CLOSED: a failed thread query blocks the
+        # merge, never waves it through. The strict `is True` matters — classifier JSON
+        # isn't schema-validated, and a string like "false" is truthy.
+        if verdict.get("force") is not True:
+            threads = unresolved_review_threads(state["pr_url"])
+            if threads is None:
+                email(state, "merge blocked — could not verify review comments",
+                      f"I did not merge: I couldn't query the PR's review threads to check "
+                      f"for unresolved comments.\nPR: {state['pr_url']}\n\n"
+                      "Reply 'merge' to have me retry the check, or 'merge anyway' to merge "
+                      "without it.")
+                return  # stay in WAIT_MERGE
+            if threads:
+                log.warning("merge blocked: %d unresolved review thread(s)", len(threads))
+                email(state, "merge blocked — unresolved review comments",
+                      f"I did not merge: the PR has {len(threads)} unresolved review "
+                      f"thread(s).\nPR: {state['pr_url']}\n\n"
+                      f"{format_unresolved_threads(threads)}\n\n"
+                      "Options: reply with change requests and I'll address them; resolve "
+                      "the threads on GitHub and reply 'merge' again; or reply 'merge "
+                      "anyway' to merge despite them.")
+                state["pr_thread_notified"] = True  # don't re-address them every tick
+                return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash)", state["pr_url"])
         merge = subprocess.run(["gh", "pr", "merge", state["pr_url"], "--squash"],
                                cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
@@ -1287,17 +1569,23 @@ def do_merge_reply(state: dict, reply: str) -> None:
             email(state, "merge failed — needs your help",
                   f"I couldn't merge the PR; GitHub reported:\n\n{merge.stderr.strip()}\n\n"
                   f"PR: {state['pr_url']}\n\nThis usually means {config.BASE_BRANCH} moved ahead "
-                  "or there are conflicts. Please resolve it on the branch and reply 'merge' to retry.")
+                  "or there are conflicts. If it's a merge conflict I'll detect it and start "
+                  "resolving automatically on my next check; otherwise please resolve it on "
+                  "the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
     _finish_task(state, "PR merged.", reset_repo=False)
 
 
 def _finish_address_pr_threads(state: dict) -> None:
+    """After the fixes are pushed: reply on + resolve the threads the worker declared
+    handled (RESOLVE lines, kept in the push context). Threads without a RESOLVE line
+    stay open and are picked up again next tick, bounded by PR_THREAD_MAX_ROUNDS."""
+    output = (state.get("push_context") or {}).get("output", "")
+    resolved = _resolve_review_threads(state, output, key="pr_threads")
     threads = state.pop("pr_threads", [])
-    still_unresolved = [t for t in threads if not resolve_review_thread(t["id"])]
-    if still_unresolved:
-        log.warning("could not resolve %d/%d review thread(s) on GitHub",
-                    len(still_unresolved), len(threads))
+    if resolved < len(threads):
+        log.warning("%d/%d review thread(s) still unresolved after the round",
+                    len(threads) - resolved, len(threads))
     state["state"] = "WAIT_MERGE"
 
 
@@ -1307,13 +1595,14 @@ def do_address_pr_threads(state: dict) -> None:
     log.info("addressing %d unresolved review thread(s), round %d", len(threads), state["pr_thread_round"])
     result = agent_runner.resume(
         state["session_id"],
-        prompts.render(prompts.ADDRESS_PR_THREADS, threads=format_review_threads(threads),
+        prompts.render(prompts.ADDRESS_PR_THREADS,
+                       threads=_render_review_threads(state, key="pr_threads"),
                        branch=state["branch"]))
     if handle_result(state, result, "ADDRESS_PR_THREADS"):
         return
     if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
-    _queue_push(state, "threads")
+    _queue_push(state, "threads", result.output)
 
 
 def _queue_push(state: dict, continuation: str, output: str = "",
@@ -1332,13 +1621,20 @@ def do_push(state: dict) -> None:
     if not isinstance(context, dict):
         raise RuntimeError("PUSHING state is missing push_context")
     continuation = context.get("continuation")
-    if continuation not in ("review", "feedback", "threads"):
+    if continuation not in ("review", "feedback", "threads", "conflicts"):
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
     git("push", "origin", state["branch"])
     if continuation == "review":
+        # The fix is on GitHub now: reply on + resolve the threads the worker declared
+        # handled, then wait for the re-review the push triggers.
+        _resolve_review_threads(state, context.get("output", ""))
+        state.pop("review_threads", None)
         state.pop("review_comments", None)
         _enter_review_wait(state)
+    elif continuation == "conflicts":
+        state.pop("stale_replies", None) if not state.get("stale_replies") else None
+        _enter_review_wait(state)  # the resolved branch needs its re-review
     elif continuation == "feedback":
         attachments = [Path(path) for path in context.get("attachments", [])]
         email(state, "PR updated",
@@ -1364,6 +1660,7 @@ PHASES = {
     "OPEN_PR": do_open_pr,
     "ADDRESS_REVIEW": do_address_review,
     "ADDRESS_PR_THREADS": do_address_pr_threads,
+    "RESOLVE_CONFLICTS": do_resolve_conflicts,
     "PUSHING": do_push,
 }
 
@@ -1401,7 +1698,9 @@ def handle_merge_wait(state: dict) -> None:
     human reviewer's) and address them, so live feedback gets fixed before the user
     even says 'merge'. Falls through to the normal inbox check either way."""
     threads = unresolved_review_threads(state["pr_url"])
-    if not threads:
+    if threads is None:
+        log.warning("could not fetch review threads; checking the inbox only this tick")
+    elif not threads:
         state.pop("pr_thread_round", None)
         state.pop("pr_thread_notified", None)
     elif state.get("pr_thread_notified"):
@@ -1473,7 +1772,9 @@ RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch"
               "review_comment_watermark", "review_comments", "pr_summary",
               "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
               "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
-              "e2e_repair_status", "push_context", "archive_error", "e2e_round")
+              "e2e_repair_status", "push_context", "archive_error", "e2e_round",
+              "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
+              "conflict_head", "stale_replies")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
@@ -1539,6 +1840,7 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
         if counter in state:
             state[counter] = 0
     state.pop("question_rounds", None)
+    state.pop("conflict_rounds", None)
     state.pop("stuck_return", None)
     state.pop("stuck_error", None)
 
@@ -1711,6 +2013,8 @@ def _send_status(state: dict, thread_id: str) -> None:
         lines.append("Failure counters: " + ", ".join(f"{k}={v}" for k, v in active.items()))
     if state.get("question_rounds"):
         lines.append(f"Consecutive question rounds: {state['question_rounds']}")
+    if state.get("conflict_rounds"):
+        lines.append(f"Merge-conflict resolution attempts: {state['conflict_rounds']}")
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
     for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
@@ -1782,9 +2086,16 @@ def _continue_archiving(state: dict, result) -> None:
 
 
 def _continue_address_review(state: dict, result) -> None:
-    if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
-        return
-    _queue_push(state, "review")
+    # Whether the answer-informed session committed is unknown on this detour path
+    # (no head snapshot): push regardless — a no-op push is harmless, and the review
+    # wait then either sees a new run or concludes from the clean-check.
+    _finish_address_review(state, result, head_before=None)
+
+
+def _continue_resolve_conflicts(state: dict, result) -> None:
+    # conflict_head was persisted when the resolution session started, so this detour
+    # can make the same committed-or-not exit decision as the direct path.
+    _leave_conflict_resolution(state)
 
 
 def _continue_address_pr_threads(state: dict, result) -> None:
@@ -1815,6 +2126,7 @@ CONTINUATIONS = {
     "ADDRESS_REVIEW": _continue_address_review,
     "ADDRESS_PR_THREADS": _continue_address_pr_threads,
     "APPLY_PR_FEEDBACK": _continue_apply_pr_feedback,
+    "RESOLVE_CONFLICTS": _continue_resolve_conflicts,
 }
 
 
@@ -1956,10 +2268,19 @@ def main() -> None:
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
             if check_commands(state):
                 pass  # reset to IDLE; skip normal dispatch this tick
+            elif state["state"] == "WAIT_REVIEW" and check_pr_conflicts(state):
+                pass  # the base branch moved and conflicted the PR; rerouted to
+                # RESOLVE_CONFLICTS (or WAIT_STUCK) and dispatched next tick
             elif state["state"] == "WAIT_REVIEW":
                 handle_review_wait(state)
             elif state["state"] == "WAIT_MERGE":
+                # A pending reply speaks to the CURRENT PR and is consumed first —
+                # do_merge_reply handles CONFLICTING itself. Only a reply-less tick
+                # watches for a conflict, so a reply is never silently carried across
+                # a conflict detour.
                 handle_merge_wait(state)
+                if state["state"] == "WAIT_MERGE":
+                    check_pr_conflicts(state)
             elif state["state"] in WAITS:
                 handle_wait(state)
             else:
