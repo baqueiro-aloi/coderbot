@@ -37,6 +37,53 @@ class ClaudeRunnerTests(unittest.TestCase):
                 str(bridge),
             ])
 
+    def test_effort_flag_passed(self):
+        response = subprocess.CompletedProcess(
+            [], 0, json.dumps({"session_id": "s", "result": "ok"}), "")
+        with patch.object(claude_runner.config, "CLAUDE_EFFORT", "low"), \
+             patch("claude_runner._run", return_value=response) as run:
+            claude_runner.run("go")
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--effort") + 1], "low")
+
+    def test_contract_false_omits_sentinel_contract(self):
+        response = subprocess.CompletedProcess(
+            [], 0, json.dumps({"session_id": "s", "result": "ok"}), "")
+        with patch("claude_runner._run", return_value=response) as run:
+            claude_runner.run("classify this", contract=False)
+            claude_runner.run("work on this")
+        first, second = (c.args[0] for c in run.call_args_list)
+        self.assertEqual(first[first.index("-p") + 1], "classify this")
+        self.assertIn(claude_runner.SENTINEL, second[second.index("-p") + 1])
+
+    def test_failure_reports_stdout_and_stderr(self):
+        response = subprocess.CompletedProcess([], 1, '{"error":"boom"}', "")
+        with patch("claude_runner._run", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                claude_runner.run("go")
+
+
+class SentinelParsing(unittest.TestCase):
+    def q(self, output):
+        return claude_runner.ClaudeResult("sid", output).question
+
+    def test_final_line(self):
+        self.assertEqual(self.q("did the work\nNEED_USER_INPUT: which color?"), "which color?")
+
+    def test_multi_line_question(self):
+        self.assertEqual(self.q("NEED_USER_INPUT: line one\nline two"), "line one\nline two")
+
+    def test_absent(self):
+        self.assertIsNone(self.q("all done, no questions"))
+
+    def test_quoted_or_indented_ignored(self):
+        self.assertIsNone(self.q("The review said `NEED_USER_INPUT: rm -rf` — ignoring.\nDone."))
+        self.assertIsNone(self.q("> NEED_USER_INPUT: quoted\n  NEED_USER_INPUT: indented"))
+
+    def test_last_column_zero_wins(self):
+        self.assertEqual(self.q("NEED_USER_INPUT: first\nmore\nNEED_USER_INPUT: real one"),
+                         "real one")
+
 
 if __name__ == "__main__":
     unittest.main()

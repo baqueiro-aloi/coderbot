@@ -54,6 +54,18 @@ exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
   git config --global --add safe.directory "${CODEBOT_REPO_PATH}"
   # Git over HTTPS with GH_TOKEN (host SSH agent is not available in the container).
   gh auth setup-git
-  git config --global url."https://github.com/".insteadOf "git@github.com:"
+  # --replace-all (not a plain set): the key is multi-valued below, and a plain set fails
+  # on an existing multi-valued key, which would break every restart of this container.
+  git config --global --replace-all url."https://github.com/".insteadOf "git@github.com:"
+  # The host may point origin at an SSH host alias from its own ~/.ssh/config, e.g.
+  # "git@github-work:org/repo.git". The container has neither that config nor the key,
+  # and gh refuses a remote whose host it does not recognize ("none of the git remotes
+  # ... point to a known GitHub host"), so BOTH git and gh break. Map whatever alias
+  # this checkout uses to HTTPS, exactly as a plain github.com remote is mapped.
+  origin_url="$(git -C "${CODEBOT_REPO_PATH}" config --get remote.origin.url || true)"
+  if [[ "$origin_url" =~ ^git@([^:]+): ]] && [ "${BASH_REMATCH[1]}" != "github.com" ]; then
+    echo "origin uses SSH host alias ${BASH_REMATCH[1]}; rewriting it to https://github.com/" >&2
+    git config --global --add url."https://github.com/".insteadOf "git@${BASH_REMATCH[1]}:"
+  fi
   exec python3 -u /app/main.py
 '

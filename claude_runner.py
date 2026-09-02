@@ -49,6 +49,20 @@ task will free it up later.
 """
 
 
+def sentinel_question(output: str) -> str | None:
+    """The question after the LAST sentinel that BEGINS A LINE at column 0 (exactly as
+    the contract instructs the model to emit it), else None. Untrusted text interpolated
+    into prompts (e2e output, review comments) is fenced as data, but this is the
+    belt-and-suspenders guard: a quoted or indented "NEED_USER_INPUT:" (email reply
+    quote "> ...", a code block) never triggers a spurious question."""
+    lines = output.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(SENTINEL):
+            tail = "\n".join([lines[i][len(SENTINEL):], *lines[i + 1:]])
+            return tail.strip()
+    return None
+
+
 class ClaudeResult:
     def __init__(self, session_id: str, output: str):
         self.session_id = session_id
@@ -56,8 +70,7 @@ class ClaudeResult:
 
     @property
     def question(self) -> str | None:
-        idx = self.output.rfind(SENTINEL)
-        return self.output[idx + len(SENTINEL):].strip() if idx >= 0 else None
+        return sentinel_question(self.output)
 
     @property
     def attachments(self) -> list[str]:
@@ -123,11 +136,13 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
 
 def _invoke(args: list[str], prompt: str) -> ClaudeResult:
     cmd = ["claude", *args, "-p", prompt, "--model", config.CLAUDE_MODEL,
+           "--effort", config.CLAUDE_EFFORT,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
-    log.info("claude %s model=%s (prompt %d chars); config %s",
-             " ".join(args) or "run", config.CLAUDE_MODEL, len(prompt), _config_report())
+    log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
+             " ".join(args) or "run", config.CLAUDE_MODEL, config.CLAUDE_EFFORT,
+             len(prompt), _config_report())
     proc = _run(cmd)
     if proc.returncode != 0 and _is_config_corrupt(proc.stderr):
         # ~/.claude.json got corrupted (historically by a concurrent writer sharing the
@@ -137,7 +152,10 @@ def _invoke(args: list[str], prompt: str) -> ClaudeResult:
             log.info("retrying claude after config recovery")
             proc = _run(cmd)
     if proc.returncode != 0:
-        raise RuntimeError(f"claude exited {proc.returncode}: {proc.stderr[-2000:]}")
+        # --output-format json puts the error payload on stdout, so stderr alone is
+        # routinely empty on failure ("claude exited 1:"). Report both.
+        raise RuntimeError(f"claude exited {proc.returncode}: "
+                           f"stderr={proc.stderr[-2000:]!r} stdout={proc.stdout[-2000:]!r}")
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as err:
@@ -151,8 +169,13 @@ def _invoke(args: list[str], prompt: str) -> ClaudeResult:
     return result
 
 
-def run(prompt: str) -> ClaudeResult:
-    return _invoke([], SENTINEL_CONTRACT + "\n\n" + prompt)
+def run(prompt: str, contract: bool = True) -> ClaudeResult:
+    # Agentic working sessions get the NEED_USER_INPUT contract. One-shot utility calls
+    # (PICK, reply classifiers) pass contract=False so their sole output instruction is
+    # the JSON contract in their own prompt — the sentinel contract would otherwise let
+    # a classifier emit NEED_USER_INPUT instead of JSON and loop the reply forever.
+    full = SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+    return _invoke([], full)
 
 
 def resume(session_id: str, prompt: str) -> ClaudeResult:

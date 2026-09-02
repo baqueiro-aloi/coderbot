@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Pinned (not `latest`/floating): see README "Toolchain versions" for the bump procedure.
+FROM python:3.12.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git openssh-client curl ca-certificates gnupg util-linux ffmpeg \
@@ -23,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npx --yes playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
+RUN npm install -g @anthropic-ai/claude-code@2.1.209 opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
     && npm install --prefix /opt/coderbot/plugins \
         "superpowers@git+https://github.com/obra/superpowers.git#v6.3.0"
 

@@ -1,12 +1,55 @@
 """Central configuration for codebot. Everything env-overridable."""
 import os
+import re
+import secrets
 from pathlib import Path
 
 CODEBOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("CODEBOT_DATA_DIR", CODEBOT_DIR / "data"))
 
+
+def _instance_id() -> str:
+    """This installation's stable identity, for multi-instance coordination. It tags
+    email subjects and git branches, names this instance in the backlog doc's
+    "[implementing: <instance>]" claim markers, and scopes mailbox commands.
+
+    Every clone of the repo runs the SAME compose file and .env, so identity cannot
+    come from configuration: it is generated once per installation and persisted in
+    data/instance_id (per-clone, survives restarts). CODEBOT_INSTANCE overrides it
+    for a hand-picked name. Sanitized to [a-z0-9-] because branch names and the
+    claim-marker regex build on it."""
+    explicit = (os.environ.get("CODEBOT_INSTANCE") or "").strip().lower()
+    if explicit:
+        # Collapse runs and strip edge dashes: git rejects refnames starting with "-",
+        # and branches are built as "<id>-<slug>".
+        cleaned = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]", "-", explicit)).strip("-")
+        return cleaned or "codebot"
+    path = DATA_DIR / "instance_id"
+    try:
+        saved = path.read_text().strip().lower()
+    except OSError:
+        saved = ""
+    if saved and re.fullmatch(r"[a-z0-9-]+", saved):
+        return saved
+    # Unambiguous alphabet (no 0/o, 1/l/i): these ids appear in email subjects and
+    # commands the user types back ("ABORT codebot-x7k2").
+    generated = "codebot-" + "".join(
+        secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(4))
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(generated + "\n")
+    return generated
+
+
+INSTANCE_ID = _instance_id()
+
 # Backlog Google Doc. Required — set CODEBOT_DOC_ID in .env (validated in main()).
 DOC_ID = os.environ.get("CODEBOT_DOC_ID", "")
+# When set, only tasks under this heading in the backlog doc are offered to PICK; bullets
+# under any other heading (e.g. items still under discussion) are not worked on. Empty
+# (the default) means every top-level bullet in the doc is a candidate.
+DOC_SECTION = os.environ.get("CODEBOT_DOC_SECTION") or ""
+# May be a comma-separated list: mail is SENT to the first address; mail FROM any of
+# them is trusted as the user (replies, approvals, ABORT/STATUS/DONE commands).
 USER_EMAIL = os.environ.get("CODEBOT_USER_EMAIL", "")
 # Target git checkout the agent works on. Required in the container (compose and
 # entrypoint enforce it; main() validates it's a git repo). The sentinel default
@@ -26,7 +69,8 @@ AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
 
 # `or` (not a get-default) so an empty env value from .env still falls back,
 # rather than passing --model "" to the claude CLI.
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-opus-4-8"
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-fable-5"
+CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT") or "medium"
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 
 SUPERPOWERS_VERSION = "v6.3.0"
@@ -43,6 +87,9 @@ POLL_INTERVAL_SECONDS = int(os.environ.get("CODEBOT_POLL_INTERVAL", "120"))
 AGENT_TIMEOUT_SECONDS = int(os.environ.get(
     "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "7200")))
 E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "3600"))
+# Short calls (git/gh) must never hang the tick loop; a timeout surfaces as a tick
+# failure and feeds the retry/backoff path instead of wedging forever.
+SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBPROCESS_TIMEOUT", "120"))
 # Cap the e2e-fails -> resume-to-fix -> re-run loop so a failure Claude can't resolve
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
 E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
@@ -74,4 +121,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-SUBJECT_PREFIX = "[codebot]"
+# Subjects carry the instance id so the user can tell instances' threads apart and
+# address mailbox commands to one instance (a reply keeps the subject).
+SUBJECT_PREFIX = f"[{INSTANCE_ID}]"

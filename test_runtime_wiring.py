@@ -98,7 +98,7 @@ class RuntimeValidationTests(unittest.TestCase):
              patch.object(main, "validate_managed_runtime",
                           side_effect=SystemExit("runtime unavailable"), create=True), \
              patch.object(main, "load_state", return_value={"state": "IDLE"}), \
-             patch.object(main, "check_abort", return_value=False), \
+             patch.object(main, "check_commands", return_value=False), \
              patch.dict(main.PHASES, {"IDLE": backlog_selection}):
             with self.assertRaisesRegex(SystemExit, "runtime unavailable"):
                 main.main()

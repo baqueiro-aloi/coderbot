@@ -94,7 +94,9 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
         timeout=config.E2E_TIMEOUT_SECONDS,
         # The target harness exposes this documented opt-in to Playwright's
         # `video: "on"` setting. PW_VIDEO is not consumed by Playwright configs.
-        env={**os.environ, "PICA_E2E_VIDEO": "on"},
+        # Both spellings: PICA_E2E_VIDEO for harnesses built against this contract and
+        # PW_VIDEO for older Playwright configs that gate `video: "on"` on it.
+        env={**os.environ, "PICA_E2E_VIDEO": "on", "PW_VIDEO": "on"},
     )
     if proc.returncode != 0:
         log.warning("evidence run exit=%d; stderr tail:\n%s", proc.returncode, proc.stderr[-1500:])

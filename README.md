@@ -76,18 +76,35 @@ the branch diff for evidence-looking files (video extensions, or paths naming
 "evidence"/"recording") and have the coding agent remove and re-route them via
 email if any are found.
 
-## Abort / reset (last resort)
+## Mailbox commands: ABORT / STATUS / DONE (last resort)
 
-Email codebot with a body of exactly `ABORT` (case-insensitive) to force a reset.
-Checked at the start of every tick and mailbox-wide (any thread, or a brand-new
-email), so it works even when the agent is stuck waiting on a thread. On receipt it
-discards the working-tree changes, returns to a clean, up-to-date base branch
-(`git reset --hard` + `checkout -f $CODEBOT_BASE_BRANCH` + `clean -fd` + fast-forward
-to `origin/$CODEBOT_BASE_BRANCH`), clears all task state, and goes back to IDLE —
-then emails a confirmation. It only touches the **local** checkout: remote branches
-and PRs are left as-is (clean those up on GitHub yourself if needed). The check runs
-between phases, so an abort sent mid-phase takes effect once the current Claude call
-returns.
+Email codebot with a body of exactly `ABORT`, `STATUS`, or `DONE` (case-insensitive),
+optionally followed by an instance name (`ABORT codebot-x7k2`) when several instances
+share the mailbox — see "Multiple instances" below for how bare commands are scoped.
+All are checked at the start of every tick and mailbox-wide (any thread, or a brand-new
+email), so they work even when the agent is stuck waiting on a thread — or in
+WAIT_REVIEW, which never polls the inbox. **Only mail from `CODEBOT_USER_EMAIL` is
+honored** (it may be a comma-separated list) — a stranger emailing "ABORT" is ignored.
+Thread replies are held to the same rule: mail from any other sender in a task thread
+is logged and ignored.
+
+- **ABORT** discards the working-tree changes, returns to a clean, up-to-date base branch
+  (`git reset --hard` + `checkout -f $CODEBOT_BASE_BRANCH` + `clean -fd` + fast-forward
+  to `origin/$CODEBOT_BASE_BRANCH`), clears all task state, and goes back to IDLE —
+  then emails a confirmation. It only touches the **local** checkout: remote branches
+  and PRs are left as-is (clean those up on GitHub yourself if needed). The check runs
+  between phases, so an abort sent mid-phase takes effect once the current agent call
+  returns.
+- **STATUS** replies with a snapshot — instance, current state, task/slug/branch, PR
+  URL, pending question, last transition time, round counters, and the full text of
+  the last email codebot sent — without changing anything.
+- **DONE** marks the current task complete: strikes the item through in the backlog
+  doc, resets the local checkout to a clean base branch, and returns to IDLE to pick
+  the next item. Use it when the work turned out to already be done (e.g. an earlier
+  PR covered it) and the bot is waiting on a thread you'd rather not continue. A bare
+  reply on the **active task thread** is never treated as this command (so answering
+  "Done" to a question doesn't complete the task) — send it on any other thread or a
+  fresh email, or target the instance explicitly (`DONE codebot-x7k2`).
 
 ## Automated code review (WAIT_REVIEW ⇄ ADDRESS_REVIEW)
 
@@ -191,6 +208,33 @@ docker compose logs -f
 State lives in `data/state.json`; the container restarts safely from any state.
 To abort the current task: stop the container, delete `data/state.json`, clean the
 git branch, restart.
+
+## Multiple instances
+
+Any number of codebots can share one mailbox and backlog doc. Each installation
+generates a stable identity on first start and persists it in `data/instance_id`
+(e.g. `codebot-x7k2`). That id tags the instance's email subjects (`[codebot-x7k2]`)
+and its git branches (`codebot-x7k2-<slug>`). `CODEBOT_INSTANCE` in `.env` overrides
+the generated name — but then it must be **unique per installation**.
+
+All instances share the Gmail account; each one only reads replies on its own
+threads (subjects carry its prefix). Address mailbox commands to one instance —
+`ABORT codebot-x7k2`, `STATUS codebot-x7k2`, `DONE codebot-x7k2` — or reply with the
+bare command on one of its threads. A bare `ABORT` or `STATUS` sent anywhere else is
+honored by **every** instance (fleet-wide stop / fleet status — their last-resort
+role); a bare `DONE` outside an instance's threads is ignored, since "mark the
+current task done" is per-instance.
+
+## Toolchain versions
+
+The image pins exact versions for reproducible rebuilds: the base image
+(`python:3.12.13-slim`), the claude-code, opencode and openspec CLIs (`@<version>` in
+the `Dockerfile`), the Superpowers plugin (`config.SUPERPOWERS_VERSION`), Node (major
+`22` via nodesource), and the Python deps (`==` in `requirements.txt`). To bump: read
+the version currently working in the running container (`docker compose exec codebot
+claude --version`, `… openspec --version`), edit the pin, and rebuild
+(`docker compose up -d --build`). Don't switch these to floating/`latest` — a silent
+CLI behavior change between rebuilds is exactly what the pins prevent.
 
 ## Smoke tests
 

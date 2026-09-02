@@ -42,7 +42,7 @@ def save_state(state: dict) -> None:
 def git(*args: str) -> str:
     log.debug("git %s", " ".join(args))
     proc = subprocess.run(["git", *args], cwd=config.REPO_PATH,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}")
     if proc.stdout.strip():
@@ -61,6 +61,9 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     log.info("emailing %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
     state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
+    # Snapshot for STATUS replies: lets the user recover what the bot last said (and
+    # is therefore waiting on) if the original email was lost or unclear.
+    state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
 
 
 def parse_json_reply(text: str) -> dict:
@@ -374,7 +377,8 @@ def do_pick(state: dict) -> None:
         state["state"] = "IDLE"
         return
     result = agent_runner.run(prompts.render(
-        prompts.PICK, project=config.PROJECT_NAME, items="\n".join(f"- {i}" for i in items)))
+        prompts.PICK, project=config.PROJECT_NAME, items="\n".join(f"- {i}" for i in items)),
+        contract=False)
     choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
@@ -383,7 +387,7 @@ def do_pick(state: dict) -> None:
     state.update(item=choice["item"], slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
-    branch = f"codebot-{choice['slug']}"
+    branch = f"{config.INSTANCE_ID}-{choice['slug']}"
     # -B is idempotent: if do_pick is retried after the branch was already created
     # (state not yet persisted), reset it from the base branch rather than failing on "-b".
     git("checkout", "-B", branch)
@@ -416,7 +420,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
     verdict = parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)).output)
+        agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply),
+                         contract=False).output)
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
     if action not in ("approve", "changes", "abort"):
@@ -582,7 +587,7 @@ def do_e2e(state: dict) -> None:
 
 
 def _run_checked(command: list[str]) -> str:
-    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True)
+    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
         raise RuntimeError(f"{' '.join(command)} exited {proc.returncode}: {detail}")
@@ -816,7 +821,7 @@ def code_review_check(pr_url: str) -> dict | None:
     """
     proc = subprocess.run(
         ["gh", "pr", "checks", pr_url, "--json", "name,bucket,workflow,link"],
-        cwd=config.REPO_PATH, capture_output=True, text=True)
+        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     try:
         checks = json.loads(proc.stdout) if proc.stdout.strip() else []
     except json.JSONDecodeError:
@@ -844,7 +849,7 @@ def _bot_comments(endpoint: str) -> list[dict]:
     """github-actions[bot] comments from a PR comments endpoint ([] on any failure)."""
     proc = subprocess.run(
         ["gh", "api", f"{endpoint}?per_page=100"],
-        cwd=config.REPO_PATH, capture_output=True, text=True)
+        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         log.warning("gh api %s failed: %s", endpoint, proc.stderr[-300:])
         return []
@@ -1000,7 +1005,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict]:
     proc = subprocess.run(
         ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
          "-F", f"repo={repo}", "-F", f"number={number}"],
-        cwd=config.REPO_PATH, capture_output=True, text=True)
+        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         log.warning("gh api graphql (reviewThreads) failed: %s", proc.stderr[-300:])
         return []
@@ -1042,7 +1047,7 @@ def resolve_review_thread(thread_id: str) -> bool:
         ["gh", "api", "graphql",
          "-f", "query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }",
          "-F", f"id={thread_id}"],
-        cwd=config.REPO_PATH, capture_output=True, text=True)
+        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         log.warning("gh api graphql (resolveReviewThread %s) failed: %s", thread_id, proc.stderr[-300:])
         return False
@@ -1050,7 +1055,8 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
-    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply))
+    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply),
+                              contract=False)
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r", action)
@@ -1082,7 +1088,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
     # merge
     info = json.loads(subprocess.run(
         ["gh", "pr", "view", state["pr_url"], "--json", "state,mergeable"],
-        cwd=config.REPO_PATH, capture_output=True, text=True, check=True).stdout)
+        cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS, check=True).stdout)
     pr_state, mergeable = info.get("state"), info.get("mergeable")
     log.info("PR state=%s mergeable=%s before merge", pr_state, mergeable)
     if pr_state != "MERGED":
@@ -1100,7 +1106,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
             return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash)", state["pr_url"])
         merge = subprocess.run(["gh", "pr", "merge", state["pr_url"], "--squash"],
-                               cwd=config.REPO_PATH, capture_output=True, text=True)
+                               cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
         if merge.returncode != 0:
             # A late-breaking conflict or other GitHub rejection (e.g. branch behind the
             # base branch). Don't crash into the retry loop — surface it and wait for the
@@ -1111,21 +1117,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                   f"PR: {state['pr_url']}\n\nThis usually means {config.BASE_BRANCH} moved ahead "
                   "or there are conflicts. Please resolve it on the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
-    if gdoc_client.mark_done(state["item"]):
-        log.info("struck item through in backlog doc; task complete")
-        email(state, "task complete",
-              f"PR merged and the item was marked done in the backlog doc:\n\n{state['item']}")
-    else:
-        log.warning("could not locate item in doc to strike through: %r", state["item"][:80])
-        email(state, "could not mark item done",
-              f"PR merged, but I could not find this item in the doc to strike it "
-              f"through:\n\n{state['item']}\n\nPlease mark it manually.")
-    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
-                "pr_thread_round", "pr_thread_notified", "verify_round", "review_gate_round",
-                "archive_round", "archive_path", "e2e_repair_head", "e2e_repair_status",
-                "push_context", "archive_error"):
-        state.pop(key, None)
-    state["state"] = "IDLE"
+    _finish_task(state, "PR merged.", reset_repo=False)
 
 
 def _finish_address_pr_threads(state: dict) -> None:
@@ -1216,6 +1208,14 @@ def handle_wait(state: dict) -> None:
         log.debug("%s: no reply yet on thread %s", state["state"], state.get("thread_id"))
         return
     msg_id, reply = polled
+    target = gmail_client.foreign_command(reply)
+    if target:
+        # A command addressed to ANOTHER instance, replied on our thread. That
+        # instance picks it up mailbox-wide; classifying it here as the user's answer
+        # could abort or complete OUR task on a command that was never for us.
+        log.info("setting aside command for instance %r replied on our thread", target)
+        gmail_client.mark_processed(msg_id)
+        return
     log.info("reply received in %s: %r", state["state"], reply[:200])
     _handle_reply(state, reply)
     # Consume the reply only now that handling finished without raising. If it threw
@@ -1255,7 +1255,12 @@ def handle_merge_wait(state: dict) -> None:
 
 def _git_quiet(*args: str) -> bool:
     """Run a git command, returning success. Never raises — for the best-effort reset."""
-    proc = subprocess.run(["git", *args], cwd=config.REPO_PATH, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["git", *args], cwd=config.REPO_PATH, capture_output=True,
+                              text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        log.debug("git %s timed out after %ss", " ".join(args), config.SUBPROCESS_TIMEOUT_SECONDS)
+        return False
     if proc.returncode != 0:
         log.debug("git %s -> rc=%d: %s", " ".join(args), proc.returncode, proc.stderr.strip()[:200])
     return proc.returncode == 0
@@ -1278,14 +1283,52 @@ def _reset_to_base_branch() -> list[str]:
         _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
     problems = []
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                            cwd=config.REPO_PATH, capture_output=True, text=True).stdout.strip()
+                            cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
     if branch != config.BASE_BRANCH:
         problems.append(f"could not switch to {config.BASE_BRANCH} (still on {branch or 'unknown'})")
     dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                           cwd=config.REPO_PATH, capture_output=True, text=True).stdout.strip()
+                           cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
     if dirty:
         problems.append("tracked changes remain after reset")
     return problems
+
+
+# Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
+# next pick starts from a clean slate. Keep in sync when adding state.
+RESET_KEYS = ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
+              "return_state", "review_since", "review_round", "review_run_link",
+              "review_comment_watermark", "review_comments", "pr_summary",
+              "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
+              "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
+              "e2e_repair_status", "push_context", "archive_error", "e2e_round")
+
+
+def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
+    """End the task successfully: strike the item in the backlog doc, optionally reset the
+    checkout to a clean base branch (needed when finishing before a merge — the tree may
+    hold proposal artifacts or a stale branch), email confirmation, and land in IDLE."""
+    item = state.get("item", "")
+    struck = gdoc_client.mark_done(item) if item else False
+    if struck:
+        log.info("struck item through in backlog doc; task complete")
+        body = f"{note}\n\nThe item was marked done in the backlog doc:\n\n{item}"
+        subj = "task complete"
+    else:
+        log.warning("could not locate item in doc to strike through: %r", item[:80])
+        subj = "task complete — mark the item manually"
+        body = (f"{note}\n\nBut I could not find this item in the doc to strike it "
+                f"through:\n\n{item}\n\nPlease strike it through (or delete it) promptly "
+                "— until then it may be picked again.")
+    if reset_repo:
+        problems = _reset_to_base_branch()
+        if problems:
+            body += ("\n\nThe repo reset finished with issues (I'll re-check before the "
+                     "next task):\n- " + "\n- ".join(problems))
+    body += "\n\nI'll pick up the next pending item from the backlog doc."
+    email(state, subj, body)
+    for key in RESET_KEYS:
+        state.pop(key, None)
+    state["state"] = "IDLE"
 
 
 def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
@@ -1304,37 +1347,94 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
           "from the backlog doc.", new_thread=new_thread)
-    for key in ("item", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
-                 "return_state", "review_since", "review_round", "review_run_link",
-                 "review_comment_watermark", "review_comments", "pr_summary",
-                 "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
-                 "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
-                 "e2e_repair_status", "push_context", "archive_error"):
+    for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
 
 
-def check_abort(state: dict) -> bool:
-    """Last-resort kill switch: on an 'ABORT' email, reset to a clean IDLE slate. True if so.
+def check_commands(state: dict) -> bool:
+    """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
+    the tick should skip normal dispatch (an ABORT reset or a DONE completion).
 
     Checked every tick regardless of state and mailbox-wide, so it works even when the agent
-    is stuck waiting on a thread. A gmail hiccup here must not break the tick, so polling
-    failures are swallowed.
+    is stuck waiting on a thread — or in a state that never polls the inbox (WAIT_REVIEW).
+    Only commands from CODEBOT_USER_EMAIL are honored. A gmail hiccup here must not break
+    the tick, so polling failures are swallowed. ABORT and DONE reset local state only —
+    remote branches and PRs are untouched.
     """
     try:
-        polled = gmail_client.poll_abort()
+        polled = gmail_client.poll_command()
     except Exception:
-        log.exception("abort check could not poll gmail; skipping this tick")
+        log.exception("command check could not poll gmail; skipping this tick")
         return False
     if polled is None:
         return False
-    msg_id, _thread_id = polled
-    # Consume the trigger first: the reset below is idempotent, but marking it processed up
-    # front guarantees a failure afterwards can't loop us into re-aborting.
+    msg_id, thread_id, command, targeted = polled
+    if command == "DONE":
+        if not targeted and thread_id and thread_id == state.get("thread_id"):
+            # A BARE "Done"-bodied reply on the ACTIVE task thread is normal
+            # conversation ("Done" = "I did what you asked"), not the command — leave
+            # it unprocessed for handle_wait and its classifiers. "DONE <this-instance>"
+            # is explicit and IS the command.
+            log.debug("bare DONE-shaped reply on the active thread; deferring to the "
+                      "thread classifier")
+            return False
+        if not state.get("item"):
+            log.warning("DONE command received but no task is in progress; ignoring")
+            gmail_client.mark_processed(msg_id)
+            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to complete",
+                              "DONE received, but no task is in progress.", thread_id)
+            return False
+        # Consume only AFTER handling: _finish_task has multi-step network side effects
+        # (docs strike-through, repo reset, email); a failure mid-way must leave the
+        # DONE unprocessed so the next tick retries it. Each step is idempotent enough
+        # to re-run (a struck item just reports "mark manually" on the retry).
+        _finish_task(state, "DONE command received: marking the current task complete.",
+                     reset_repo=True)
+        gmail_client.mark_processed(msg_id)
+        return True
+    # ABORT / STATUS: consume the trigger first — handling is idempotent, and marking it
+    # processed up front guarantees a failure afterwards can't loop us into re-running it.
     gmail_client.mark_processed(msg_id)
+    if command == "STATUS":
+        _send_status(state, thread_id)
+        return False  # STATUS is read-only; let the tick proceed normally
     _abort_and_reset(state, "ABORT received: I stopped the task in progress and reset myself "
                             "to a clean slate.", new_thread=True)
     return True
+
+
+def _fmt_ts(epoch: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
+
+
+def _send_status(state: dict, thread_id: str) -> None:
+    """Reply to a STATUS command with a snapshot of the FSM. Never mutates state."""
+    lines = [
+        f"Instance: {config.INSTANCE_ID}",
+        f"State: {state.get('state', '?')}",
+        f"Task: {state.get('item', '-')}",
+        f"Slug: {state.get('slug', '-')}",
+        f"Branch: {state.get('branch', '-')}",
+        f"PR: {state.get('pr_url', '-')}",
+    ]
+    if state.get("return_state"):
+        lines.append(f"Pending question from phase: {state['return_state']}")
+    if state.get("last_transition"):
+        lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
+    for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
+                       ("review_round", "Code-review rounds"),
+                       ("pr_thread_round", "PR-thread rounds"), ("archive_round", "Archive rounds")):
+        if state.get(key):
+            lines.append(f"{label}: {state[key]}")
+    body = "codebot status:\n\n" + "\n".join(lines)
+    last = state.get("last_email")
+    if last:
+        body += (f"\n\n--- Last email sent ({_fmt_ts(last['sent_at'])}) ---\n"
+                 f"Subject: {last['subject']}\n\n{last['body']}")
+    subj = f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — status"
+    gmail_client.send(subj, body, thread_id)
+    log.info("sent STATUS report (state=%s)", state.get("state"))
 
 
 def _handle_reply(state: dict, reply: str) -> None:
@@ -1458,7 +1558,8 @@ def main() -> None:
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
-    log.info("codebot starting; agent=%s repo=%s doc=%s", config.AGENT, config.REPO_PATH, config.DOC_ID)
+    log.info("codebot starting; instance=%s agent=%s repo=%s doc=%s",
+             config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.DOC_ID)
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
         try:
@@ -1473,7 +1574,7 @@ def main() -> None:
         prev = state["state"]
         try:
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
-            if check_abort(state):
+            if check_commands(state):
                 pass  # reset to IDLE; skip normal dispatch this tick
             elif state["state"] == "WAIT_REVIEW":
                 handle_review_wait(state)
@@ -1485,6 +1586,7 @@ def main() -> None:
                 PHASES[state["state"]](state)
             if state["state"] != prev:
                 log.info("state transition: %s -> %s", prev, state["state"])
+                state["last_transition"] = time.time()
             save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
         except Exception:

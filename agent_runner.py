@@ -56,8 +56,7 @@ class OpenCodeResult:
 
     @property
     def question(self) -> str | None:
-        idx = self.output.rfind(SENTINEL)
-        return self.output[idx + len(SENTINEL):].strip() if idx >= 0 else None
+        return claude_runner.sentinel_question(self.output)
 
     @property
     def attachments(self) -> list[str]:
@@ -104,11 +103,14 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     return result
 
 
-def run(prompt: str):
+def run(prompt: str, contract: bool = True):
+    """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
+    classifiers) whose only output instruction must be their own JSON contract."""
     if config.AGENT == "claude":
-        return claude_runner.run(prompt)
+        return claude_runner.run(prompt, contract=contract)
     if config.AGENT == "opencode":
-        return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt)
+        full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+        return _opencode(full)
     raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
 
 
