@@ -219,7 +219,8 @@ class ArchivalTests(unittest.TestCase):
             archive_error="strict validation failed")
         fixed = Mock(session_id="session-2", output="committed planning fix",
                      question=None, attachments=[])
-        with patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
              patch.object(main, "_reset_to_base_branch") as reset:
             main._handle_reply(state, "fix the malformed requirement")
 
@@ -237,7 +238,8 @@ class ArchivalTests(unittest.TestCase):
             archive_error="strict validation failed")
         question = Mock(session_id="session-2", output="question", question="Which spec?",
                         attachments=[])
-        with patch.object(main.agent_runner, "resume", return_value=question), \
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume", return_value=question), \
              patch.object(main, "email"):
             main._handle_reply(state, "please repair it")
 
@@ -757,7 +759,8 @@ class PushPhaseTests(unittest.TestCase):
         }
         state.pop("push_context")
         fixed = Mock(session_id="session-1", output="fixed", question=None, attachments=[])
-        with patch.object(main.agent_runner, "resume", return_value=fixed), \
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "use the safe option")
@@ -774,7 +777,8 @@ class PushPhaseTests(unittest.TestCase):
         }
         state.pop("push_context")
         fixed = Mock(session_id="session-1", output="fixed", question=None, attachments=[])
-        with patch.object(main.agent_runner, "resume", return_value=fixed), \
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "apply it")

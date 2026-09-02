@@ -94,6 +94,12 @@ SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBPROCESS_TIMEOUT", "1
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
 E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
 QUALITY_GATE_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "3"))
+# After this many CONSECUTIVE failures of the same FSM state, codebot stops retrying
+# silently and emails the user (entering WAIT_STUCK). Any successful tick resets it.
+MAX_STATE_FAILURES = int(os.environ.get("CODEBOT_MAX_STATE_FAILURES", "5"))
+# Cap the ask-question -> user-reply -> ask-again loop per phase; past this the task
+# escalates to WAIT_STUCK instead of emailing yet another question.
+QUESTION_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUESTION_MAX_ROUNDS", "8"))
 ARCHIVE_MAX_ROUNDS = int(os.environ.get("CODEBOT_ARCHIVE_MAX_ROUNDS", "3"))
 
 # After opening a PR, codebot waits for the "Code Review" GitHub Action
@@ -110,6 +116,21 @@ PR_THREAD_MAX_ROUNDS = int(os.environ.get("CODEBOT_PR_THREAD_MAX_ROUNDS", "3"))
 
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
+
+# Project-specific runtime facts prepended to every agentic prompt (how to run the
+# tests, what is NOT available in the container, ...). Either the env var or the file
+# data/environment.md; the generic facts in prompts.ENVIRONMENT always apply.
+def _environment_notes() -> str:
+    inline = (os.environ.get("CODEBOT_ENVIRONMENT_NOTES") or "").strip()
+    if inline:
+        return inline
+    try:
+        return (DATA_DIR / "environment.md").read_text().strip()
+    except OSError:
+        return ""
+
+
+ENVIRONMENT_NOTES = _environment_notes()
 
 TOKEN_PATH = DATA_DIR / "token.json"
 CREDENTIALS_PATH = DATA_DIR / "credentials.json"

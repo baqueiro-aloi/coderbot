@@ -5,6 +5,7 @@ import logging
 import re
 import subprocess
 import time
+import traceback
 from datetime import date
 from pathlib import Path
 
@@ -83,22 +84,50 @@ def parse_json_reply(text: str) -> dict:
     raise ValueError(f"no JSON object in coding-agent output: {text[:500]}")
 
 
+# Where a phase resumes after a WAIT_STUCK escalation when re-running the phase itself
+# makes no sense (its trigger — the user's PR feedback — was consumed).
+RESUMABLE_STATE = {"APPLY_PR_FEEDBACK": "WAIT_MERGE", "ADDRESS_PR_THREADS": "WAIT_MERGE"}
+
+
 def handle_result(state: dict, result, phase: str) -> bool:
-    """If the coding agent asked a question, email it and enter WAIT_REPLY."""
+    """If the coding agent asked a question, email it and enter WAIT_REPLY. True if waiting.
+
+    Consecutive question round-trips are capped: each round "succeeds" as a tick, so the
+    per-state failure budget can never bound this loop — without the cap a session that
+    keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
+    """
     state["session_id"] = result.session_id
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     question = result.question
-    if question:
-        attachments = [Path(p) for p in result.attachments if Path(p).exists()]
-        log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
-                 phase, len(attachments))
-        email(state, f"question during {phase}",
-              f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n{question}\n\n"
-              "Reply to this email to continue.", attachments)
-        state["return_state"] = phase
-        state["state"] = "WAIT_REPLY"
+    if not question:  # None, or a bare/blank sentinel line — nothing actionable to ask
+        state.pop("question_rounds", None)  # phase produced a real result; loop broken
+        state.pop("pending_question", None)
+        return False
+    rounds = state.get("question_rounds", 0) + 1
+    state["question_rounds"] = rounds
+    if rounds > config.QUESTION_MAX_ROUNDS:
+        log.warning("question loop exceeded %d rounds in %s; escalating to WAIT_STUCK",
+                    config.QUESTION_MAX_ROUNDS, phase)
+        detail = (f"I have asked {rounds - 1} questions in a row during {phase} without "
+                  f"completing the phase. The pending question was:\n\n{question}")
+        if phase == "APPLY_PR_FEEDBACK":
+            detail += ("\n\nNote: if you reply 'retry', please re-send the change request "
+                       "you want applied — the original one was consumed.")
+        _enter_stuck(state, RESUMABLE_STATE.get(phase, phase), detail)
         return True
-    return False
+    attachments = [Path(p) for p in result.attachments if Path(p).exists()]
+    log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
+             phase, len(attachments))
+    email(state, f"question during {phase}",
+          f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n{question}\n\n"
+          "Reply to this email to continue.", attachments)
+    # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
+    # is done, move on" answers a sub-step question; without the question it reads like
+    # a whole-task completion order.
+    state["pending_question"] = question[:2000]
+    state["return_state"] = phase
+    state["state"] = "WAIT_REPLY"
+    return True
 
 
 def _parse_completion_contract(output: str, marker: str) -> tuple[dict | None, str | None]:
@@ -453,7 +482,87 @@ def do_explore(state: dict) -> None:
         images=render_images(state.get("item_images", []))))
     if handle_result(state, result, "EXPLORING"):
         return
+    _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
+
+
+def _undo_premature_work(state: dict, phase: str) -> str:
+    """Revert work that goes beyond a planning phase (EXPLORING/PROPOSING must not
+    implement, commit, or switch branches). Openspec change artifacts are the phases'
+    legitimate output and are left alone. Returns a note for the user ('' when clean).
+
+    Best-effort by design: a cleanup error must never fail the phase, so problems are
+    reported in the note instead of raised."""
+    notes = []
+    base_branch = config.BASE_BRANCH
+    try:
+        current = git("rev-parse", "--abbrev-ref", "HEAD")
+        base = state.get("base_sha") or git("merge-base", "HEAD", base_branch)
+        branch = state.get("branch")
+        if branch and current != branch:
+            # The session wandered off the task branch (worst case: committed on the local
+            # base branch). -B recreates/resets the task branch at its base even if the
+            # session deleted it; -f discards conflicting tracked changes — premature by
+            # definition in a planning phase.
+            notes.append(f"the session left the checkout on '{current}'; "
+                         f"reset '{branch}' to its base and returned to it")
+            git("checkout", "-f", "-B", branch, base)
+            if current == base_branch:
+                try:
+                    upstream = git("rev-parse", f"origin/{base_branch}")
+                    if git("rev-parse", base_branch) != upstream:
+                        git("branch", "-f", base_branch, upstream)
+                        notes.append(f"local {base_branch} had premature commits; reset it "
+                                     f"to origin/{base_branch}")
+                except Exception:  # noqa: BLE001 — e.g. no origin/<base> ref cached
+                    notes.append(f"could not verify local {base_branch} against "
+                                 f"origin/{base_branch} — please check it manually")
+        else:
+            ahead = git("rev-list", "--count", f"{base}..HEAD") or "0"
+            if ahead != "0":
+                notes.append(f"undid {ahead} premature commit(s)")
+                git("reset", "--soft", base)
+        # -z: NUL-separated and never C-quoted, so paths with spaces/UTF-8 parse exactly
+        # (the quoted form broke both the openspec/ prefix check and the git commands).
+        entries = git("status", "--porcelain", "-z", "--untracked-files=no").split("\0")
+        offending = []
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if not entry:
+                continue
+            code, path = entry[:2], entry[3:]
+            paths = [path]  # rename/copy: [destination, source] — source follows as its
+            if "R" in code or "C" in code:  # own NUL-separated record
+                paths.append(entries[i])
+                i += 1
+            if all(p.startswith("openspec/") for p in paths):
+                continue
+            offending.append((code, paths))
+        for code, paths in offending:
+            if len(paths) == 2:
+                dest, src = paths
+                if not src.startswith("openspec/"):
+                    git("checkout", "HEAD", "--", src)  # undo the deletion side
+                if not dest.startswith("openspec/"):  # never delete an openspec artifact
+                    git("rm", "-f", "--ignore-unmatch", "--", dest)
+            elif "A" in code:  # staged addition: no base version to restore
+                git("rm", "-f", "--", paths[0])
+            else:
+                git("checkout", "HEAD", "--", paths[0])
+        if offending:
+            notes.append("discarded premature changes outside openspec/: "
+                         + ", ".join(p for _c, ps in offending for p in ps))
+    except Exception as err:  # noqa: BLE001 — hygiene must not break the phase
+        log.exception("premature-work cleanup failed")
+        notes.append(f"tried to revert premature work but hit an error: {err}")
+    if not notes:
+        return ""
+    note = (f"Note: I detected work beyond the {phase} phase and cleaned it up "
+            f"({'; '.join(notes)}). Implementation starts only after your approval.")
+    log.warning("%s", note)
+    return note
 
 
 def do_propose(state: dict) -> None:
@@ -461,9 +570,10 @@ def do_propose(state: dict) -> None:
         prompts.PROPOSE, slug=state["slug"], e2e_note=_e2e_note(state)))
     if handle_result(state, result, "PROPOSING"):
         return
+    note = _undo_premature_work(state, "PROPOSING")
     email(state, "proposal for review",
-          f"Task: {state['item']}\n\n{result.output}\n\n"
-          "Reply with your approval or requested changes.")
+          f"Task: {state['item']}\n\n{result.output}\n\n" + (f"{note}\n\n" if note else "")
+          + "Reply with your approval or requested changes.")
     state["state"] = "WAIT_APPROVAL"
 
 
@@ -476,14 +586,18 @@ def do_approval_reply(state: dict, reply: str) -> None:
                          contract=False).output)
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
-    if action not in ("approve", "changes", "abort"):
+    if action not in ("approve", "changes", "abort", "complete"):
         email(state, "clarification needed",
               f"I could not tell whether your reply approves the proposal, requests "
-              f"changes, or aborts:\n\n{reply}\n\nPlease reply again with an explicit "
-              "approval, the changes you want, or 'abort'.")
+              f"changes, marks the task complete, or aborts:\n\n{reply}\n\nPlease reply "
+              "again with an explicit approval, the changes you want, 'complete', or 'abort'.")
         return  # stay in WAIT_APPROVAL
     if action == "abort":
         _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean slate.")
+        return
+    if action == "complete":
+        _finish_task(state, "You asked me to mark this task complete with no further work.",
+                     reset_repo=True)
         return
     if action == "approve":
         state["state"] = "IMPLEMENTING"
@@ -494,7 +608,9 @@ def do_approval_reply(state: dict, reply: str) -> None:
         prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"]))
     if handle_result(state, result, "PROPOSING"):
         return
-    email(state, "revised proposal", result.output + "\n\nReply with your approval or further changes.")
+    note = _undo_premature_work(state, "PROPOSING")
+    email(state, "revised proposal", result.output + "\n\n" + (f"{note}\n\n" if note else "")
+          + "Reply with your approval or further changes.")
     state["state"] = "WAIT_APPROVAL"
 
 
@@ -1112,13 +1228,17 @@ def do_merge_reply(state: dict, reply: str) -> None:
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r", action)
-    if action not in ("merge", "changes", "abort"):
+    if action not in ("merge", "changes", "abort", "complete"):
         # Merging is irreversible: never fall through to it on unexpected output.
         email(state, "clarification needed",
-              f"I could not tell whether your reply asks for changes, an abort, or a "
-              f"merge:\n\n{reply}\n\nPlease reply again with the change requests, 'abort', "
-              "or an explicit 'merge'.")
+              f"I could not tell whether your reply asks for changes, an abort, a "
+              f"merge, or to mark the task complete:\n\n{reply}\n\nPlease reply again "
+              "with the change requests, 'abort', 'complete', or an explicit 'merge'.")
         return  # stay in WAIT_MERGE
+    if action == "complete":
+        _finish_task(state, "You asked me to mark this task complete without merging the PR "
+                            f"myself.\nPR: {state.get('pr_url', '-')}", reset_repo=True)
+        return
     if action == "abort":
         pr_url = state.get("pr_url", "-")
         _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean "
@@ -1251,7 +1371,7 @@ PHASES = {
 # post-tick sleep, so it lives in WAITS and is dispatched ahead of the inbox waits.
 # WAIT_MERGE does too: it also checks the PR for unresolved review threads before
 # falling through to the inbox check (see handle_merge_wait).
-WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_CLEAN", "WAIT_REVIEW"}
+WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_CLEAN", "WAIT_REVIEW", "WAIT_STUCK"}
 
 
 def handle_wait(state: dict) -> None:
@@ -1347,7 +1467,8 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch", "session_id", "thread_id", "pr_url", "e2e_specs",
+RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch",
+              "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary",
               "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
@@ -1388,6 +1509,96 @@ def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
     for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
+
+
+def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
+    """Stop retrying, remember the failed state, e-mail the user, and enter WAIT_STUCK.
+
+    The resume target lives in stuck_return, NOT return_state: return_state is the
+    WAIT_REPLY phase pointer, and clobbering it here (e.g. when WAIT_REPLY itself
+    escalates after repeated classifier failures) would strand the pending question —
+    the answer would later resolve to an unknown phase and the task's context is lost."""
+    state["stuck_return"] = failed_state
+    state["stuck_error"] = detail[-2000:]
+    email(state, f"stuck in {failed_state}",
+          f"Task: {state.get('item', '?')}\nState: {failed_state}\n\n"
+          f"I stopped and need your help.\n\n{detail}\n\n"
+          "Reply 'retry' to try that step again, 'abort' to reset to a clean slate, "
+          "'complete' to mark the task done as-is, or reply with instructions and I'll "
+          "apply them and continue.")
+    state["state"] = "WAIT_STUCK"
+
+
+def _clear_stuck(state: dict, failed_state: str) -> None:
+    # return_state is deliberately KEPT: when resuming WAIT_REPLY it still points at the
+    # phase whose question is pending, and handle_result refreshes it on new questions.
+    if "failures" in state:
+        state["failures"].pop(failed_state, None)
+    for counter in ("e2e_round", "verify_round", "review_gate_round", "archive_round",
+                    "pr_thread_round"):
+        if counter in state:
+            state[counter] = 0
+    state.pop("question_rounds", None)
+    state.pop("stuck_return", None)
+    state.pop("stuck_error", None)
+
+
+def _escalate(state: dict, failed_state: str) -> bool:
+    """After the failure budget is exhausted for a state, e-mail the user and enter
+    WAIT_STUCK. Returns True if the escalation was delivered. Never re-escalates WAIT_STUCK
+    (its own failures just back off; ABORT is the escape hatch)."""
+    if failed_state == "WAIT_STUCK":
+        return False
+    try:
+        _enter_stuck(state, failed_state,
+                     f"I've failed this step {config.MAX_STATE_FAILURES} times in a row. "
+                     f"Last error:\n\n{traceback.format_exc()[-2000:]}")
+        log.warning("escalated %s to WAIT_STUCK after %d failures",
+                    failed_state, config.MAX_STATE_FAILURES)
+        return True
+    except Exception:
+        log.exception("failed to escalate stuck state %s; will keep retrying", failed_state)
+        return False
+
+
+def do_stuck_reply(state: dict, reply: str) -> None:
+    """Handle the user's reply while WAIT_STUCK: retry / abort / complete / instructions."""
+    verdict = parse_json_reply(
+        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply),
+                         contract=False).output)
+    action = verdict.get("action")
+    log.info("classified stuck reply as action=%r", action)
+    failed_state = state.get("stuck_return", "IDLE")
+    if action == "abort":
+        _abort_and_reset(state, "Got it — I'm giving up on this task and resetting to a "
+                                "clean slate.")
+        return
+    if action == "complete":
+        _finish_task(state, "You asked me to mark the stuck task complete with no further "
+                            "work.", reset_repo=True)
+        return
+    if action not in ("retry", "instructions"):
+        email(state, "clarification needed",
+              f"I could not tell whether you want me to retry, abort, or follow instructions:"
+              f"\n\n{reply}\n\nPlease reply 'retry', 'abort', 'complete', or with explicit "
+              "instructions.")
+        return  # stay in WAIT_STUCK
+    if action == "instructions" and state.get("session_id"):
+        # Apply the guidance in the working session, then let the failed state re-run — which
+        # handles any follow-up question through its own do_* handler.
+        log.info("applying user instructions to session before resuming %s", failed_state)
+        result = agent_runner.resume(state["session_id"], prompts.render(
+            prompts.ANSWER_REPLY, reply=verdict.get("feedback") or reply,
+            rules=prompts.PHASE_RULES.get(failed_state, "")))
+        state["session_id"] = result.session_id
+    # retry, or instructions applied: clear the failure history for the state and resume it.
+    _clear_stuck(state, failed_state)
+    if failed_state == "IDLE":
+        # The unrecoverable-context fallback resumes at IDLE, which means "no task":
+        # drop every task key so session/PR/spec state can't leak into the next pick.
+        for key in RESET_KEYS:
+            state.pop(key, None)
+    state["state"] = failed_state
 
 
 def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
@@ -1489,8 +1700,17 @@ def _send_status(state: dict, thread_id: str) -> None:
         f"Branch: {state.get('branch', '-')}",
         f"PR: {state.get('pr_url', '-')}",
     ]
+    if state.get("stuck_return"):
+        lines.append(f"Stuck on state (awaiting your reply): {state['stuck_return']}")
     if state.get("return_state"):
         lines.append(f"Pending question from phase: {state['return_state']}")
+    if state.get("stuck_error"):
+        lines.append(f"Last error:\n{state['stuck_error']}")
+    active = {k: v for k, v in state.get("failures", {}).items() if v}
+    if active:
+        lines.append("Failure counters: " + ", ".join(f"{k}={v}" for k, v in active.items()))
+    if state.get("question_rounds"):
+        lines.append(f"Consecutive question rounds: {state['question_rounds']}")
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
     for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
@@ -1508,85 +1728,163 @@ def _send_status(state: dict, thread_id: str) -> None:
     log.info("sent STATUS report (state=%s)", state.get("state"))
 
 
+# What "this phase finished via a WAIT_REPLY answer" means, per phase. Mirrors each
+# do_* function's own success tail so a phase completed through a question detour ends
+# up in exactly the same place as one completed directly.
+def _continue_exploring(state: dict, result) -> None:
+    _undo_premature_work(state, "EXPLORING")
+    state["state"] = "PROPOSING"
+
+
+def _continue_proposing(state: dict, result) -> None:
+    note = _undo_premature_work(state, "PROPOSING")
+    email(state, "proposal for review",
+          f"{result.output}\n\n" + (f"{note}\n\n" if note else "")
+          + "Reply with your approval or requested changes.")
+    state["state"] = "WAIT_APPROVAL"
+
+
+def _continue_implementing(state: dict, result) -> None:
+    if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
+        return
+    # The direct path parses the spec list from the final output; an answer that
+    # completes the phase carries the same contract, so parse it here too.
+    specs = evidence.reported_specs(result.output)
+    if specs:
+        state["e2e_specs"] = specs
+        log.info("implementation (via reply) reported %d e2e spec(s): %s", len(specs), specs)
+    state["e2e_round"] = 0
+    state["verify_round"] = 0
+    state["state"] = "VERIFYING"
+
+
+def _continue_verifying(state: dict, result) -> None:
+    state["verify_round"] = 0  # the user's guidance earns a fresh set of attempts
+    _complete_verify(state, result)
+
+
+def _continue_internal_review(state: dict, result) -> None:
+    state["review_gate_round"] = 0
+    _complete_internal_review(state, result)
+
+
+def _continue_e2e(state: dict, result) -> None:
+    state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
+    if "e2e_repair_head" in state and "e2e_repair_status" in state:
+        _finish_e2e_repair(state)
+    else:
+        state["state"] = "E2E"  # re-run the suite on the (answer-informed) fix
+
+
+def _continue_archiving(state: dict, result) -> None:
+    state["archive_round"] = 0
+    state["state"] = "ARCHIVING"
+
+
+def _continue_address_review(state: dict, result) -> None:
+    if _scrub_evidence_from_repo(state, "ADDRESS_REVIEW") is None:
+        return
+    _queue_push(state, "review")
+
+
+def _continue_address_pr_threads(state: dict, result) -> None:
+    if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
+        return
+    _queue_push(state, "threads")
+
+
+def _continue_apply_pr_feedback(state: dict, result) -> None:
+    extra_attachments = _scrub_evidence_from_repo(state, "APPLY_PR_FEEDBACK")
+    if extra_attachments is None:
+        return
+    attachments = _collect_attachments(
+        result, state.get("e2e_specs", []), state.get("e2e_kind"))
+    existing = {path.resolve() for path in attachments}
+    attachments += [path for path in extra_attachments if path.resolve() not in existing]
+    _queue_push(state, "feedback", result.output, attachments)
+
+
+CONTINUATIONS = {
+    "EXPLORING": _continue_exploring,
+    "PROPOSING": _continue_proposing,
+    "IMPLEMENTING": _continue_implementing,
+    "VERIFYING": _continue_verifying,
+    "INTERNAL_REVIEW": _continue_internal_review,
+    "E2E": _continue_e2e,
+    "ARCHIVING": _continue_archiving,
+    "ADDRESS_REVIEW": _continue_address_review,
+    "ADDRESS_PR_THREADS": _continue_address_pr_threads,
+    "APPLY_PR_FEEDBACK": _continue_apply_pr_feedback,
+}
+
+
+def _reply_prompt(state: dict, phase: str, reply: str) -> str:
+    """The prompt that resumes the working session with the user's answer. Gate phases
+    re-issue their own contract prompt (the answer alone would not make the session emit
+    the completion contract again); every other phase gets the answer plus its rules."""
+    if phase in ("VERIFYING", "INTERNAL_REVIEW"):
+        template = prompts.VERIFY if phase == "VERIFYING" else prompts.INTERNAL_REVIEW
+        return (f"User recovery guidance:\n{reply}\n\n"
+                + prompts.render(template, slug=state["slug"]))
+    if phase == "ARCHIVING":
+        return prompts.render(prompts.FIX_ARCHIVE,
+                              error=state.get("archive_error", "unknown archival failure"),
+                              guidance=reply)
+    return prompts.render(prompts.ANSWER_REPLY, reply=reply,
+                          rules=prompts.PHASE_RULES.get(phase, ""))
+
+
+def do_question_reply(state: dict, reply: str) -> None:
+    """Handle the user's answer while WAIT_REPLY. The reply is classified first — with a
+    fresh session, like the other waits — because control-flow instructions ("mark it
+    done and move on", "abandon this") must act on the FSM, not be forwarded to the
+    working session, which has no lever on the FSM and can only loop asking questions."""
+    verdict = parse_json_reply(
+        agent_runner.run(
+            prompts.render(prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
+                           question=state.get("pending_question", "(not recorded)")),
+            contract=False).output)
+    action = verdict.get("action")
+    log.info("classified WAIT_REPLY reply as action=%r", action)
+    if action == "complete":
+        _finish_task(state, "You asked me to mark this task complete with no further work.",
+                     reset_repo=True)
+        return
+    if action == "abort":
+        _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean slate.")
+        return
+    # answer (the default): resume the working session, restating the phase rules the
+    # raw reply lacks — sessions have overreached (implemented/pushed while PROPOSING)
+    # exactly on these unframed resumes.
+    # Read return_state without popping: if a later step here raises, the state stays
+    # WAIT_REPLY with return_state intact so the retry re-runs cleanly.
+    phase = state.get("return_state")
+    if phase not in CONTINUATIONS:
+        _enter_stuck(state, "IDLE",
+                     f"Internal error: I was waiting on a question for unknown phase "
+                     f"{phase!r} and cannot resume it. 'retry' restarts from the backlog; "
+                     "'abort' resets me.")
+        return
+    result = agent_runner.resume(state["session_id"], _reply_prompt(state, phase, reply))
+    if handle_result(state, result, phase):
+        return  # re-questioned (or question cap hit); return_state already updated
+    CONTINUATIONS[phase](state, result)
+    if state["state"] != "WAIT_REPLY":  # a continuation may itself have re-questioned
+        state.pop("return_state", None)
+        state.pop("pending_question", None)
+
+
 def _handle_reply(state: dict, reply: str) -> None:
     if state["state"] == "WAIT_APPROVAL":
         do_approval_reply(state, reply)
+    elif state["state"] == "WAIT_STUCK":
+        do_stuck_reply(state, reply)
     elif state["state"] == "WAIT_MERGE":
         do_merge_reply(state, reply)
     elif state["state"] == "WAIT_CLEAN":
         state["state"] = "IDLE"
     elif state["state"] == "WAIT_REPLY":
-        # Read return_state without popping: if a later step here raises, the state
-        # stays WAIT_REPLY with return_state intact so the retry re-runs cleanly.
-        phase = state["return_state"]
-        if phase in ("VERIFYING", "INTERNAL_REVIEW"):
-            counter = "verify_round" if phase == "VERIFYING" else "review_gate_round"
-            state[counter] = 0
-            template = prompts.VERIFY if phase == "VERIFYING" else prompts.INTERNAL_REVIEW
-            prompt = (f"User recovery guidance:\n{reply}\n\n" +
-                      prompts.render(template, slug=state["slug"]))
-            result = agent_runner.resume(state["session_id"], prompt)
-            state.pop("return_state", None)
-            if phase == "VERIFYING":
-                _complete_verify(state, result)
-            else:
-                _complete_internal_review(state, result)
-            return
-        if phase == "ARCHIVING":
-            result = agent_runner.resume(state["session_id"], prompts.render(
-                prompts.FIX_ARCHIVE,
-                error=state.get("archive_error", "unknown archival failure"),
-                guidance=reply,
-            ))
-            if handle_result(state, result, "ARCHIVING"):
-                return
-            state["archive_round"] = 0
-            state["state"] = "ARCHIVING"
-            state.pop("return_state", None)
-            return
-        result = agent_runner.resume(state["session_id"], reply)
-        if handle_result(state, result, phase):
-            return  # re-questioned; handle_result reset return_state for the new phase
-        next_state = {"EXPLORING": "PROPOSING", "PROPOSING": "WAIT_APPROVAL",
-                      "IMPLEMENTING": "VERIFYING", "E2E": "E2E", "ADDRESS_REVIEW": "WAIT_REVIEW",
-                      "ADDRESS_PR_THREADS": "WAIT_MERGE",
-                      "APPLY_PR_FEEDBACK": "WAIT_MERGE"}[phase]
-        if next_state == "WAIT_APPROVAL":
-            email(state, "proposal for review",
-                  f"{result.output}\n\nReply with your approval or requested changes.")
-        if next_state == "WAIT_REVIEW":
-            if _scrub_evidence_from_repo(state, phase) is None:
-                return
-            state.pop("return_state", None)
-            _queue_push(state, "review")
-            return
-        elif phase == "ADDRESS_PR_THREADS":
-            if _scrub_evidence_from_repo(state, phase) is None:
-                return
-            state.pop("return_state", None)
-            _queue_push(state, "threads")
-            return
-        elif phase == "APPLY_PR_FEEDBACK":
-            extra_attachments = _scrub_evidence_from_repo(state, phase)
-            if extra_attachments is None:
-                return
-            attachments = _collect_attachments(
-                result, state.get("e2e_specs", []), state.get("e2e_kind"))
-            existing = {path.resolve() for path in attachments}
-            attachments += [path for path in extra_attachments if path.resolve() not in existing]
-            state.pop("return_state", None)
-            _queue_push(state, "feedback", result.output, attachments)
-            return
-        else:
-            if phase == "E2E":
-                state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
-                if "e2e_repair_head" in state and "e2e_repair_status" in state:
-                    _finish_e2e_repair(state)
-                else:
-                    state["state"] = "E2E"
-            else:
-                state["state"] = next_state
-        state.pop("return_state", None)
+        do_question_reply(state, reply)
 
 
 def validate_managed_runtime() -> None:
@@ -1666,13 +1964,26 @@ def main() -> None:
                 handle_wait(state)
             else:
                 PHASES[state["state"]](state)
+            # Success: clear this state's consecutive-failure counter.
+            if state.get("failures", {}).get(prev):
+                state["failures"][prev] = 0
             if state["state"] != prev:
                 log.info("state transition: %s -> %s", prev, state["state"])
                 state["last_transition"] = time.time()
             save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
         except Exception:
-            log.exception("cycle failed; retrying in %ss", backoff)
+            failures = state.setdefault("failures", {})
+            failures[prev] = failures.get(prev, 0) + 1
+            log.exception("cycle failed in %s (%d/%d); retrying in %ss",
+                          prev, failures[prev], config.MAX_STATE_FAILURES, backoff)
+            if failures[prev] >= config.MAX_STATE_FAILURES and _escalate(state, prev):
+                if state["state"] != prev:
+                    state["last_transition"] = time.time()
+                save_state(state)
+                backoff = config.POLL_INTERVAL_SECONDS
+                time.sleep(config.POLL_INTERVAL_SECONDS)
+                continue
             save_state(state)
             time.sleep(backoff)
             backoff = min(backoff * 2, 3600)

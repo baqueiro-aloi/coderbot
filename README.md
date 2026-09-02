@@ -80,6 +80,7 @@ the validated spec, active-change, and archive paths. If archive recovery needs 
 guidance, the existing agent session may repair and commit only OpenSpec planning/spec
 files before coderbot retries archival.
 
+Any state that keeps failing detours through WAIT_STUCK (see "Failure handling").
 Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
 output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
 with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
@@ -91,6 +92,44 @@ net, designated handoffs after implementation and review or feedback repairs sca
 the branch diff for evidence-looking files (video extensions, or paths naming
 "evidence"/"recording") and have the coding agent remove and re-route them via
 email if any are found.
+
+## Phase discipline (planning never implements)
+
+EXPLORING and PROPOSING are planning phases: their prompts forbid implementing,
+committing, and pushing, and every WAIT_REPLY resume restates the active phase's
+rules. As a backstop, when either phase completes codebot **mechanically reverts
+overreach**: premature commits are undone (`git reset --soft` to the branch base),
+tracked changes outside `openspec/` are discarded, and a note about what was cleaned
+up is included in the proposal email. Openspec change artifacts are the phases'
+legitimate output and are always kept.
+
+Replies to a question (WAIT_REPLY) are classified first: an answer resumes the working
+session with the phase rules restated; "mark it complete" / "abort" act on the
+lifecycle directly instead of being forwarded to a session that cannot act on them.
+
+## Failure handling (WAIT_STUCK)
+
+No state retries forever in silence. Each state has a **consecutive-failure budget**
+(`CODEBOT_MAX_STATE_FAILURES`, default 5), tracked in `state.json` and reset on any
+successful tick. When a state exhausts its budget — or a phase asks more than
+`CODEBOT_QUESTION_MAX_ROUNDS` (default 8) questions in a row — codebot emails you
+(`stuck in <STATE>`, with the last error) and enters `WAIT_STUCK`. Reply on that
+thread with:
+
+- **retry** — try the failed step again (clears the counter),
+- **abort** — reset to a clean slate (same as the ABORT command below),
+- **complete** — mark the task done in the backlog doc and move on, or
+- **instructions** — free-form guidance; codebot applies it in the working session, then
+  resumes the failed step.
+
+Every external `git`/`gh` call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120s)
+so a hung command surfaces as a failure (feeding the budget) instead of wedging the loop.
+
+Every working prompt starts with an "execution environment" preamble of runtime facts.
+Add project-specific ones (how to run the tests, what is NOT available in the
+container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted text
+(e2e output, review comments, email bodies) is fenced as data inside prompts so an
+embedded instruction cannot hijack the flow.
 
 ## Mailbox commands: ABORT / STATUS / DONE (last resort)
 

@@ -216,7 +216,8 @@ class LifecycleGateTests(unittest.TestCase):
     def test_gate_reply_is_parsed_instead_of_bypassing_gate(self):
         state = self.base_state(
             state="WAIT_REPLY", return_state="VERIFYING", verify_round=3)
-        with patch.object(main.agent_runner, "resume",
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume",
                           return_value=result("still malformed")) as resume, \
              patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3, create=True):
             main._handle_reply(state, "please rerun the checks")
@@ -301,7 +302,8 @@ class LifecycleGateTests(unittest.TestCase):
     def test_e2e_exhaustion_reply_without_repair_snapshot_reruns_e2e(self):
         state = self.base_state(
             state="WAIT_REPLY", return_state="E2E", e2e_round=6)
-        with patch.object(main.agent_runner, "resume", return_value=result("try again")):
+        with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main.agent_runner, "resume", return_value=result("try again")):
             main._handle_reply(state, "service is back")
 
         self.assertEqual(state["state"], "E2E")
