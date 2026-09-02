@@ -36,6 +36,15 @@ def normalize(text: str) -> str:
 
 # Claim marker an instance appends to a task's bullet line when it picks the task.
 CLAIM_RE = re.compile(r"\s*\[implementing:\s*([^\]]*?)\s*\]", re.IGNORECASE)
+# Optional ordering tag the user writes in a task's text ("Codebot[1]", "codebot[2]"):
+# tagged tasks are picked before untagged ones, in ascending order.
+PRIORITY_RE = re.compile(r"\bcodebot\s*\[\s*(\d+)\s*\]", re.IGNORECASE)
+
+
+def priority_of(text: str) -> int | None:
+    """The Codebot[n] ordering number in the text, or None when untagged."""
+    m = PRIORITY_RE.search(text)
+    return int(m.group(1)) if m else None
 
 
 def strip_claims(text: str) -> str:
@@ -161,7 +170,8 @@ def _pending(tasks: list[dict]) -> list[dict]:
         if owner and owner != config.INSTANCE_ID:
             continue  # another instance is implementing it
         items.append({"text": strip_claims(t["text"]).strip(), "detail": t["detail"],
-                      "images": t["images"], "claimed_by_me": owner is not None})
+                      "images": t["images"], "claimed_by_me": owner is not None,
+                      "priority": priority_of(t["text"])})
     return items
 
 

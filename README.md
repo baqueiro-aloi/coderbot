@@ -52,6 +52,10 @@ sub-bullet) are downloaded to `data/doc_images/` and handed to the exploration
 session as screenshots. Struck-through bullets are done; codebot strikes a task
 through (sub-bullets included) when its PR merges or on `DONE`.
 
+To force an order, write `Codebot[1]`, `Codebot[2]`, ... anywhere in a task's text:
+tagged tasks are picked before untagged ones, lowest number first (untagged tasks wait
+until no tagged task is left). The tag stays part of the task text.
+
 Set `CODEBOT_DOC_SECTION` to a heading text (e.g. `New:`) to make only the bullets
 under that heading pickable — items under other headings (say, "Under review:") are
 left alone. Unset, every top-level bullet in the doc is a candidate. Picking a task

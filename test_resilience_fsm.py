@@ -44,6 +44,22 @@ class ContractTables(unittest.TestCase):
                          "- First\n    - detail a\n- Second")
 
 
+class PrioritizeItems(unittest.TestCase):
+    def test_untagged_backlog_is_unchanged(self):
+        items = [{"text": "a", "priority": None}, {"text": "b", "priority": None}]
+        self.assertEqual(main.prioritize_items(items), items)
+
+    def test_lowest_tag_wins_and_untagged_wait(self):
+        items = [{"text": "a", "priority": None}, {"text": "b Codebot[2]", "priority": 2},
+                 {"text": "c Codebot[1]", "priority": 1}, {"text": "d Codebot[1]", "priority": 1}]
+        self.assertEqual([i["text"] for i in main.prioritize_items(items)],
+                         ["c Codebot[1]", "d Codebot[1]"])
+
+    def test_remaining_tags_after_first_done(self):
+        items = [{"text": "a", "priority": None}, {"text": "b Codebot[2]", "priority": 2}]
+        self.assertEqual([i["text"] for i in main.prioritize_items(items)], ["b Codebot[2]"])
+
+
 class ClearStuck(unittest.TestCase):
     def test_resets_counters_keeps_question_phase(self):
         st = {"failures": {"E2E": 3}, "e2e_round": 4, "stuck_return": "E2E",

@@ -426,6 +426,8 @@ def do_pick(state: dict) -> None:
     if mine:
         log.info("resuming from %d item(s) already claimed by this instance", len(mine))
         items = mine
+    else:
+        items = prioritize_items(items)
     result = agent_runner.run(prompts.render(
         prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)),
         contract=False)
@@ -463,6 +465,20 @@ def do_pick(state: dict) -> None:
     state["base_sha"] = git("rev-parse", "HEAD")
     state["state"] = "EXPLORING"
     log.info("picked %r -> %s", choice["item"], branch)
+
+
+def prioritize_items(items: list[dict]) -> list[dict]:
+    """Honor the user's Codebot[n] ordering tags: when any pending item carries one,
+    only the item(s) with the LOWEST number are offered to PICK, so tagged work is done
+    first and in the written order; untagged items wait until no tagged item remains."""
+    tagged = [i for i in items if i.get("priority") is not None]
+    if not tagged:
+        return items
+    lowest = min(i["priority"] for i in tagged)
+    chosen = [i for i in tagged if i["priority"] == lowest]
+    log.info("%d item(s) carry Codebot[n] tags; offering the %d tagged Codebot[%d]",
+             len(tagged), len(chosen), lowest)
+    return chosen
 
 
 def render_items(items: list[dict]) -> str:

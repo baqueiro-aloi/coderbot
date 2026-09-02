@@ -146,6 +146,19 @@ class ClaimMarkers(unittest.TestCase):
         self.assertEqual(gdoc_client._marker_ranges(doc, {"ranges": [(10, 41)]}, "otherbot"), [])
 
 
+class PriorityTags(unittest.TestCase):
+    def test_priority_parsed_case_and_space_insensitive(self):
+        self.assertEqual(gdoc_client.priority_of("Fix header Codebot[2]"), 2)
+        self.assertEqual(gdoc_client.priority_of("codebot [ 10 ] first"), 10)
+        self.assertIsNone(gdoc_client.priority_of("no tag here"))
+        self.assertIsNone(gdoc_client.priority_of("codebot[implementing: x]"))
+
+    def test_pending_items_carry_priority(self):
+        with patch.object(config, "DOC_SECTION", SECTION):
+            pend = gdoc_client._pending([_task("A Codebot[3]"), _task("B")])
+        self.assertEqual([i["priority"] for i in pend], [3, None])
+
+
 class TaskIdentity(unittest.TestCase):
     def test_find_task_prefers_workable_copy(self):
         doc = {"body": {"content": [

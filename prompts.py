@@ -47,7 +47,9 @@ makes most sense to implement NEXT (prerequisites first, easier enablers first).
 
 Each top-level bullet is one item. Indented sub-bullets under an item are the user's
 clarifications and sub-requirements OF THAT ITEM — they are part of it, never items of
-their own, so never pick one as the item.
+their own, so never pick one as the item. A `Codebot[n]` tag in an item's text is the
+user's explicit ordering: it is part of the item text (copy it verbatim) and the items
+listed here already respect it.
 
 Pending items:
 $items
