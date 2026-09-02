@@ -80,5 +80,26 @@ class UndoPrematureWork(unittest.TestCase):
         self.assertIn("reset it to origin/main", note)
 
 
+class AbortInProgressOps(UndoPrematureWork):
+    def test_no_op_when_nothing_in_progress(self):
+        with patch.object(main, "_git_quiet") as quiet:
+            main._abort_in_progress_ops()
+        quiet.assert_not_called()
+
+    def test_aborts_a_real_merge_conflict(self):
+        (self.repo / "app.py").write_text("branch\n")
+        self.sh("commit", "-q", "-am", "branch change")
+        self.sh("checkout", "-q", "main")
+        (self.repo / "app.py").write_text("main\n")
+        self.sh("commit", "-q", "-am", "main change")
+        merge = subprocess.run(["git", "merge", "codebot-task"], cwd=self.repo, env=self.env,
+                               capture_output=True, text=True)
+        self.assertNotEqual(merge.returncode, 0)
+        self.assertTrue((self.repo / ".git" / "MERGE_HEAD").exists())
+        main._abort_in_progress_ops()
+        self.assertFalse((self.repo / ".git" / "MERGE_HEAD").exists())
+        self.assertEqual(self.sh("status", "--porcelain"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

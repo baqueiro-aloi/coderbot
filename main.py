@@ -1760,6 +1760,23 @@ def handle_merge_wait(state: dict) -> None:
 
 # ---------------------------------------------------------------- abort / reset
 
+def _abort_in_progress_ops() -> None:
+    """Abort a half-finished merge/rebase/cherry-pick/am, if any. Checks git's own
+    state files first so the no-op case stays silent instead of logging four
+    "fatal: nothing in progress" errors every time."""
+    git_dir = Path(git("rev-parse", "--absolute-git-dir"))
+    checks = (
+        (("merge", "--abort"), ["MERGE_HEAD"]),
+        (("rebase", "--abort"), ["rebase-merge", "rebase-apply"]),
+        (("cherry-pick", "--abort"), ["CHERRY_PICK_HEAD"]),
+        (("am", "--abort"), ["rebase-apply/applying"]),
+    )
+    for op, markers in checks:
+        if any((git_dir / m).exists() for m in markers):
+            log.warning("git %s in progress; aborting it", op[0])
+            _git_quiet(*op)
+
+
 def _git_quiet(*args: str) -> bool:
     """Run a git command, returning success. Never raises — for the best-effort reset."""
     try:
@@ -1777,10 +1794,7 @@ def _reset_to_base_branch() -> list[str]:
     """Best-effort LOCAL reset: abort any half-finished git op, discard changes, land on a
     clean, up-to-date base branch. Never touches remote branches or PRs. Returns notes about
     any step that left the tree unclean (empty list when fully clean)."""
-    # Abort a half-finished operation, if any (each no-ops harmlessly when none is active).
-    for op in (("merge", "--abort"), ("rebase", "--abort"),
-               ("cherry-pick", "--abort"), ("am", "--abort")):
-        _git_quiet(*op)
+    _abort_in_progress_ops()  # a half-finished merge/rebase would block the checkout
     _git_quiet("reset", "--hard")                            # drop staged/unstaged tracked changes
     _git_quiet("checkout", "-f", config.BASE_BRANCH)         # leave whatever codebot branch we were on
     _git_quiet("clean", "-fd")             # drop untracked files; .gitignore (data/, .env) is kept
@@ -1995,9 +2009,7 @@ def _commit_pending_work(state: dict) -> list[str]:
     branch = state.get("branch")
     if not branch:
         return notes
-    for op in (("merge", "--abort"), ("rebase", "--abort"),
-               ("cherry-pick", "--abort"), ("am", "--abort")):
-        _git_quiet(*op)
+    _abort_in_progress_ops()
     if git("rev-parse", "--abbrev-ref", "HEAD") != branch:
         if not _git_quiet("checkout", branch):
             notes.append(f"could not switch back to {branch} to save pending work")
