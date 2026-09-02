@@ -8,9 +8,15 @@ services:
     restart: unless-stopped
     env_file: .env # also delivers CODEBOT_REPO_PATH into the container
     volumes:
-      # App code + data/ (token, state, outbox): bind-mounted so code changes
-      # take effect on restart without an image rebuild.
+      # App code: bind-mounted so code changes take effect on restart without an
+      # image rebuild.
       - .:/app
+      # Durable state — token.json, state.json, holds.json (tasks on hold),
+      # instance_id, processed_msgs.json, outbox/. A host bind mount (never a named
+      # volume) so it survives container recreation, `docker compose down -v`, and
+      # image rebuilds. Listed on its own so it stays durable even if the app mount
+      # above is ever replaced by a baked image.
+      - ./data:/app/data
       # The target repo is mounted at the SAME absolute path as on the host:
       # (a) ~/.claude per-project state is keyed by absolute project path, so
       #     sessions resolve identically inside and outside the container;

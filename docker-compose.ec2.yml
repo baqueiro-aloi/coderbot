@@ -15,6 +15,10 @@ services:
     env_file: /opt/codebot/codebot.env
     volumes:
       - /opt/coderbot:/app
+      # Durable state (token.json, state.json, holds.json, instance_id, ...): a host
+      # bind mount, never a named volume, so it survives container recreation and
+      # `down -v`. Back this directory up if the instance is disposable.
+      - /opt/coderbot/data:/app/data
       - ${CODEBOT_REPO_PATH:?Set CODEBOT_REPO_PATH in the env file}:${CODEBOT_REPO_PATH}
       - /opt/codebot/claude:/home/bot/.claude
       # Read-only seed; entrypoint.sh copies it to a container-private file (see base file).

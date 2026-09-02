@@ -296,6 +296,13 @@ State lives in `data/state.json`; the container restarts safely from any state.
 To abort the current task, email `ABORT` (see "Mailbox commands") — or stop the
 container, delete `data/state.json`, clean the git branch, restart.
 
+Everything codebot must remember across restarts lives in `data/` — the Google
+token, `state.json`, `holds.json` (tasks on hold), `instance_id`, the processed-mail
+list — and both compose files bind-mount that directory from the host (never a
+named volume), so it survives container recreation, `docker compose down -v`, and
+image rebuilds. On a disposable server, back up `data/` (or restore it from your
+provisioning) before replacing the host.
+
 Only one codebot may run against a `data/` dir: startup takes a lock on
 `data/state.lock` and a second process exits immediately. The container reports
 Docker health from a heartbeat the tick loop maintains (`docker inspect --format
