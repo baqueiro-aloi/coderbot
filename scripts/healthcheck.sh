@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Container healthcheck. Exit 0 healthy, 1 unhealthy.
 #
-# A daemon thread in main.py touches the heartbeat file every poll interval as long as the
+# A daemon thread in src/main.py touches the heartbeat file every poll interval as long as the
 # current tick is younger than CODEBOT_HEARTBEAT_MAX_TICK, so a legitimate multi-hour agent
 # call stays healthy. A stale heartbeat therefore means the loop is wedged beyond any real
 # operation. Past a hard threshold we kill PID 1 so `restart: unless-stopped` takes over

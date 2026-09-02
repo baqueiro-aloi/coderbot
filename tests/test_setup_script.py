@@ -4,12 +4,12 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class SetupScriptTests(unittest.TestCase):
     def test_round_limits_are_displayed_validated_written_and_summarized(self):
-        source = (ROOT / "setup.sh").read_text()
+        source = (ROOT / "scripts/setup.sh").read_text()
         current_settings = source[source.index("print_current_settings()"):
                                   source.index("prepare_env_write()")]
         prompts = source[source.index("CODEBOT_LOG_LEVEL=$(prompt_var"):

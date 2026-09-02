@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = ROOT / "agent-plugin"
 
 

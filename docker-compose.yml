@@ -1,7 +1,7 @@
 # Run from the coderbot repo root:  docker compose up -d --build
 # Requires .env (compose also interpolates ${VARS} below from it) with GH_TOKEN,
 # CODEBOT_REPO_PATH, CODEBOT_DOC_ID and CODEBOT_USER_EMAIL — see .env.example —
-# and data/token.json created by setup_oauth.py on the host.
+# and data/token.json created by scripts/setup_oauth.py on the host.
 services:
   codebot:
     build: .

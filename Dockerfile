@@ -43,10 +43,10 @@ RUN claude plugin validate \
     && node -e 'const p = require("/opt/coderbot/agent-plugin/package.json"); \
         if (p.main !== ".opencode/plugins/coderbot-openspec.js") process.exit(1)'
 
-COPY entrypoint.sh /entrypoint.sh
-COPY healthcheck.sh /healthcheck.sh
+COPY scripts/entrypoint.sh /entrypoint.sh
+COPY scripts/healthcheck.sh /healthcheck.sh
 RUN chmod +x /entrypoint.sh /healthcheck.sh
-# Liveness from the heartbeat file main.py maintains (see healthcheck.sh). Runs as root
+# Liveness from the heartbeat file src/main.py maintains (see healthcheck.sh). Runs as root
 # so a hard-stale heartbeat can signal PID 1 and force a restart.
 HEALTHCHECK --interval=120s --timeout=15s --start-period=180s --retries=2 CMD ["/healthcheck.sh"]
 ENTRYPOINT ["/entrypoint.sh"]

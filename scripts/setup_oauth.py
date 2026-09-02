@@ -2,12 +2,16 @@
 
 Prereq: create an OAuth client (Desktop app) in Google Cloud Console with the
 Gmail, Docs and Drive APIs enabled, download its JSON to data/credentials.json,
-then run:  python3 setup_oauth.py
+then run (from the repo root):  python3 scripts/setup_oauth.py
 Writes data/token.json (includes refresh token) for the container to use.
 """
+import sys
+from pathlib import Path
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-import config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import config  # noqa: E402
 
 
 def main() -> None:

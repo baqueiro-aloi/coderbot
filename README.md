@@ -6,6 +6,17 @@ plans with the managed OpenSpec workflow via a selectable headless coding agent
 (Claude Code or OpenCode), and talks to the maintainer exclusively by email
 (`CODEBOT_USER_EMAIL`). Several instances can share one mailbox and backlog doc.
 
+## Repository layout
+
+- `src/` — the bot: `main.py` (state machine), `config.py`, `prompts.py`, the
+  agent runners and the Gmail/Docs clients. Flat modules, imported by name.
+- `tests/` — unit tests (`python3 -m unittest discover -s tests -t .`).
+- `scripts/` — `setup.sh` (guided host setup), `setup_oauth.py` (Google consent
+  flow), `entrypoint.sh` and `healthcheck.sh` (container runtime).
+- `agent-plugin/` — the Claude/OpenCode plugin injected into agent sessions.
+- `openspec/` — this repo's own OpenSpec specs and changes.
+- `data/` — durable runtime state (git-ignored, bind-mounted into the container).
+
 ## Target repo prerequisites
 
 Coderbot lives in its own repo and is pointed at a target checkout via
@@ -234,14 +245,14 @@ to OpenCode: it shows the current non-secret settings and lets you keep or
 change each one:
 
 ```bash
-./setup.sh
+scripts/setup.sh
 ```
 
 It also detects `data/credentials.json` (see step 1 below) and, if present,
 offers to run the consent flow in step 2 for you.
 
 <details>
-<summary>Manual setup (what <code>setup.sh</code> automates)</summary>
+<summary>Manual setup (what <code>scripts/setup.sh</code> automates)</summary>
 
 1. **Google OAuth client**: in Google Cloud Console create a project, enable the
    Gmail, Google Docs and Google Drive APIs, create an OAuth client of type
@@ -249,7 +260,7 @@ offers to run the consent flow in step 2 for you.
 2. **Consent flow** (on the host, from the coderbot repo root):
    ```bash
    pip install -r requirements.txt
-   python3 setup_oauth.py     # opens a browser; writes data/token.json
+   python3 scripts/setup_oauth.py     # opens a browser; writes data/token.json
    ```
 3. **Configuration**: create `.env` at the repo root (see `.env.example`):
    ```
@@ -273,7 +284,7 @@ offers to run the consent flow in step 2 for you.
    # Dockerfile must support the model you choose — see "Troubleshooting")
    CLAUDE_MODEL=claude-fable-5
    CLAUDE_EFFORT=medium
-   # Required when CODEBOT_AGENT=opencode. Run ./setup.sh to complete the
+   # Required when CODEBOT_AGENT=opencode. Run scripts/setup.sh to complete the
    # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
    OPENCODE_PROVIDER=
    OPENCODE_MODEL=<provider/model>
@@ -303,7 +314,7 @@ offers to run the consent flow in step 2 for you.
 </details>
 
 4. **Coding-agent authentication**: Claude Code uses the host's `~/.claude` and
-   `~/.claude.json`. OpenCode is installed in the Codebot Docker image; `setup.sh`
+   `~/.claude.json`. OpenCode is installed in the Codebot Docker image; `scripts/setup.sh`
    runs its authentication flow there and stores credentials privately under
    `data/opencode/`. This includes browser and device-code provider flows. Git pushes
    use HTTPS with `GH_TOKEN` (no SSH needed).
@@ -395,8 +406,14 @@ claude -p 'say ok' --model "$CLAUDE_MODEL" --dangerously-skip-permissions  # COD
 opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
 gh auth status                                       # GH token works
 git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
-python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'
-python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'
+cd src && python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'
+cd src && python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'
+```
+
+Unit tests, on the host from the repo root:
+
+```bash
+python3 -m unittest discover -s tests -t .
 ```
 
 ## Troubleshooting
@@ -414,7 +431,7 @@ the model (see "Toolchain versions") and rebuild; also double-check the model id
 spelling (`claude-fable-5-1`, dashes only).
 
 **OpenCode provider authentication fails or returns `401 Unauthorized`**: rerun
-`./setup.sh` and complete authentication for `OPENCODE_PROVIDER`, then retry the
+`scripts/setup.sh` and complete authentication for `OPENCODE_PROVIDER`, then retry the
 OpenCode smoke command above. A provider 401 is a failed smoke test; never treat the
 CLI starting or returning structured output as a pass when the provider rejected the
 request.

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "agent-plugin/.claude-plugin/plugin.json"
 SKILL = ROOT / "agent-plugin/skills/coderbot-openspec-workflow/SKILL.md"
 DESCRIPTION = "Use when a headless coderbot agent is working on an OpenSpec-managed change"

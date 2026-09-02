@@ -4,7 +4,7 @@ import re
 import secrets
 from pathlib import Path
 
-CODEBOT_DIR = Path(__file__).resolve().parent
+CODEBOT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 DATA_DIR = Path(os.environ.get("CODEBOT_DATA_DIR", CODEBOT_DIR / "data"))
 
 

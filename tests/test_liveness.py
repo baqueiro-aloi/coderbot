@@ -12,7 +12,7 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
     import main
 
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class SingleInstanceLock(unittest.TestCase):
@@ -69,7 +69,7 @@ class HealthcheckScript(unittest.TestCase):
                 beat.write_text("x")
                 os.utime(beat, (time.time() - age, time.time() - age))
             proc = subprocess.run(
-                ["bash", str(ROOT / "healthcheck.sh")], capture_output=True, text=True,
+                ["bash", str(ROOT / "scripts/healthcheck.sh")], capture_output=True, text=True,
                 env={**os.environ, "CODEBOT_DATA_DIR": tmp, "PATH": os.environ["PATH"], **env})
             return proc.returncode, proc.stderr
 
@@ -83,7 +83,7 @@ class HealthcheckScript(unittest.TestCase):
         self.assertIn("stale", err)
 
     def test_data_dir_default_is_container_path(self):
-        source = (ROOT / "healthcheck.sh").read_text()
+        source = (ROOT / "scripts/healthcheck.sh").read_text()
         self.assertIn('DATA_DIR="${CODEBOT_DATA_DIR:-/app/data}"', source)
         self.assertNotIn("/Users/", source)
 

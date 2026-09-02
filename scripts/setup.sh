@@ -4,7 +4,7 @@
 # guides the Google OAuth credential setup with browser deep links, and
 # writes the result to .env. See README.md "One-time setup" for context.
 set -euo pipefail
-cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"  # repo root (script lives in scripts/)
 
 ENV_FILE=".env"
 CREDENTIALS_PATH="data/credentials.json"
@@ -419,7 +419,7 @@ else
     while true; do
       read -r -p "Copy the downloaded file to $CREDENTIALS_PATH, then press Enter (or type 'skip' to do this later): " ack
       if [ "$ack" = "skip" ]; then
-        echo "Skipping — place the file at $CREDENTIALS_PATH and run this script again, or run 'python3 setup_oauth.py' yourself."
+        echo "Skipping — place the file at $CREDENTIALS_PATH and run this script again, or run 'python3 scripts/setup_oauth.py' yourself."
         break
       fi
       if [ -f "$CREDENTIALS_PATH" ]; then
@@ -433,12 +433,12 @@ else
     echo
     echo "Running the consent flow — one more browser window will open to sign in and grant access."
     if ensure_oauth_deps; then
-      "$PYTHON_BIN" setup_oauth.py || echo "  -> setup_oauth.py did not complete; re-run it yourself once ready: $PYTHON_BIN setup_oauth.py"
+      "$PYTHON_BIN" scripts/setup_oauth.py || echo "  -> setup_oauth.py did not complete; re-run it yourself once ready: $PYTHON_BIN scripts/setup_oauth.py"
     else
       cat <<MSG
   -> could not install Python dependencies automatically. Install them yourself, e.g.:
        python3 -m venv $VENV_DIR && $VENV_DIR/bin/python -m pip install -r requirements.txt
-     then run: $VENV_DIR/bin/python setup_oauth.py
+     then run: $VENV_DIR/bin/python scripts/setup_oauth.py
 MSG
     fi
   fi

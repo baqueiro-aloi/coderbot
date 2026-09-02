@@ -67,5 +67,5 @@ exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
     echo "origin uses SSH host alias ${BASH_REMATCH[1]}; rewriting it to https://github.com/" >&2
     git config --global --add url."https://github.com/".insteadOf "git@${BASH_REMATCH[1]}:"
   fi
-  exec python3 -u /app/main.py
+  exec python3 -u /app/src/main.py
 '
