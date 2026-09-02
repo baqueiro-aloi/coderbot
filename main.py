@@ -893,6 +893,40 @@ def _changes_are_archive_outputs(state: dict, status: str) -> bool:
     return True
 
 
+def _validate_archived_change(target: Path) -> None:
+    """Strict-validate only the change we just archived.
+
+    `openspec validate --archived` has no per-change form and checks every archived
+    change in the repo, so a stale archive with an unticked task would block every
+    future task forever. Parse the JSON report and fail only on our own change.
+    """
+    command = ["openspec", "validate", "--archived", "--strict", "--no-interactive", "--json"]
+    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True,
+                          timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    try:
+        items = json.loads(proc.stdout)["items"]
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise TypeError("items must be a list of objects")
+    except (ValueError, KeyError, TypeError) as error:
+        detail = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(
+            f"{' '.join(command)} exited {proc.returncode} with an unreadable report: {detail}"
+        ) from error
+    mine = [item for item in items if item.get("id") == target.name]
+    if not mine:
+        raise RuntimeError(f"archived change {target.name} is missing from the validation report")
+    if not all(item.get("valid") is True for item in mine):
+        issues = "; ".join(
+            f"{issue.get('path', '?')}: {issue.get('message', '?')}"
+            for item in mine for issue in item.get("issues", []) if isinstance(issue, dict)
+        ) or "no details reported"
+        raise RuntimeError(f"archived change {target.name} failed strict validation: {issues}")
+    stale = sorted(item.get("id", "?") for item in items
+                   if item.get("id") != target.name and item.get("valid") is not True)
+    if stale:
+        log.warning("ignoring pre-existing invalid archived changes: %s", ", ".join(stale))
+
+
 def do_archive(state: dict) -> None:
     try:
         target = _archive_target(state)
@@ -911,7 +945,7 @@ def do_archive(state: dict) -> None:
             raise RuntimeError("archive command did not create the expected archive")
 
         _run_checked(["openspec", "validate", "--specs", "--strict", "--no-interactive"])
-        _run_checked(["openspec", "validate", "--archived", "--strict", "--no-interactive"])
+        _validate_archived_change(target)
         status = git("status", "--porcelain", "--untracked-files=all")
         if status and not _changes_are_archive_outputs(state, status):
             raise RuntimeError("archival produced unrelated tracked changes")

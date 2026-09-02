@@ -35,19 +35,29 @@ class ArchivalTests(unittest.TestCase):
     def completed(self, args, stdout=""):
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
+    def report(self, *items, returncode=0):
+        """A `openspec validate --archived --json` report; defaults to our change passing."""
+        if not items:
+            items = ({"id": Path(self.state["archive_path"]).name, "valid": True, "issues": []},)
+        return subprocess.CompletedProcess(
+            [], returncode, json.dumps({"items": list(items)}), "")
+
+    def ok(self, command, **kwargs):
+        """subprocess.run stub: archive moves the change; validate reports success."""
+        if command[:2] == ["openspec", "archive"]:
+            archive = self.repo / self.state["archive_path"]
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / "openspec" / "changes" / "api-version").rename(archive)
+        if "--json" in command and "--archived" in command:
+            return self.report()
+        return self.completed(command, "{}")
+
     def test_archive_success_validates_stages_only_openspec_and_commits(self):
         self.state["archive_error"] = "previous failure"
 
-        def run(command, **kwargs):
-            if command[:2] == ["openspec", "archive"]:
-                archive = self.repo / self.state["archive_path"]
-                archive.parent.mkdir(parents=True, exist_ok=True)
-                (self.repo / "openspec" / "changes" / "api-version").rename(archive)
-            return self.completed(command, "{}")
-
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run", side_effect=run) as process, \
+             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
              patch.object(main, "git",
                           side_effect=["", "", "?? openspec/specs/api/spec.md", "", ""]) as git:
             main.do_archive(self.state)
@@ -57,7 +67,8 @@ class ArchivalTests(unittest.TestCase):
         self.assertIn(
             ["openspec", "validate", "--specs", "--strict", "--no-interactive"], commands)
         self.assertIn(
-            ["openspec", "validate", "--archived", "--strict", "--no-interactive"], commands)
+            ["openspec", "validate", "--archived", "--strict", "--no-interactive", "--json"],
+            commands)
         expected_archive = self.state["archive_path"]
         self.assertIn(call(
             "add", "-A", "--", "openspec/specs", "openspec/changes/api-version",
@@ -99,11 +110,76 @@ class ArchivalTests(unittest.TestCase):
         self.assertEqual(self.state["state"], "ARCHIVING")
         self.assertEqual(self.state["archive_round"], 1)
 
+    def test_stale_sibling_archive_failure_does_not_block_our_archive(self):
+        def run(command, **kwargs):
+            if "--archived" in command:
+                return self.report(
+                    {"id": "2026-07-15-codebot-resilience", "valid": False,
+                     "issues": [{"level": "ERROR", "path": "tasks.md",
+                                 "message": "2 incomplete tasks (23/25 completed)"}]},
+                    {"id": Path(self.state["archive_path"]).name, "valid": True,
+                     "issues": []},
+                    returncode=1)
+            return self.ok(command)
+
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
+             patch.object(main.subprocess, "run", side_effect=run), \
+             self.assertLogs(main.log, level="WARNING") as logs:
+            main.do_archive(self.state)
+
+        self.assertEqual(self.state["state"], "OPEN_PR")
+        self.assertNotIn("archive_error", self.state)
+        self.assertTrue(any("2026-07-15-codebot-resilience" in line for line in logs.output))
+
+    def test_our_archived_change_failing_strict_validation_blocks(self):
+        def run(command, **kwargs):
+            if "--archived" in command:
+                return self.report(
+                    {"id": "2026-07-15-codebot-resilience", "valid": True, "issues": []},
+                    {"id": Path(self.state["archive_path"]).name, "valid": False,
+                     "issues": [{"level": "ERROR", "path": "tasks.md",
+                                 "message": "1 incomplete task (4/5 completed)"}]},
+                    returncode=1)
+            return self.ok(command)
+
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main, "save_state"), patch.object(main, "git", return_value=""), \
+             patch.object(main.subprocess, "run", side_effect=run):
+            main.do_archive(self.state)
+
+        self.assertEqual(self.state["state"], "ARCHIVING")
+        self.assertEqual(self.state["archive_round"], 1)
+        self.assertIn("1 incomplete task", self.state["archive_error"])
+        self.assertIn(Path(self.state["archive_path"]).name, self.state["archive_error"])
+
+    def test_archived_report_missing_our_change_or_unreadable_blocks(self):
+        for stdout in ("{}", "not json", json.dumps({"items": [{"id": "other", "valid": True}]})):
+            with self.subTest(stdout=stdout):
+                self.setUp()
+
+                def run(command, **kwargs):
+                    if "--archived" in command:
+                        return subprocess.CompletedProcess(command, 0, stdout, "")
+                    return self.ok(command)
+
+                with patch.object(main.config, "REPO_PATH", self.repo), \
+                     patch.object(main, "save_state"), \
+                     patch.object(main, "git", return_value=""), \
+                     patch.object(main.subprocess, "run", side_effect=run):
+                    main.do_archive(self.state)
+
+                self.assertEqual(self.state["state"], "ARCHIVING")
+                self.assertEqual(self.state["archive_round"], 1)
+
     def test_archive_command_success_without_expected_target_does_not_advance(self):
+        def run(command, **kwargs):  # archive "succeeds" but moves nothing
+            return self.report() if "--archived" in command else self.completed(command, "{}")
+
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
              patch.object(main, "git", return_value=""), \
-             patch.object(main.subprocess, "run", return_value=self.completed([], "{}")):
+             patch.object(main.subprocess, "run", side_effect=run):
             main.do_archive(self.state)
 
         self.assertEqual(self.state["state"], "ARCHIVING")
@@ -117,8 +193,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run",
-                          return_value=self.completed([], "{}")) as process, \
+             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
              patch.object(main, "git",
                           side_effect=[" M openspec/specs/api/spec.md", "", ""]) as git:
             main.do_archive(self.state)
@@ -138,8 +213,7 @@ class ArchivalTests(unittest.TestCase):
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
-             patch.object(main.subprocess, "run",
-                          return_value=self.completed([], "{}")) as process, \
+             patch.object(main.subprocess, "run", side_effect=self.ok) as process, \
              patch.object(main, "git", return_value="") as git:
             main.do_archive(self.state)
 
@@ -184,6 +258,8 @@ class ArchivalTests(unittest.TestCase):
                 target = self.repo / self.state["archive_path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 (self.repo / "openspec/changes/api-version").rename(target)
+            if "--archived" in command:
+                return self.report()
             return self.completed(command, "{}")
 
         def git(*args):
@@ -252,7 +328,7 @@ class ArchivalTests(unittest.TestCase):
         (self.repo / "openspec/changes/api-version").rename(archive)
         self.state["archive_path"] = "openspec/changes/archive/2026-09-01-api-version"
         with patch.object(main.config, "REPO_PATH", self.repo), \
-             patch.object(main.subprocess, "run", return_value=self.completed([], "{}")), \
+             patch.object(main.subprocess, "run", side_effect=self.ok), \
              patch.object(main, "git", side_effect=[" M openspec/specs/api/spec.md", "",
                                                      RuntimeError("commit failed")]):
             main.do_archive(self.state)
@@ -271,6 +347,10 @@ class ArchivalTests(unittest.TestCase):
                 target = self.repo / state["archive_path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 active.rename(target)
+            if "--archived" in command:
+                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [
+                    {"id": Path(state["archive_path"]).name, "valid": True,
+                     "issues": []}]}), "")
             return self.completed(command, "{}")
 
         with patch.object(main.config, "REPO_PATH", self.repo), \
