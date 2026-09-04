@@ -289,6 +289,24 @@ do NOT merge the PR.
 End with a short summary of each conflict and how you resolved it.
 """
 
+PR_TITLE = """Write the title for a GitHub pull request that implements the backlog task
+below. The task text may be very long; the title must NOT restate it. Summarize WHAT the
+change does in one short imperative line (e.g. "Add sysadmin role and Sistema admin
+site"), at most 72 characters, no trailing period, no `Codebot[n]` tags, no quotes.
+Write it in the same language as the task text.
+
+""" + fenced("task", "$item") + """
+$guidance
+Respond with ONLY a JSON object, no other text:
+{"title": "<the pull request title>"}
+"""
+
+PR_TITLE_GUIDANCE = """
+The user gave this guidance about the title; follow it as long as the title stays
+within the length limit:
+
+""" + fenced("user guidance", "$guidance") + "\n"
+
 CLASSIFY_STUCK_REPLY = """Codebot got stuck on a task, emailed the user for help, and is
 waiting. The user's reply is below.
 

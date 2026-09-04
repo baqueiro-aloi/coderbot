@@ -918,3 +918,107 @@ class PushPhaseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+LONG_ITEM = ("CodeBot[2] Implementar un «sitio Sistema» que vive dentro del mismo SPA bajo "
+             "la ruta #/sistema, con un shell propio que reproduce el sidebar del sitio "
+             "principal; " + "y muchas cosas más " * 40)
+
+
+class PullRequestTitleTests(unittest.TestCase):
+    def test_clamp_never_exceeds_github_limit_and_strips_tags(self):
+        title = main._clamp_pr_title("CodeBot[2] " + "palabra " * 100)
+        self.assertLessEqual(len(title), main.PR_TITLE_HARD_MAX)
+        self.assertTrue(title.endswith("…"))
+        self.assertNotIn("CodeBot", title)
+        self.assertEqual(main._clamp_pr_title("Codebot[3]: Fix   the\nthing"), "Fix the thing")
+
+    def test_fallback_uses_first_clause_within_target(self):
+        title = main._fallback_pr_title(LONG_ITEM)
+        self.assertLessEqual(len(title), main.PR_TITLE_TARGET)
+        self.assertTrue(title.startswith("Implementar un «sitio Sistema»"))
+
+    def test_short_item_is_used_verbatim_without_agent(self):
+        state = {"item": "Support another API version"}
+        with patch.object(main.agent_runner, "run") as run:
+            self.assertEqual(main._pr_title(state), "Support another API version")
+        run.assert_not_called()
+        self.assertEqual(state["pr_title"], "Support another API version")
+
+    def test_long_item_asks_agent_for_summary_and_caches_it(self):
+        state = {"item": LONG_ITEM}
+        reply = Mock(output='{"title": "Añadir rol sysadmin y sitio Sistema"}')
+        with patch.object(main.agent_runner, "run", return_value=reply) as run:
+            self.assertEqual(main._pr_title(state), "Añadir rol sysadmin y sitio Sistema")
+        self.assertIn("sitio Sistema", run.call_args.args[0])
+        self.assertEqual(state["pr_title"], "Añadir rol sysadmin y sitio Sistema")
+        with patch.object(main.agent_runner, "run") as run:
+            main._pr_title(state)
+        run.assert_not_called()
+
+    def test_agent_failure_or_overlong_answer_still_yields_a_valid_title(self):
+        state = {"item": LONG_ITEM}
+        with patch.object(main.agent_runner, "run", side_effect=RuntimeError("boom")):
+            title = main._pr_title(state)
+        self.assertTrue(0 < len(title) <= main.PR_TITLE_TARGET)
+        state = {"item": LONG_ITEM}
+        reply = Mock(output=json.dumps({"title": "x" * 1000}))
+        with patch.object(main.agent_runner, "run", return_value=reply):
+            title = main._pr_title(state)
+        self.assertLessEqual(len(title), main.PR_TITLE_HARD_MAX)
+
+    def test_guidance_forces_regeneration_with_the_users_words(self):
+        state = {"item": "Support another API version",
+                 "pr_title_guidance": "use a simple summary of what we are doing"}
+        reply = Mock(output='{"title": "Add API v2 support"}')
+        with patch.object(main.agent_runner, "run", return_value=reply) as run:
+            self.assertEqual(main._pr_title(state), "Add API v2 support")
+        self.assertIn("simple summary", run.call_args.args[0])
+
+
+class LongTitlePullRequestTests(NativePullRequestTests):
+    """Every native-PR scenario again, with a backlog bullet far beyond GitHub's limit."""
+
+    def setUp(self):
+        super().setUp()
+        # The one-shot title call must never eat the mocked `gh` subprocess responses.
+        self.agent_patch = patch.object(
+            main.agent_runner, "run",
+            return_value=Mock(output='{"title": "Añadir rol sysadmin y sitio Sistema"}'))
+        self.agent_patch.start()
+
+    def tearDown(self):
+        self.agent_patch.stop()
+        super().tearDown()
+
+    def state(self):
+        return super().state() | {"item": LONG_ITEM}
+
+    def test_native_pr_pushes_branch_and_stores_https_url(self):
+        state = self.state()
+        responses = [
+            subprocess.CompletedProcess([], 0, "[]\n", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
+        ]
+        with patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main, "_enter_review_wait"):
+            main.do_open_pr(state)
+        command = process.call_args_list[1].args[0]
+        title = command[command.index("--title") + 1]
+        self.assertEqual(title, "Añadir rol sysadmin y sitio Sistema")
+        self.assertIn(LONG_ITEM, command[command.index("--body") + 1])
+
+    def test_title_is_never_over_the_limit_even_without_agent(self):
+        state = self.state()
+        responses = [
+            subprocess.CompletedProcess([], 0, "[]\n", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42\n", ""),
+        ]
+        with patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.agent_runner, "run", side_effect=RuntimeError("down")), \
+             patch.object(main, "_enter_review_wait"):
+            main.do_open_pr(state)
+        command = process.call_args_list[1].args[0]
+        self.assertLessEqual(len(command[command.index("--title") + 1]), main.PR_TITLE_HARD_MAX)

@@ -989,6 +989,68 @@ def _resume_archiving(state: dict, reason: str) -> None:
     state["state"] = "ARCHIVING"
 
 
+# GitHub rejects pull-request titles longer than this (GraphQL "Title is too long").
+PR_TITLE_HARD_MAX = 256
+# What we aim for: a one-line summary, not the backlog bullet.
+PR_TITLE_TARGET = 72
+_CODEBOT_TAG = re.compile(r"\bcode\s*bot\s*\[\s*\d+\s*\]\s*:?", re.IGNORECASE)
+
+
+def _clamp_pr_title(title, limit: int = PR_TITLE_HARD_MAX) -> str:
+    """One line, tags stripped, never longer than `limit` (cut on a word, with an ellipsis)."""
+    text = " ".join(str(title or "").split())
+    text = _CODEBOT_TAG.sub("", text).strip(" -:—–")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:.-—–(")
+    return (cut or text[:limit - 1]) + "…"
+
+
+def _fallback_pr_title(item: str) -> str:
+    """Deterministic summary of a backlog bullet: its first clause, capped at the target.
+    Used when the coding agent cannot produce a title (or produces an unusable one)."""
+    text = _clamp_pr_title(item)
+    for sep in (";", ":", ". ", ", que ", ", which ", " — ", " - "):
+        head = text.split(sep, 1)[0].strip()
+        if 12 <= len(head) < len(text):
+            text = head
+            break
+    return _clamp_pr_title(text, PR_TITLE_TARGET) or "Codebot change"
+
+
+def _pr_title(state: dict) -> str:
+    """The title used for `gh pr create`: persisted in state["pr_title"] so retries reuse
+    it, and regenerated when the user gives guidance (state["pr_title_guidance"]) from a
+    WAIT_STUCK reply. Always within GitHub's limit, whatever the agent returns."""
+    cached = state.get("pr_title")
+    if isinstance(cached, str) and cached.strip():
+        return _clamp_pr_title(cached)
+    item = state["item"]
+    guidance = state.get("pr_title_guidance") or ""
+    short = _clamp_pr_title(item)
+    if not guidance and len(short) <= PR_TITLE_TARGET:
+        title = short
+    else:
+        title = ""
+        try:
+            prompt = prompts.render(
+                prompts.PR_TITLE, item=item,
+                guidance=prompts.render(prompts.PR_TITLE_GUIDANCE, guidance=guidance)
+                if guidance else "")
+            reply = parse_json_reply(agent_runner.run(prompt, contract=False).output)
+            title = _clamp_pr_title(reply.get("title"))
+        except Exception:
+            log.exception("PR title generation failed; using the fallback title")
+        if not title or title == short:
+            title = _fallback_pr_title(item)
+    title = _clamp_pr_title(title)
+    if not title:
+        title = _fallback_pr_title(item)
+    state["pr_title"] = title
+    log.info("PR title: %r", title)
+    return title
+
+
 def do_open_pr(state: dict) -> None:
     if not state.get("archive_path"):
         state["verify_round"] = 0
@@ -1034,7 +1096,7 @@ def do_open_pr(state: dict) -> None:
         else:
             output = _run_checked([
                 "gh", "pr", "create", "--base", config.BASE_BRANCH, "--head", state["branch"],
-                "--title", state["item"], "--body", body,
+                "--title", _pr_title(state), "--body", body,
             ])
             state["pr_url"] = _https_url(output)
     state["pr_summary"] = body
@@ -1866,7 +1928,8 @@ def _reset_to_base_branch() -> list[str]:
 RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch",
               "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
-              "review_comment_watermark", "review_comments", "pr_summary",
+              "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
+              "pr_title_guidance",
               "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
               "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
@@ -1982,6 +2045,13 @@ def do_stuck_reply(state: dict, reply: str) -> None:
               f"\n\n{reply}\n\nPlease reply 'retry', 'abort', 'complete', or with explicit "
               "instructions.")
         return  # stay in WAIT_STUCK
+    if action == "instructions" and failed_state == "OPEN_PR":
+        # OPEN_PR is orchestrator-driven: the PR title/body never pass through the coding
+        # session, so guidance about them must be applied HERE or it would be silently
+        # ignored (a live incident: "use a shorter title" followed by the same failure).
+        state["pr_title_guidance"] = (verdict.get("feedback") or reply)[:2000]
+        state.pop("pr_title", None)
+        log.info("recorded PR title guidance; the title is regenerated on resume")
     if action == "instructions" and state.get("session_id"):
         # Apply the guidance in the working session, then let the failed state re-run — which
         # handles any follow-up question through its own do_* handler.

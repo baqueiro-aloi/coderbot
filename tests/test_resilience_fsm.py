@@ -461,3 +461,21 @@ class PromptContracts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StuckOpenPrReply(unittest.TestCase):
+    def test_instructions_while_stuck_in_open_pr_regenerate_the_title(self):
+        state = {"state": "WAIT_STUCK", "stuck_return": "OPEN_PR", "item": "task", "slug": "s",
+                 "session_id": "sid", "failures": {"OPEN_PR": 5}, "pr_title": "old title"}
+        with patch.object(main.agent_runner, "run",
+                          return_value=verdict(action="instructions",
+                                               feedback="use a simple summary title")), \
+             patch.object(main.agent_runner, "resume", return_value=result()):
+            main.do_stuck_reply(state, "Lets change the PR title to a simple summary")
+        self.assertEqual(state["state"], "OPEN_PR")
+        self.assertNotIn("pr_title", state)
+        self.assertEqual(state["pr_title_guidance"], "use a simple summary title")
+
+    def test_pr_title_keys_are_reset_with_the_task(self):
+        self.assertIn("pr_title", main.RESET_KEYS)
+        self.assertIn("pr_title_guidance", main.RESET_KEYS)
