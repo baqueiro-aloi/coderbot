@@ -435,7 +435,22 @@ _DEMO_TEST_CONTRACT = (
     "off-screen element makes a useless video.\n"
     "  - Hold each state that demonstrates the feature's effect on screen for a moment "
     "(e.g. `page.waitForTimeout(1000)`) so a human watching the video can see it.\n"
-    "  - Keep unrelated setup minimal and off-camera where possible; assert the visible outcome.")
+    "  - Keep unrelated setup minimal and off-camera where possible; assert the visible outcome.\n"
+    "  - NARRATE THE VIDEO ON SCREEN. A silent recording of clicks does not read as evidence "
+    "to the person watching it, so the video must explain itself without any accompanying text:\n"
+    "    - Open with a title card held for ~3s stating the backlog item / feature name and, in "
+    "one or two lines, what the viewer is about to see and what would prove the feature works.\n"
+    "    - Before each key interaction, show a caption naming the step, what is about to happen, "
+    "and why it is evidence (e.g. \"Step 2/4 - saving the form; the new title must appear in the "
+    "header, which was impossible before this change\"). Hold the caption long enough to read "
+    "(~2s) and keep it visible while the step runs.\n"
+    "    - After the decisive step, show a closing caption that names the visible outcome the "
+    "viewer should be looking at and states that it is the implemented behavior.\n"
+    "    - Implement the captions as a DOM overlay you inject into the page (e.g. a fixed-position, "
+    "high-contrast, high z-index banner added via `page.evaluate`, wrapped in a small local "
+    "`narrate(page, text)` helper) so they are captured in the recorded video. Captions must never "
+    "cover the UI the step is demonstrating, and must never be asserted on or otherwise affect "
+    "what the test verifies — the real assertions stay on the application's own UI.")
 
 
 def _e2e_note(state: dict) -> str:
