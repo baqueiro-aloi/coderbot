@@ -86,6 +86,61 @@ def parse_json_reply(text: str) -> dict:
     raise ValueError(f"no JSON object in coding-agent output: {text[:500]}")
 
 
+# ---------------------------------------------------------------- agent log
+
+# One log per task, accumulated in the (git-ignored) data dir while the task runs and
+# copied into the archived OpenSpec change at the end — so the reasoning that produced a
+# feature is committed next to its proposal, design, and tasks. It is deliberately NOT
+# written into the active change dir: the planning phases treat everything under
+# openspec/ as their own output, and `openspec validate --strict` runs against the active
+# change before we ever get to archive it.
+TRANSCRIPT_DIR = config.DATA_DIR / "transcripts"
+TRANSCRIPT_NAME = "agent-log.md"
+
+
+def _transcript_path(state: dict) -> Path:
+    """The task's working log, named after the branch (instance id + slug) so concurrent
+    instances and a repeated slug never append to each other's file."""
+    name = state.get("branch") or state.get("slug") or "general"
+    return TRANSCRIPT_DIR / f"{re.sub(r'[^A-Za-z0-9._-]', '-', name)}.md"
+
+
+def _transcript_append(state: dict, text: str) -> None:
+    """Best-effort by design: failing to record a turn must never fail the phase."""
+    try:
+        path = _transcript_path(state)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = "" if path.exists() else (
+            f"# Agent log — {state.get('slug', 'general')}\n\n"
+            f"- Task: {state.get('item', '?')}\n"
+            f"- Branch: {state.get('branch', '?')}\n"
+            f"- Started: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n")
+        with path.open("a") as handle:
+            handle.write(header + text)
+    except OSError:
+        log.exception("could not append to the agent log")
+
+
+def _transcript_note(state: dict, note: str) -> None:
+    """A codebot-side annotation between turns (what we did with the turn's output)."""
+    _transcript_append(state, f"\n_codebot: {note}_\n")
+
+
+def _archive_transcript(state: dict, target: Path) -> None:
+    """Copy the working log into the archived change. Best-effort: an otherwise-good
+    archive must not fail over the log."""
+    source = _transcript_path(state)
+    try:
+        if not source.is_file():
+            log.info("no agent log to archive for %s", state.get("slug"))
+            return
+        (target / TRANSCRIPT_NAME).write_text(source.read_text())
+        log.info("archived agent log (%d bytes) to %s/%s",
+                 source.stat().st_size, target.name, TRANSCRIPT_NAME)
+    except OSError:
+        log.exception("could not archive the agent log")
+
+
 # Where a phase resumes after a WAIT_STUCK escalation when re-running the phase itself
 # makes no sense (its trigger — the user's PR feedback — was consumed).
 RESUMABLE_STATE = {"APPLY_PR_FEEDBACK": "WAIT_MERGE", "ADDRESS_PR_THREADS": "WAIT_MERGE"}
@@ -100,6 +155,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
     """
     state["session_id"] = result.session_id
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
+    _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
+                              f"Session: `{result.session_id}`\n\n{result.output.strip()}\n")
     question = result.question
     if not question:  # None, or a bare/blank sentinel line — nothing actionable to ask
         state.pop("question_rounds", None)  # phase produced a real result; loop broken
@@ -115,6 +172,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
         if phase == "APPLY_PR_FEEDBACK":
             detail += ("\n\nNote: if you reply 'retry', please re-send the change request "
                        "you want applied — the original one was consumed.")
+        _transcript_note(state, f"{rounds} consecutive questions in {phase}; "
+                                f"escalated to WAIT_STUCK")
         _enter_stuck(state, RESUMABLE_STATE.get(phase, phase), detail)
         return True
     attachments = [Path(p) for p in result.attachments if Path(p).exists()]
@@ -126,6 +185,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
+    _transcript_note(state, f"emailed this question to the user "
+                            f"({len(attachments)} attachment(s)); waiting for a reply")
     state["pending_question"] = question[:2000]
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
@@ -957,6 +1018,10 @@ def do_archive(state: dict) -> None:
 
         _run_checked(["openspec", "validate", "--specs", "--strict", "--no-interactive"])
         _validate_archived_change(target)
+        # After validation, so an unrecognized extra file can never fail strict
+        # validation of the change itself; before the commit below, whose path list
+        # already covers everything under the archive dir.
+        _archive_transcript(state, target)
         status = git("status", "--porcelain", "--untracked-files=all")
         unrelated = _unrelated_archive_changes(state, status) if status else []
         if unrelated:
