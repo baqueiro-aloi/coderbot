@@ -156,6 +156,33 @@ container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted te
 (e2e output, review comments, email bodies) is fenced as data inside prompts so an
 embedded instruction cannot hijack the flow.
 
+## Silence check-ins (is it stuck?)
+
+A task can go quiet for hours — an implementation session, a slow `Code Review`
+run, or simply a question you haven't answered yet — and the thread gives no hint
+whether codebot is working or wedged. So while a task is in flight, codebot emails a
+short **check-in** on the task thread whenever the thread has been quiet (no email
+sent *or* received on it) for the next interval of a decaying back-off:
+`CODEBOT_PING_SCHEDULE`, default `30m,1h,2h,3h,5h,8h` — the first check-in 30 min
+after the last real email, the next 1 h after that check-in, then 2 h, 3 h, 5 h, and
+every 8 h from there (the last interval repeats). Any real email in either direction
+restarts the schedule; check-ins themselves don't count. Set it to `off` to disable.
+
+Every check-in says whose move it is, and is self-contained:
+
+- **Ball on codebot's side** (a working phase, or WAIT_REVIEW): what it is doing —
+  the step, when it started, and for WAIT_REVIEW the PR, how long it has waited, what
+  GitHub currently reports for the run and when it will give up — plus whether recent
+  attempts at the step have been failing.
+- **Ball on your side** (WAIT_APPROVAL / WAIT_MERGE / WAIT_REPLY / WAIT_STUCK /
+  WAIT_CLEAN): exactly what it needs from you, spelled out in full (the pending
+  question, the PR link and the accepted replies, the stuck step and its error), with
+  its last email quoted for reference — never "see above".
+
+Check-ins go out from the tick loop, so one can lag while a single long agent call is
+running (bounded by `CODEBOT_AGENT_TIMEOUT`); it is sent as soon as that call returns.
+STATUS reports the last real email on the thread and how many check-ins followed it.
+
 ## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
 
 Email codebot with a body of exactly `ABORT`, `STATUS`, `DONE`, `HOLD` (or `PAUSE`),
@@ -179,7 +206,8 @@ is logged and ignored.
   returns.
 - **STATUS** replies with a snapshot — instance, current state, task/slug/branch, PR
   URL, pending question, stuck state and failure counters, last transition time, round
-  counters, heartbeat age, tasks on hold, and the full text of the last email codebot
+  counters, heartbeat age, tasks on hold, the time of the last real email on the task
+  thread and the check-ins sent since, and the full text of the last email codebot
   sent — without changing anything.
 - **HOLD** (or **PAUSE**) parks the current task: any half-finished git operation is
   aborted, all pending work is committed on the task branch (evidence files excluded),

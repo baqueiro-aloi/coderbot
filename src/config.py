@@ -117,6 +117,35 @@ PR_THREAD_MAX_ROUNDS = int(os.environ.get("CODEBOT_PR_THREAD_MAX_ROUNDS", "3"))
 # moving while other PRs merge); past this the task escalates to WAIT_STUCK.
 CONFLICT_MAX_ROUNDS = int(os.environ.get("CODEBOT_CONFLICT_MAX_ROUNDS", "3"))
 
+# Silence check-ins. While a task is in flight, codebot emails a short check-in on the
+# task thread whenever the thread has been quiet — no email sent or received on it —
+# for the next interval of this back-off schedule: 30 min after the last real email,
+# then 1 h after that check-in, then 2 h, 3 h, 5 h, and every 8 h from there (the last
+# interval repeats). Any real email in either direction restarts the schedule. Each
+# check-in says whose move it is: what codebot is doing or waiting for, or exactly what
+# it needs from the user. Comma-separated durations with an s/m/h suffix; "off"
+# disables them.
+def _parse_durations(spec: str) -> list[int]:
+    spec = (spec or "").strip()
+    if spec.lower() in ("off", "none", "0", "false"):
+        return []
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    seconds = []
+    for token in spec.split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        m = re.fullmatch(r"(\d+)\s*([smhd]?)", token)
+        if not m or int(m.group(1)) <= 0:
+            raise ValueError(f"CODEBOT_PING_SCHEDULE: bad duration {token!r} "
+                             "(use e.g. 30m, 1h, 90s; comma-separated)")
+        seconds.append(int(m.group(1)) * units[m.group(2) or "s"])
+    return seconds
+
+
+PING_SCHEDULE_SECONDS = _parse_durations(
+    os.environ.get("CODEBOT_PING_SCHEDULE") or "30m,1h,2h,3h,5h,8h")
+
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
 

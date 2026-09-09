@@ -67,6 +67,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
     # is therefore waiting on) if the original email was lost or unclear.
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
+    _note_contact(state)
 
 
 def parse_json_reply(text: str) -> dict:
@@ -1871,6 +1872,218 @@ def do_push(state: dict) -> None:
     state.pop("push_context", None)
 
 
+# ---------------------------------------------------------------- silence check-ins
+
+# A task thread that stays quiet for longer than the current back-off interval gets a
+# short check-in, so the user can tell a long-running step from a wedged bot. The clock
+# lives in state.json (survives restarts) and restarts on any REAL email in either
+# direction on the task thread: every email() call and every consumed reply. Check-ins
+# themselves bypass email() so they neither restart the clock nor displace last_email,
+# which STATUS and the check-ins quote as "what I'm waiting on". They are sent from the
+# tick loop, so one can lag while a single long agent call runs (bounded by
+# CODEBOT_AGENT_TIMEOUT); it goes out as soon as that call returns.
+PING_KEYS = ("last_contact", "ping_count", "last_ping_at")
+# Waits whose next move is the user's: the check-in spells out what is expected in full.
+USER_SIDE_WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"}
+
+_PHASE_ACTIVITY = {
+    "EXPLORING": "exploring the codebase to understand the task before writing a proposal",
+    "PROPOSING": "writing the OpenSpec proposal (design, specs, tasks) for your review",
+    "IMPLEMENTING": "implementing the approved proposal on branch {branch}",
+    "VERIFYING": "running the verification gate (tests and checks) on the implementation",
+    "INTERNAL_REVIEW": "running an internal code review of the implementation and fixing "
+                       "its findings",
+    "E2E": "running the e2e test harness against the implementation",
+    "ARCHIVING": "archiving the OpenSpec change on the task branch before opening the PR",
+    "OPEN_PR": "pushing branch {branch} and opening the pull request",
+    "ADDRESS_REVIEW": "working through {n_review} unresolved thread(s) from the automated "
+                      "reviewer on the PR {pr_url}",
+    "ADDRESS_PR_THREADS": "working through {n_pr} unresolved review thread(s) on the PR "
+                          "{pr_url} before it can merge",
+    "RESOLVE_CONFLICTS": "resolving merge conflicts between the task branch and {base} "
+                         "on the PR {pr_url}",
+    "PUSHING": "pushing the latest commits to the PR branch {branch}",
+}
+
+
+def _fmt_dur(seconds: float) -> str:
+    total = max(0, int(seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    parts = []
+    if days:
+        parts.append(f"{days} d")
+    if hours:
+        parts.append(f"{hours} h")
+    if minutes or not parts:
+        parts.append(f"{minutes} min")
+    return " ".join(parts)
+
+
+def _note_contact(state: dict) -> None:
+    """A real email was sent or received on the task thread: restart the silence clock."""
+    state["last_contact"] = time.time()
+    state.pop("ping_count", None)
+    state.pop("last_ping_at", None)
+
+
+def _ping_interval(count: int) -> int:
+    """Silence tolerated before check-in number `count + 1` (the last interval repeats)."""
+    schedule = config.PING_SCHEDULE_SECONDS
+    return schedule[min(count, len(schedule) - 1)]
+
+
+def _ping_due(state: dict, now: float) -> bool:
+    if (not config.PING_SCHEDULE_SECONDS or state.get("state") == "IDLE"
+            or not state.get("thread_id")):
+        return False
+    anchor = state.get("last_ping_at")
+    if anchor is None:
+        anchor = state.get("last_contact")
+    if anchor is None:
+        # A task that predates the check-ins (state.json from an older build): start the
+        # clock now rather than pinging on the spot.
+        state["last_contact"] = now
+        return False
+    return now - anchor >= _ping_interval(state.get("ping_count", 0))
+
+
+def _expected_from_user(state: dict) -> str:
+    """What the current wait needs from the user, spelled out in full: a check-in must
+    stand on its own, never "see my earlier email"."""
+    st = state["state"]
+    if st == "WAIT_APPROVAL":
+        return ("your decision on the proposal I sent for this task. Reply with an explicit "
+                "approval to start implementing, with the changes you want made to the "
+                "proposal, 'complete' to mark the task done without further work, or "
+                "'abort' to drop it.")
+    if st == "WAIT_MERGE":
+        text = (f"your decision on the pull request: {state.get('pr_url', '?')}\n"
+                "Reply 'merge' to merge it, with the changes you want made to the PR, "
+                "'complete' to mark the task done without merging, or 'abort' to drop it.")
+        if state.get("pr_thread_notified"):
+            text += (f"\nThe PR still has unresolved review threads I could not clear after "
+                     f"{config.PR_THREAD_MAX_ROUNDS} round(s): resolve them on GitHub, or "
+                     "reply 'merge anyway' to merge regardless.")
+        return text
+    if st == "WAIT_REPLY":
+        question = state.get("pending_question") or "(question not recorded; see my last email below)"
+        return (f"your answer to the question I asked during {state.get('return_state', '?')}:"
+                f"\n\n{question}")
+    if st == "WAIT_STUCK":
+        text = (f"help with the step I'm stuck on ({state.get('stuck_return', '?')}). Reply "
+                "'retry' to try that step again, 'abort' to reset to a clean slate, "
+                "'complete' to mark the task done as-is, or reply with instructions and "
+                "I'll apply them and continue.")
+        if state.get("stuck_error"):
+            text += f"\nThe problem was:\n\n{state['stuck_error']}"
+        return text
+    if st == "WAIT_CLEAN":
+        return (f"a clean working tree in {config.REPO_PATH}: it has uncommitted changes to "
+                "tracked files and I won't start a task on top of them. Commit, stash or "
+                "discard them, then reply to this thread (any text) and I'll retry.")
+    return "your reply to my last email (quoted below)."
+
+
+def _review_wait_status(state: dict, now: float) -> str:
+    pr_url = state.get("pr_url", "?")
+    lines = [f"I'm waiting for the 'Code Review' GitHub Action to finish on the PR: {pr_url}"]
+    since = state.get("review_since")
+    if since:
+        remaining = config.REVIEW_WAIT_TIMEOUT_SECONDS - (now - since)
+        line = f"Waiting since {_fmt_ts(since)} ({_fmt_dur(now - since)} so far)"
+        if remaining > 0:
+            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll email "
+                     "you the PR without it.")
+        else:
+            line += "; that is past my wait limit, so I'm about to email you the PR without it."
+        lines.append(line)
+    try:
+        check = code_review_check(pr_url)
+    except Exception:  # noqa: BLE001 — a gh hiccup must not sink the check-in
+        log.exception("could not query the Code Review check for the check-in")
+        check = None
+    if check is None:
+        lines.append("GitHub does not report a Code Review run for the PR's latest commit yet.")
+    elif check.get("link") and check.get("link") == state.get("review_run_link"):
+        lines.append(f"GitHub still reports the run I already processed ({check.get('bucket')}); "
+                     "I'm waiting for the new run my latest push triggers.")
+    else:
+        lines.append(f"GitHub reports the run as: {check.get('bucket', '?')}"
+                     + (f" ({check['link']})" if check.get("link") else ""))
+    if state.get("review_round"):
+        lines.append(f"Automated review round {state['review_round']} of at most "
+                     f"{config.REVIEW_MAX_ROUNDS}.")
+    lines.append("When it finishes I'll fix or answer any unresolved review threads, then "
+                 "email you the PR.")
+    return "\n".join(lines)
+
+
+def _bot_side_activity(state: dict, now: float) -> str:
+    st = state["state"]
+    if st == "WAIT_REVIEW":
+        return _review_wait_status(state, now)
+    what = _PHASE_ACTIVITY.get(st, f"working through the {st} step").format(
+        branch=state.get("branch", "?"), base=config.BASE_BRANCH,
+        pr_url=state.get("pr_url", "?"), n_review=len(state.get("review_threads", [])),
+        n_pr=len(state.get("pr_threads", [])))
+    lines = [f"I'm {what}."]
+    started = state.get("last_transition")
+    if started:
+        lines.append(f"This step started at {_fmt_ts(started)} ({_fmt_dur(now - started)} ago).")
+    return "\n".join(lines)
+
+
+def _ping_body(state: dict, now: float, count: int) -> str:
+    st = state["state"]
+    last_contact = state.get("last_contact")
+    if last_contact is None:
+        last_contact = now
+    lines = [f"Task: {state.get('item', '-')}", f"State: {st}",
+             f"This thread has been quiet for {_fmt_dur(now - last_contact)} (last real email "
+             f"sent or received: {_fmt_ts(last_contact)}), so here is where things stand.", ""]
+    if st in USER_SIDE_WAITS:
+        lines.append("The ball is in your court: I'm waiting for " + _expected_from_user(state))
+        lines += ["", "Nothing has changed on my side since my last email."]
+        last = state.get("last_email")
+        if last:
+            lines += ["", f"--- For reference, my last email ({_fmt_ts(last['sent_at'])}) ---",
+                      f"Subject: {last['subject']}", "", last["body"]]
+    else:
+        lines.append("The ball is in my court; nothing is needed from you right now.")
+        lines.append(_bot_side_activity(state, now))
+        failed = state.get("failures", {}).get(st, 0)
+        if failed:
+            lines.append(f"Heads up: the last {failed} attempt(s) at this step failed and I'm "
+                         f"retrying; after {config.MAX_STATE_FAILURES} in a row I'll stop and "
+                         "ask for your help.")
+        lines.append("I'll email you as soon as I need something from you or have a result "
+                     "to show.")
+    lines += ["", f"(Check-in {count}. Unless something happens on this thread, the next one "
+                  f"comes in about {_fmt_dur(_ping_interval(count))}. Reply STATUS for a full "
+                  "snapshot, HOLD to park this task, or ABORT to drop it.)"]
+    return "\n".join(lines)
+
+
+def _maybe_ping(state: dict) -> None:
+    """Every tick: send a silence check-in when one is due. Never raises — a check-in is a
+    courtesy and must not burn the current state's failure budget."""
+    try:
+        now = time.time()
+        if not _ping_due(state, now):
+            return
+        count = state.get("ping_count", 0) + 1
+        body = _ping_body(state, now, count)
+        gmail_client.send(subject(state, "check-in"), body, state["thread_id"])
+        state["ping_count"] = count
+        state["last_ping_at"] = now
+        log.info("sent silence check-in #%d in %s (thread quiet for %s)", count, state["state"],
+                 _fmt_dur(now - state.get("last_contact", now)))
+    except Exception:  # noqa: BLE001
+        log.exception("could not send the silence check-in; will retry next tick")
+
+
 # ---------------------------------------------------------------- loop
 
 PHASES = {
@@ -1911,6 +2124,7 @@ def handle_wait(state: dict) -> None:
         gmail_client.mark_processed(msg_id)
         return
     log.info("reply received in %s: %r", state["state"], reply[:200])
+    _note_contact(state)
     _handle_reply(state, reply)
     # Consume the reply only now that handling finished without raising. If it threw
     # (e.g. a transient claude failure), the message stays unprocessed so the next tick
@@ -2014,7 +2228,7 @@ RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch"
               "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
-              "conflict_head", "stale_replies")
+              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
@@ -2395,6 +2609,8 @@ def check_commands(state: dict) -> bool:
     gmail_client.mark_processed(msg_id)
     if command == "STATUS":
         _send_status(state, thread_id)
+        if thread_id and thread_id == state.get("thread_id"):
+            _note_contact(state)  # a STATUS exchange on the task thread is contact too
         return False  # STATUS is read-only; let the tick proceed normally
     _abort_and_reset(state, "ABORT received: I stopped the task in progress and reset myself "
                             "to a clean slate.", new_thread=True)
@@ -2445,6 +2661,11 @@ def _send_status(state: dict, thread_id: str) -> None:
             + (" (continue requested)" if h.get("requested") else "") for h in holds))
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
+    if state.get("last_contact") is not None:
+        lines.append(f"Last real email on the task thread: {_fmt_ts(state['last_contact'])}")
+    if state.get("ping_count"):
+        lines.append(f"Silence check-ins sent since then: {state['ping_count']} "
+                     f"(last at {_fmt_ts(state['last_ping_at'])})")
     for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
                        ("review_round", "Code-review rounds"),
                        ("pr_thread_round", "PR-thread rounds"), ("archive_round", "Archive rounds")):
@@ -2753,6 +2974,7 @@ def main() -> None:
             if state["state"] != prev:
                 log.info("state transition: %s -> %s", prev, state["state"])
                 state["last_transition"] = time.time()
+            _maybe_ping(state)
             save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
         except Exception:
@@ -2767,6 +2989,7 @@ def main() -> None:
                 backoff = config.POLL_INTERVAL_SECONDS
                 time.sleep(config.POLL_INTERVAL_SECONDS)
                 continue
+            _maybe_ping(state)  # a failing step is exactly when "is it stuck?" gets asked
             save_state(state)
             time.sleep(backoff)
             backoff = min(backoff * 2, 3600)
