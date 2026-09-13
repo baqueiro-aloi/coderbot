@@ -12,6 +12,7 @@ class Dispatch(unittest.TestCase):
              ("unclaim_task", ("t", None)), ("hold_task", ("t", "id")),
              ("unhold_task", ("t", None)), ("mark_done", ("t", "id")),
              ("ensure_item", ("t",)), ("note_pr", ("t", "id", "https://pr")),
+             ("note_activity", ("t", "id", "msg", "ref")),
              ("validate", ()), ("describe", ())]
 
     def check(self, source, module_name):
@@ -24,6 +25,8 @@ class Dispatch(unittest.TestCase):
                 if name in ("claim_task", "unclaim_task", "hold_task", "unhold_task",
                             "mark_done"):
                     target.assert_called_once_with(args[0], item_id=args[1])
+                elif name == "note_activity":
+                    target.assert_called_once_with(*args[:3], ref=args[3])
                 else:
                     target.assert_called_once_with(*args)
 

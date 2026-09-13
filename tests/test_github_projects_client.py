@@ -240,13 +240,19 @@ class Transitions(Base):
         self.assertTrue(ghp.mark_done("task", "A"))
         self.assertEqual(fake.statuses(), [])
 
-    def test_note_pr_moves_to_review_and_comments(self):
+    def test_note_pr_moves_to_review_without_commenting(self):
         fake = self.gh([issue("A", 1, "task", "In progress", labels=[ghp.claim_label()])])
         ghp.note_pr("task", "A", "https://github.com/acme/project/pull/9")
         self.assertEqual(fake.items[0]["fieldValues"]["nodes"][0]["name"], "In review")
+        self.assertFalse(any(c[1:3] == ["issue", "comment"] for c in fake.calls))
+
+    def test_note_activity_comments_on_the_issue_and_returns_no_ref(self):
+        fake = self.gh([issue("A", 1, "task", "In progress", labels=[ghp.claim_label()])])
+        self.assertIsNone(ghp.note_activity("task", "A", "[bot] Picked\n\nbecause", ref=None))
         comment = next(c for c in fake.calls if c[1:3] == ["issue", "comment"])
         self.assertEqual(comment[3], "1")
-        self.assertIn("pull/9", comment[-1])
+        self.assertEqual(comment[-1], "[bot] Picked\n\nbecause")
+        self.assertIsNone(ghp.note_activity("missing", None, "x"))
 
 
 class Seeding(Base):

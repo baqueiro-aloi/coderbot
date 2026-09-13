@@ -84,6 +84,10 @@ GH_LABEL_PREFIX = os.environ.get("CODEBOT_GH_LABEL_PREFIX") or "codebot"
 # "owner/repo" whose issues are the tasks (labels and seeded issues live there).
 # Defaults to the target checkout's origin remote.
 GH_ISSUE_REPO = (os.environ.get("CODEBOT_GH_ISSUE_REPO") or "").strip()
+# Activity trail: post a note on the backlog item (issue comment / doc comment thread)
+# at every task milestone, message bodies included. "off" disables it.
+ACTIVITY_TRAIL = (os.environ.get("CODEBOT_ACTIVITY_TRAIL") or "on").strip().lower() not in (
+    "off", "0", "false", "no")
 # May be a comma-separated list: mail is SENT to the first address; mail FROM any of
 # them is trusted as the user (replies, approvals, ABORT/STATUS/DONE commands).
 USER_EMAIL = os.environ.get("CODEBOT_USER_EMAIL", "")
@@ -228,7 +232,9 @@ HOLDS_PATH = DATA_DIR / "holds.json"
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/drive.readonly",
+    # Full Drive access (not drive.readonly): the activity trail posts comments on
+    # the backlog doc. Widening the scope requires re-running scripts/setup_oauth.py.
+    "https://www.googleapis.com/auth/drive",
 ]
 
 # Subjects carry the instance id so the user can tell instances' threads apart and

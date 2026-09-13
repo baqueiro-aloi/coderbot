@@ -218,6 +218,37 @@ class QuestionReply(unittest.TestCase):
         self.assertEqual(state["pending_question"], "and?")
 
 
+class ActivityTrail(unittest.TestCase):
+    def test_trail_posts_and_stores_a_string_ref(self):
+        state = {"item": "task", "item_id": "PVTI_1"}
+        with patch.object(main.config, "INSTANCE_ID", "bot"), \
+             patch.object(main.task_source, "note_activity", return_value="C1") as note:
+            main.trail(state, "Picked", "why")
+            main.trail(state, "Next")
+        self.assertEqual(note.call_args_list[0].args, ("task", "PVTI_1", "[bot] Picked\n\nwhy", None))
+        self.assertEqual(note.call_args_list[1].args, ("task", "PVTI_1", "[bot] Next", "C1"))
+        self.assertEqual(state["trail_ref"], "C1")
+
+    def test_trail_skips_without_item_or_when_disabled_and_survives_errors(self):
+        with patch.object(main.task_source, "note_activity") as note:
+            main.trail({"state": "IDLE"}, "nothing")
+            with patch.object(main.config, "ACTIVITY_TRAIL", False):
+                main.trail({"item": "task"}, "off")
+        note.assert_not_called()
+        state = {"item": "task"}
+        with patch.object(main.task_source, "note_activity", side_effect=RuntimeError("down")):
+            main.trail(state, "boom")  # must not raise
+        self.assertNotIn("trail_ref", state)
+
+    def test_email_is_mirrored_to_the_trail_with_attachment_names(self):
+        state = {"item": "task", "slug": "s"}
+        with patch.object(main.gmail_client, "send", return_value="t1"), \
+             patch.object(main, "trail") as trail:
+            main.email(state, "proposal for review", "body", [pathlib.Path("/x/video.webm")])
+        trail.assert_called_once_with(state, "proposal for review",
+                                      "body\n\nAttachments (emailed): video.webm")
+
+
 class FinishTask(unittest.TestCase):
     def test_strike_success_lands_idle(self):
         state = {"state": "WAIT_MERGE", "item": "task", "item_id": "PVTI_3", "slug": "s",
@@ -372,7 +403,8 @@ class HoldAndContinue(unittest.TestCase):
         mark.assert_not_called()
 
     def test_hold_persists_item_id_and_resume_passes_it_through(self):
-        state = self.task_state() | {"item_id": "PVTI_7", "item_url": "https://x/issues/7"}
+        state = self.task_state() | {"item_id": "PVTI_7", "item_url": "https://x/issues/7",
+                                     "trail_ref": "C9"}
         with patch.object(main, "_commit_pending_work", return_value=[]), \
              patch.object(main.task_source, "hold_task", return_value=True) as hold, \
              patch.object(main, "_reset_to_base_branch", return_value=[]), \
@@ -385,6 +417,8 @@ class HoldAndContinue(unittest.TestCase):
         self.assertEqual(holds[0]["item_id"], "PVTI_7")
         self.assertEqual(holds[0]["saved"]["item_id"], "PVTI_7")
         self.assertEqual(holds[0]["saved"]["item_url"], "https://x/issues/7")
+        self.assertEqual(holds[0]["saved"]["trail_ref"], "C9")
+        self.assertNotIn("trail_ref", state)
 
         resumed = {"state": "IDLE"}
         with patch.object(main, "git"), \
@@ -396,6 +430,7 @@ class HoldAndContinue(unittest.TestCase):
         claim.assert_called_once_with("task A", "PVTI_7")
         self.assertEqual(resumed["item_id"], "PVTI_7")
         self.assertEqual(resumed["item_url"], "https://x/issues/7")
+        self.assertEqual(resumed["trail_ref"], "C9")
 
     def test_pick_resumes_requested_hold_first(self):
         saved = {"state": "WAIT_APPROVAL", "item": "task A", "slug": "a", "branch": "codebot-a",

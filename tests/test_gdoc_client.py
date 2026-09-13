@@ -207,3 +207,53 @@ class TaskIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _HttpError(Exception):
+    def __init__(self, status):
+        super().__init__(f"http {status}")
+        self.resp = MagicMock(status=status)
+
+
+class ActivityTrail(unittest.TestCase):
+    """note_activity against a fake Drive comments resource."""
+
+    def setUp(self):
+        self.drive = MagicMock()
+        self.comments = self.drive.comments.return_value
+        self.replies = self.comments.replies.return_value
+        self.comments.create.return_value.execute.return_value = {"id": "C1"}
+        patches = [patch.object(gdoc_client, "_drive_service", return_value=self.drive),
+                   patch.object(gdoc_client, "HttpError", _HttpError),
+                   patch.object(config, "DOC_ID", "doc1")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_first_note_creates_a_comment_quoting_the_item(self):
+        self.assertEqual(gdoc_client.note_activity("Task A", "", "[bot] Picked"), "C1")
+        kwargs = self.comments.create.call_args.kwargs
+        self.assertEqual(kwargs["fileId"], "doc1")
+        self.assertEqual(kwargs["body"]["content"], "[bot] Picked")
+        self.assertEqual(kwargs["body"]["quotedFileContent"]["value"], "Task A")
+        self.replies.create.assert_not_called()
+
+    def test_later_notes_reply_in_the_thread(self):
+        self.assertEqual(gdoc_client.note_activity("Task A", "", "[bot] Done", ref="C1"), "C1")
+        kwargs = self.replies.create.call_args.kwargs
+        self.assertEqual((kwargs["fileId"], kwargs["commentId"]), ("doc1", "C1"))
+        self.assertEqual(kwargs["body"], {"content": "[bot] Done"})
+        self.comments.create.assert_not_called()
+
+    def test_reply_to_a_gone_comment_starts_a_new_thread(self):
+        self.replies.create.return_value.execute.side_effect = _HttpError(404)
+        self.comments.create.return_value.execute.return_value = {"id": "C2"}
+        self.assertEqual(gdoc_client.note_activity("Task A", "", "note", ref="C1"), "C2")
+
+    def test_insufficient_scope_explains_the_reconsent(self):
+        self.comments.create.return_value.execute.side_effect = _HttpError(403)
+        with self.assertRaisesRegex(RuntimeError, "setup_oauth.py"):
+            gdoc_client.note_activity("Task A", "", "note")
+        self.replies.create.return_value.execute.side_effect = _HttpError(500)
+        with self.assertRaises(_HttpError):
+            gdoc_client.note_activity("Task A", "", "note", ref="C1")

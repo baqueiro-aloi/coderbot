@@ -64,6 +64,23 @@ subprocesses (`gh pr ...`, `gh api graphql`) authenticated by `GH_TOKEN`.
   downloaded best-effort with the token into `data/gh_images/`, mirroring the
   Doc's `doc_images/`.
 
+- **Activity trail is one call, `note_activity(text, id, message, ref) -> ref`.**
+  `main.trail()` builds `[<instance>] <headline>` plus the body and calls it from
+  `email()` (every user-facing message) and from the silent phase transitions
+  (picked, approved, answer received, implemented, verified, reviewed, e2e result,
+  archived, PR opened, review round, conflicts resolved, merged). `ref` is an
+  opaque thread handle the backend may return and the caller stores in
+  `state["trail_ref"]` (in `RESET_KEYS`, so hold/resume carry it). GitHub posts
+  issue comments and returns no ref; the Doc cannot anchor a comment to a bullet
+  through the Drive API, so the first note creates a doc-level comment quoting the
+  item text and later notes reply in that thread (a 404 on reply starts a new
+  one). A JIRA backend would post issue comments. Failures are logged and never
+  change the FSM; `CODEBOT_ACTIVITY_TRAIL=off` disables it. The Doc requires the
+  full `drive` scope instead of `drive.readonly`, so existing installs re-consent
+  once; until then only the trail is affected (a 403 carries the hint).
+- The GitHub `note_pr` write-back no longer comments the PR link itself: the "PR
+  opened" trail note carries it, and the PR body's `Closes` line links the issue.
+
 ## Risks / Trade-offs
 
 - Token scope: a classic PAT needs `project` (not only `read:project`) and SSO

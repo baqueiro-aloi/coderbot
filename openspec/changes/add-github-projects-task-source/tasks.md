@@ -45,6 +45,16 @@
 - [x] 5.3 `README.md`: backlog sources section, multiple instances, setup and
       smoke snippets.
 
+## 7. Activity trail
+
+- [x] 7.1 `task_source.note_activity` contract; `config.ACTIVITY_TRAIL`; Drive scope.
+- [x] 7.2 GitHub backend: issue comment; `note_pr` no longer comments.
+- [x] 7.3 Doc backend: Drive v3 comment thread per task with reply/404/403 handling.
+- [x] 7.4 `main.trail()` + hooks in `email()` and the silent transitions; `trail_ref`
+      in `RESET_KEYS`.
+- [x] 7.5 Tests for both backends, the façade and the FSM helper; docs.
+- [ ] 7.6 Live: notes on GitHub issue #89; Doc thread after re-consent.
+
 ## 6. Verification
 
 - [x] 6.1 `python3 -m unittest discover -s tests -t .` green.

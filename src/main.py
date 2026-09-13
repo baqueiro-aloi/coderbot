@@ -68,6 +68,27 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     # is therefore waiting on) if the original email was lost or unclear.
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
     _note_contact(state)
+    names = [Path(a).name for a in (attachments or [])]
+    trail(state, phase, body + (f"\n\nAttachments (emailed): {', '.join(names)}" if names else ""))
+
+
+def trail(state: dict, headline: str, body: str = "") -> None:
+    """Append a note to the task's activity trail on the backlog item (issue comment,
+    doc comment thread...). Every user-facing email and every silent phase transition
+    is noted, so the item doubles as the task's log. Best-effort by design: a tracker
+    hiccup is logged and never changes the FSM; nothing is noted without a task."""
+    if not config.ACTIVITY_TRAIL or not state.get("item"):
+        return
+    message = f"[{config.INSTANCE_ID}] {headline}"
+    if body:
+        message += f"\n\n{body}"
+    try:
+        ref = task_source.note_activity(state["item"], state.get("item_id"), message,
+                                        state.get("trail_ref"))
+        if isinstance(ref, str) and ref:
+            state["trail_ref"] = ref
+    except Exception:  # noqa: BLE001
+        log.exception("could not note activity on the backlog item: %r", headline)
 
 
 def parse_json_reply(text: str) -> dict:
@@ -549,6 +570,7 @@ def do_pick(state: dict) -> None:
     state["base_sha"] = git("rev-parse", "HEAD")
     state["state"] = "EXPLORING"
     log.info("picked %r -> %s", choice["item"], branch)
+    trail(state, f"Picked this item; working on branch {branch}", choice.get("reason", ""))
 
 
 def prioritize_items(items: list[dict]) -> list[dict]:
@@ -715,6 +737,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
                      reset_repo=True)
         return
     if action == "approve":
+        trail(state, "Proposal approved by the user", reply)
         state["state"] = "IMPLEMENTING"
         return
     # changes: revise the proposal in the working session and go back to waiting.
@@ -746,6 +769,7 @@ def do_implement(state: dict) -> None:
     state["e2e_round"] = 0
     state["verify_round"] = 0
     state["state"] = "VERIFYING"
+    trail(state, "Implementation complete; verifying")
 
 
 def _gate_failed(state: dict, phase: str, counter: str, reason: str) -> None:
@@ -790,6 +814,7 @@ def _complete_verify(state: dict, result) -> None:
     state.pop("verify_round", None)
     state["review_gate_round"] = 0
     state["state"] = "INTERNAL_REVIEW"
+    trail(state, "Verification passed; running internal review")
 
 
 def do_verify(state: dict) -> None:
@@ -807,6 +832,8 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     state.pop("review_gate_round", None)
     state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
+    trail(state, "Internal review passed; " +
+          ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
 
 
 def do_internal_review(state: dict) -> None:
@@ -844,6 +871,8 @@ def do_e2e(state: dict) -> None:
         state["e2e_round"] = state.get("e2e_round", 0) + 1
         log.warning("e2e suite FAILED (round %d/%d); resuming session to fix. Tail:\n%s",
                     state["e2e_round"], config.E2E_MAX_ROUNDS, output[-1500:])
+        trail(state, f"e2e suite failed (round {state['e2e_round']}/{config.E2E_MAX_ROUNDS})",
+              output[-1500:])
         if state["e2e_round"] > config.E2E_MAX_ROUNDS:
             log.warning("e2e round limit (%d) reached; asking user for help instead of retrying",
                         config.E2E_MAX_ROUNDS)
@@ -867,6 +896,7 @@ def do_e2e(state: dict) -> None:
     log.info("e2e suite PASSED")
     state["e2e_round"] = 0
     state["state"] = "ARCHIVING"
+    trail(state, "e2e suite passed; archiving the change")
 
 
 def _run_checked(command: list[str]) -> str:
@@ -1052,6 +1082,7 @@ def do_archive(state: dict) -> None:
         state.pop("archive_round", None)
         state.pop("archive_error", None)
         state["state"] = "OPEN_PR"
+        trail(state, "OpenSpec change archived; opening the PR")
     except Exception as error:
         _archive_failed(state, error)
 
@@ -1186,6 +1217,7 @@ def do_open_pr(state: dict) -> None:
             state["pr_url"] = _https_url(output)
     state["pr_summary"] = body
     log.info("PR opened: %s", state["pr_url"])
+    trail(state, f"PR opened: {state['pr_url']}", body)
     try:
         # Best-effort write-back (GitHub: move the item to review, link the PR on the
         # issue). The PR exists already; a backlog hiccup must not stall the flow.
@@ -1417,6 +1449,8 @@ def do_address_review(state: dict) -> None:
     threads = state.get("review_threads", [])
     state["review_round"] = state.get("review_round", 0) + 1
     log.info("addressing %d review thread(s), round %d", len(threads), state["review_round"])
+    trail(state, f"Addressing {len(threads)} automated review thread(s), round "
+                 f"{state['review_round']}")
     head_before = git("rev-parse", state["branch"])
     result = agent_runner.resume(
         state["session_id"],
@@ -1553,6 +1587,7 @@ def _leave_conflict_resolution(state: dict) -> None:
     state.pop("conflict_head", None)
     if committed:
         log.info("conflict resolution produced new commits; pushing them for re-review")
+        trail(state, "Merge conflicts resolved; pushing for re-review")
         state.pop("conflict_return", None)
         _queue_push(state, "conflicts")
         return
@@ -1810,6 +1845,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                   "resolving automatically on my next check; otherwise please resolve it on "
                   "the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
+        trail(state, f"PR merged: {state['pr_url']}")
     _finish_task(state, "PR merged.", reset_repo=False)
 
 
@@ -2229,7 +2265,7 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_id", "item_url", "item_detail", "item_images", "base_sha", "slug",
+RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_images", "base_sha", "slug",
               "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
@@ -2720,6 +2756,7 @@ def _continue_implementing(state: dict, result) -> None:
     state["e2e_round"] = 0
     state["verify_round"] = 0
     state["state"] = "VERIFYING"
+    trail(state, "Implementation complete; verifying")
 
 
 def _continue_verifying(state: dict, result) -> None:
@@ -2837,6 +2874,7 @@ def do_question_reply(state: dict, reply: str) -> None:
                      f"{phase!r} and cannot resume it. 'retry' restarts from the backlog; "
                      "'abort' resets me.")
         return
+    trail(state, f"Answer received (resuming {phase})", reply)
     result = agent_runner.resume(state["session_id"], _reply_prompt(state, phase, reply))
     if handle_result(state, result, phase):
         return  # re-questioned (or question cap hit); return_state already updated

@@ -117,6 +117,21 @@ issues and placed in the pick column. The labels are created on first start;
 `GH_TOKEN` needs the `project` scope in addition to `repo` (a classic PAT's
 `read:project` cannot move cards; an SSO-protected org needs the token authorized).
 
+### Activity trail
+
+Whatever the source, codebot leaves a log on the item itself (`CODEBOT_ACTIVITY_TRAIL`,
+default on): a note at every milestone — picked and branch, proposal sent, approval,
+each question and the user's answer, implemented, verified, reviewed, e2e result,
+archived, PR opened, review rounds, PR ready, conflicts resolved, merged/done, hold,
+resume, abort, stuck — with the full message body, so the ticket reads as the task's
+history. On GitHub each note is a comment on the issue. On the Google Doc the first
+note creates a doc-level comment quoting the item and later notes are replies in that
+thread (the Drive API cannot anchor comments to a bullet), which needs the full
+`drive` OAuth scope: installations set up before this option must re-run
+`python3 scripts/setup_oauth.py` once. A tracker failure is logged and never
+affects the task. The same one-call contract (`task_source.note_activity`) is what a
+JIRA or other tracker backend would implement.
+
 ## Lifecycle
 
 ```
@@ -321,7 +336,8 @@ offers to run the consent flow in step 2 for you.
 
 1. **Google OAuth client**: in Google Cloud Console create a project, enable the
    Gmail, Google Docs and Google Drive APIs, create an OAuth client of type
-   *Desktop app*, and download its JSON to `data/credentials.json`.
+   *Desktop app*, and download its JSON to `data/credentials.json`. The consent
+   asks for full Drive access (the activity trail posts comments on the doc).
 2. **Consent flow** (on the host, from the coderbot repo root):
    ```bash
    pip install -r requirements.txt

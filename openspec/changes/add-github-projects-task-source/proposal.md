@@ -33,6 +33,10 @@ deployments keep using the Doc unchanged.
   adds it to the board in the pick column.
 - Startup validation checks the project, its Status options and the token's
   `project` scope, and fails with an actionable message.
+- **Activity trail** (all sources): at every task milestone the bot posts a note,
+  message body included, on the backlog item — an issue comment on GitHub, one
+  comment thread per task on the Google Doc (Drive scope widened to full `drive`).
+  One façade call, `note_activity`, is the contract a JIRA backend would implement.
 - Setup script, `.env.example` and README document the new source.
 
 ## Capabilities

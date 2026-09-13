@@ -31,6 +31,11 @@ def _docs_service():
     return build("docs", "v1", credentials=load_credentials(), cache_discovery=False)
 
 
+def _drive_service():
+    # Comments on a Doc are a Drive API feature (the Docs API has none).
+    return build("drive", "v3", credentials=load_credentials(), cache_discovery=False)
+
+
 # Claim marker an instance appends to a task's bullet line when it picks the task.
 CLAIM_RE = re.compile(r"\s*\[implementing:\s*([^\]]*?)\s*\]", re.IGNORECASE)
 # Hold marker: the task was paused by the user (HOLD command) and waits for CONTINUE.
@@ -528,10 +533,50 @@ def note_pr(item_text: str, item_id: str | None, pr_url: str) -> None:
     """The doc has no per-item link to write back; the user gets the PR by email."""
 
 
+_SCOPE_HINT = ("posting comments on the doc needs the full Drive scope; re-run "
+               "scripts/setup_oauth.py on the host to grant it (data/token.json was "
+               "issued with the old read-only scope)")
+
+
+def note_activity(item_text: str, item_id: str | None, message: str,
+                  ref: str | None = None) -> str | None:
+    """Append a note to the task's comment thread on the doc. The Drive API cannot
+    anchor a comment to a bullet, so the thread is a doc-level comment that quotes
+    the item text; `ref` is that comment's id. The first call creates the comment,
+    later calls reply to it; a reply to a comment that was deleted or resolved starts
+    a new thread and returns the new id."""
+    service = _drive_service()
+    try:
+        if ref:
+            try:
+                service.comments().replies().create(
+                    fileId=config.DOC_ID, commentId=ref, fields="id",
+                    body={"content": message}).execute()
+                return ref
+            except HttpError as err:
+                if err.resp.status != 404:
+                    raise
+                log.info("doc comment %s is gone (deleted/resolved); starting a new thread", ref)
+        created = service.comments().create(
+            fileId=config.DOC_ID, fields="id",
+            body={"content": message,
+                  "quotedFileContent": {"value": item_text, "mimeType": "text/plain"}},
+        ).execute()
+        log.info("started activity thread %s on the doc for: %r", created["id"], item_text[:80])
+        return created["id"]
+    except HttpError as err:
+        if err.resp.status == 403:
+            raise RuntimeError(f"Drive comment rejected (403): {_SCOPE_HINT}") from err
+        raise
+
+
 def validate() -> None:
     """Startup check for the doc backend (the doc itself is read lazily)."""
     if not config.DOC_ID:
         raise RuntimeError("CODEBOT_DOC_ID must be set in .env (the backlog Google Doc id)")
+    if config.ACTIVITY_TRAIL:
+        log.info("activity trail on: task notes are posted as comment threads on the doc "
+                 "(if a 403 appears, %s)", _SCOPE_HINT)
 
 
 def describe() -> str:

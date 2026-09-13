@@ -589,14 +589,26 @@ def ensure_item(item_text: str) -> bool:
 
 
 def note_pr(item_text: str, item_id: str | None, pr_url: str) -> None:
-    """Move the item to review and link the PR on the issue."""
+    """Move the item to review (the PR link itself lands on the issue through the
+    activity trail's "PR opened" note and the PR body's Closes line)."""
     task = _find_task(item_text, item_id)
     if task is None:
-        log.warning("no board issue to link the PR on: %r", item_text[:80])
+        log.warning("no board issue to move to review for: %r", item_text[:80])
         return
     _set_status(task, config.GH_PROJECT_REVIEW_STATUS)
-    _gh("issue", "comment", str(task["number"]), "--repo", _target_repo(),
-        "--body", f"PR: {pr_url}")
+
+
+def note_activity(item_text: str, item_id: str | None, message: str,
+                  ref: str | None = None) -> str | None:
+    """Append a note as a comment on the task's issue. Issue comments need no thread
+    handle, so the returned ref is always None."""
+    task = _find_task(item_text, item_id)
+    if task is None:
+        log.warning("no board issue to note activity on: %r", item_text[:80])
+        return None
+    _gh("issue", "comment", str(task["number"]), "--repo", _target_repo(), "--body", message)
+    log.debug("noted activity on issue #%s (%d chars)", task["number"], len(message))
+    return None
 
 
 def validate() -> None:

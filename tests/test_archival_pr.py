@@ -544,9 +544,12 @@ class NativePullRequestTests(unittest.TestCase):
         with patch.object(main, "git", side_effect=self.ready_git), \
              patch.object(main.subprocess, "run", side_effect=responses) as process, \
              patch.object(main.task_source, "note_pr") as note_pr, \
+             patch.object(main, "trail") as trail, \
              patch.object(main, "_enter_review_wait"):
             main.do_open_pr(state)
 
+        trail.assert_called_once()
+        self.assertEqual(trail.call_args.args[1], "PR opened: https://github.com/acme/project/pull/42")
         create = process.call_args_list[1].args[0]
         body = create[create.index("--body") + 1]
         self.assertIn("Closes https://github.com/acme/project/issues/9", body)

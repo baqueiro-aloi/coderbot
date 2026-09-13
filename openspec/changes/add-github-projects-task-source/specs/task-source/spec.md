@@ -77,14 +77,39 @@ instance's labels; an item already in `Done` SHALL count as success.
 
 ### Requirement: GitHub pull-request linking
 When a pull request is opened for a GitHub-sourced task, codebot SHALL include
-`Closes <issue url>` in the PR body, move the item to `In review`, and comment
-the PR link on the issue. Failure of the write-back SHALL be logged and SHALL
-NOT block the pull request flow.
+`Closes <issue url>` in the PR body and move the item to `In review`; the PR
+link reaches the issue through the activity trail. Failure of the write-back
+SHALL be logged and SHALL NOT block the pull request flow.
 
 #### Scenario: PR opened
 - **WHEN** `do_open_pr` obtains the PR URL for a task with an issue URL
-- **THEN** the PR body references the issue and the item is in `In review` with
-  a comment linking the PR
+- **THEN** the PR body references the issue, the item is in `In review`, and the
+  trail carries a "PR opened" note with the URL
+
+### Requirement: Activity trail on the item
+Codebot SHALL post a note on the backlog item at every task milestone — the
+pick and branch, every message emailed to the user (proposal, questions, PR
+ready, hold, resume, abort, stuck, completion) with its body, the user's
+approval and answers, implementation complete, verification and internal
+review passed, each e2e result, archive done, PR opened, each review round,
+conflicts resolved, and merge — prefixed with the instance name. Every backend
+SHALL implement one operation, `note_activity(text, id, message, ref)`,
+returning an opaque thread reference that codebot passes back on later notes.
+A failure to post SHALL be logged and SHALL NOT change the task's state.
+`CODEBOT_ACTIVITY_TRAIL=off` SHALL disable the trail.
+
+#### Scenario: GitHub note
+- **WHEN** a milestone occurs for a GitHub-sourced task
+- **THEN** a comment with the note appears on the task's issue
+
+#### Scenario: Google Doc thread per task
+- **WHEN** the first note of a task is posted on a Doc-sourced task
+- **THEN** a doc-level comment quoting the item text is created, and later notes
+  of the same task are replies in that comment thread
+
+#### Scenario: Tracker failure
+- **WHEN** posting a note raises (for example the Doc token lacks the Drive scope)
+- **THEN** the error is logged with guidance and the task proceeds unchanged
 
 ### Requirement: GitHub self-healing seeding
 `ensure_item` in `github` mode SHALL create an issue in the target repository,
