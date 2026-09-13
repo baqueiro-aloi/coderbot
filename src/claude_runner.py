@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import config
@@ -134,14 +135,70 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:
                           timeout=config.AGENT_TIMEOUT_SECONDS)
 
 
+# Monotonic deadline until which _active_model() keeps returning the fallback model.
+# 0 means "no exhaustion seen recently"; set by _invoke when the primary model 429s.
+_fallback_until = 0.0
+
+
+def _fallback_model() -> str:
+    """The configured fallback, unless it is empty or the same as the primary model."""
+    fallback = (config.CLAUDE_FALLBACK_MODEL or "").strip()
+    return fallback if fallback and fallback != config.CLAUDE_MODEL else ""
+
+
+def _active_model() -> str:
+    """The model this invocation should use: the fallback while the primary model's
+    credits are known to be exhausted, otherwise the primary one."""
+    if _fallback_until and time.monotonic() < _fallback_until and _fallback_model():
+        return _fallback_model()
+    return config.CLAUDE_MODEL
+
+
+def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
+    """True when the CLI failed because the model's usage credits ran out. With
+    --output-format json the error payload lands on stdout as
+    {"api_error_status": 429, "result": "You've reached your <model> limit. ..."}."""
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return False
+    if not isinstance(data, dict) or data.get("api_error_status") != 429:
+        return False
+    return "limit" in str(data.get("result", "")).lower()
+
+
 def _invoke(args: list[str], prompt: str) -> ClaudeResult:
-    cmd = ["claude", *args, "-p", prompt, "--model", config.CLAUDE_MODEL,
+    global _fallback_until
+    proc, model = _invoke_with_model(args, prompt, _active_model())
+    if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
+            and model != _fallback_model()):
+        log.warning("model %s is out of usage credits; falling back to %s for %ds",
+                    model, _fallback_model(), config.CLAUDE_FALLBACK_COOLDOWN_SECONDS)
+        _fallback_until = time.monotonic() + config.CLAUDE_FALLBACK_COOLDOWN_SECONDS
+        proc, model = _invoke_with_model(args, prompt, _fallback_model())
+    if (proc.returncode != 0 and _is_usage_exhausted(proc)
+            and model == _fallback_model()):
+        # The fallback itself is exhausted; stop pinning it so the next cycle starts
+        # on the primary model again (its limit window may have reset by then).
+        log.warning("fallback model %s is also out of usage credits", model)
+        _fallback_until = 0.0
+    if proc.returncode != 0:
+        # --output-format json puts the error payload on stdout, so stderr alone is
+        # routinely empty on failure ("claude exited 1:"). Report both.
+        raise RuntimeError(f"claude exited {proc.returncode}: "
+                           f"stderr={proc.stderr[-2000:]!r} stdout={proc.stdout[-2000:]!r}")
+    return _parse(proc)
+
+
+def _invoke_with_model(args: list[str], prompt: str,
+                       model: str) -> tuple[subprocess.CompletedProcess, str]:
+    cmd = ["claude", *args, "-p", prompt, "--model", model,
            "--effort", config.CLAUDE_EFFORT,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
-             " ".join(args) or "run", config.CLAUDE_MODEL, config.CLAUDE_EFFORT,
+             " ".join(args) or "run", model, config.CLAUDE_EFFORT,
              len(prompt), _config_report())
     proc = _run(cmd)
     if proc.returncode != 0 and _is_config_corrupt(proc.stderr):
@@ -151,11 +208,10 @@ def _invoke(args: list[str], prompt: str) -> ClaudeResult:
         if _restore_config():
             log.info("retrying claude after config recovery")
             proc = _run(cmd)
-    if proc.returncode != 0:
-        # --output-format json puts the error payload on stdout, so stderr alone is
-        # routinely empty on failure ("claude exited 1:"). Report both.
-        raise RuntimeError(f"claude exited {proc.returncode}: "
-                           f"stderr={proc.stderr[-2000:]!r} stdout={proc.stdout[-2000:]!r}")
+    return proc, model
+
+
+def _parse(proc: subprocess.CompletedProcess) -> ClaudeResult:
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as err:

@@ -238,6 +238,15 @@ def _from_matches(from_header: str, user_email: str) -> bool:
     return bool(allowed) and parseaddr(from_header)[1].lower() in allowed
 
 
+def _is_draft(message: dict) -> bool:
+    """True if the Gmail message is an unsent draft. threads().get and messages().list
+    both return drafts alongside sent mail, and a draft reply carries the user's own
+    From header, so without this check the bot reads (and acts on) a reply the user is
+    still composing. A draft gets a fresh message id when it is actually sent, so
+    skipping it here never hides the eventual real reply."""
+    return "DRAFT" in message.get("labelIds", [])
+
+
 def poll_command() -> tuple[str, str, str, bool, str] | None:
     """Scan recent mail for a user command; returns (message_id, thread_id, COMMAND,
     targeted, note) or None — `targeted` is True when the body named this instance
@@ -256,11 +265,13 @@ def poll_command() -> tuple[str, str, str, bool, str] | None:
     processed = _load_processed()
     listing = service.users().messages().list(
         userId="me", q="(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) "
-                       "newer_than:2d", maxResults=25).execute()
+                       "newer_than:2d -in:drafts", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
             continue
         message = service.users().messages().get(userId="me", id=meta["id"], format="full").execute()
+        if _is_draft(message):
+            continue
         headers = {h["name"].lower(): h.get("value", "")
                    for h in message.get("payload", {}).get("headers", [])}
         if "x-codebot" in headers:
@@ -325,9 +336,15 @@ def reply_candidates(messages: list[dict], processed: list[str], user_email: str
     The From check matters: Gmail threads by subject/references, so a third party mailing
     the user with a matching subject would otherwise be consumed as the user's reply and
     fed verbatim into the working Claude session (poll_command already filters this way).
-    Foreign messages are skipped but NOT marked processed, so they stay visible in logs."""
+    Foreign messages are skipped but NOT marked processed, so they stay visible in logs.
+
+    Drafts are skipped too (and never marked processed): Gmail includes the user's
+    half-written reply in the thread, and it must stay invisible until it is sent."""
     for message in messages:
         if message["id"] in processed:
+            continue
+        if _is_draft(message):
+            log.debug("ignoring unsent draft %s in thread", message["id"])
             continue
         headers = {h["name"].lower(): h.get("value", "")
                    for h in message.get("payload", {}).get("headers", [])}

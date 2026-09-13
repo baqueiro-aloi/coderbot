@@ -312,6 +312,11 @@ offers to run the consent flow in step 2 for you.
    # Dockerfile must support the model you choose — see "Troubleshooting")
    CLAUDE_MODEL=claude-fable-5
    CLAUDE_EFFORT=medium
+   # Optional; model to switch to when CLAUDE_MODEL runs out of usage credits
+   # (defaults to claude-opus-5; empty disables the fallback), and how long to stay
+   # on it before probing the primary model again (defaults to 3600 seconds)
+   CLAUDE_FALLBACK_MODEL=claude-opus-5
+   CLAUDE_FALLBACK_COOLDOWN_SECONDS=3600
    # Required when CODEBOT_AGENT=opencode. Run scripts/setup.sh to complete the
    # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
    OPENCODE_PROVIDER=

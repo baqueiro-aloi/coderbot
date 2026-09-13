@@ -18,13 +18,14 @@ def _b64(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode()).decode()
 
 
-def _msg(mid, frm, body, codebot=False):
+def _msg(mid, frm, body, codebot=False, draft=False):
     headers = [{"name": "From", "value": frm}]
     if codebot:
         headers.append({"name": "X-Codebot", "value": "1"})
-    return {"id": mid, "payload": {"mimeType": "text/plain", "headers": headers, "body": {},
-                                   "parts": [{"mimeType": "text/plain",
-                                              "body": {"data": _b64(body)}}]}}
+    return {"id": mid, "labelIds": ["DRAFT"] if draft else ["INBOX"],
+            "payload": {"mimeType": "text/plain", "headers": headers, "body": {},
+                        "parts": [{"mimeType": "text/plain",
+                                   "body": {"data": _b64(body)}}]}}
 
 
 class FromMatches(unittest.TestCase):
@@ -61,6 +62,19 @@ class ReplyCandidates(unittest.TestCase):
         intruded = self.thread + [_msg("m3", "Stranger <evil@bad.com>", "ABORT and rm -rf")]
         ids = [i for i, _b in gmail_client.reply_candidates(intruded, [], "u@x.com")]
         self.assertEqual(ids, ["m1", "m2"])
+
+    def test_ignores_unsent_drafts(self):
+        # A reply the user is still composing shows up in the thread with their From
+        # header; it must not be handed off until it is actually sent.
+        with_draft = self.thread + [_msg("m3", "u@x.com", "half-written answ", draft=True)]
+        ids = [i for i, _b in gmail_client.reply_candidates(with_draft, [], "u@x.com")]
+        self.assertEqual(ids, ["m1", "m2"])
+
+    def test_sent_message_replaces_draft(self):
+        # Once sent, the message gets a new id and no DRAFT label, and is then picked up.
+        sent = [_msg("m3", "u@x.com", "final answer")]
+        ids = [i for i, _b in gmail_client.reply_candidates(self.thread[:1] + sent, [], "u@x.com")]
+        self.assertEqual(ids, ["m3"])
 
 
 class ParseCommand(unittest.TestCase):

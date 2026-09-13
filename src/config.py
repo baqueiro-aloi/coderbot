@@ -71,6 +71,16 @@ AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
 # rather than passing --model "" to the claude CLI.
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL") or "claude-fable-5"
 CLAUDE_EFFORT = os.environ.get("CLAUDE_EFFORT") or "medium"
+
+# When the primary model's usage credits run out the CLI exits 1 with HTTP 429 and a
+# "you've reached your <model> limit" message. Rather than burning the retry budget on
+# a model that cannot answer, codebot falls back to this one. Set to an empty value to
+# disable the fallback and let the cycle retry/fail on the primary model.
+CLAUDE_FALLBACK_MODEL = os.environ.get("CLAUDE_FALLBACK_MODEL", "claude-opus-5")
+# How long to keep using the fallback before probing the primary model again, so every
+# later invocation does not pay for a doomed primary attempt first.
+CLAUDE_FALLBACK_COOLDOWN_SECONDS = int(
+    os.environ.get("CLAUDE_FALLBACK_COOLDOWN_SECONDS", "3600"))
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 
 SUPERPOWERS_VERSION = "v6.3.0"

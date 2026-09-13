@@ -56,6 +56,61 @@ class ClaudeRunnerTests(unittest.TestCase):
         self.assertEqual(first[first.index("-p") + 1], "classify this")
         self.assertIn(claude_runner.SENTINEL, second[second.index("-p") + 1])
 
+    def test_falls_back_to_opus_when_primary_model_credits_exhausted(self):
+        exhausted = subprocess.CompletedProcess([], 1, json.dumps({
+            "api_error_status": 429,
+            "result": "You've reached your Fable limit. Switch to another model.",
+        }), "")
+        ok = subprocess.CompletedProcess(
+            [], 0, json.dumps({"session_id": "s", "result": "ok"}), "")
+        with patch.object(claude_runner.config, "CLAUDE_MODEL", "claude-fable-5-1"), \
+             patch.object(claude_runner.config, "CLAUDE_FALLBACK_MODEL", "claude-opus-5"), \
+             patch.object(claude_runner, "_fallback_until", 0.0), \
+             patch("claude_runner._run", side_effect=[exhausted, ok, ok]) as run:
+            result = claude_runner.run("go")
+            claude_runner.run("again")
+        self.assertEqual(result.session_id, "s")
+        models = [c.args[0][c.args[0].index("--model") + 1] for c in run.call_args_list]
+        # First attempt on the primary, retried on the fallback, and the next
+        # invocation starts on the fallback instead of paying for the primary again.
+        self.assertEqual(models, ["claude-fable-5-1", "claude-opus-5", "claude-opus-5"])
+
+    def test_fallback_disabled_when_unset(self):
+        exhausted = subprocess.CompletedProcess([], 1, json.dumps({
+            "api_error_status": 429, "result": "You've reached your Fable limit."}), "")
+        with patch.object(claude_runner.config, "CLAUDE_FALLBACK_MODEL", ""), \
+             patch.object(claude_runner, "_fallback_until", 0.0), \
+             patch("claude_runner._run", side_effect=[exhausted]) as run:
+            with self.assertRaisesRegex(RuntimeError, "reached your Fable limit"):
+                claude_runner.run("go")
+        self.assertEqual(run.call_count, 1)
+
+    def test_exhausted_fallback_unpins_so_primary_is_retried_next_time(self):
+        exhausted = subprocess.CompletedProcess([], 1, json.dumps({
+            "api_error_status": 429, "result": "You've reached your limit."}), "")
+        ok = subprocess.CompletedProcess(
+            [], 0, json.dumps({"session_id": "s", "result": "ok"}), "")
+        with patch.object(claude_runner.config, "CLAUDE_MODEL", "claude-fable-5-1"), \
+             patch.object(claude_runner.config, "CLAUDE_FALLBACK_MODEL", "claude-opus-5"), \
+             patch.object(claude_runner, "_fallback_until", 0.0), \
+             patch("claude_runner._run",
+                   side_effect=[exhausted, exhausted, ok]) as run:
+            with self.assertRaises(RuntimeError):
+                claude_runner.run("go")
+            claude_runner.run("again")
+        models = [c.args[0][c.args[0].index("--model") + 1] for c in run.call_args_list]
+        self.assertEqual(models[2], "claude-fable-5-1")
+
+    def test_other_errors_do_not_trigger_fallback(self):
+        failure = subprocess.CompletedProcess([], 1, json.dumps({
+            "api_error_status": 500, "result": "internal error"}), "")
+        with patch.object(claude_runner.config, "CLAUDE_FALLBACK_MODEL", "claude-opus-5"), \
+             patch.object(claude_runner, "_fallback_until", 0.0), \
+             patch("claude_runner._run", side_effect=[failure]) as run:
+            with self.assertRaises(RuntimeError):
+                claude_runner.run("go")
+        self.assertEqual(run.call_count, 1)
+
     def test_failure_reports_stdout_and_stderr(self):
         response = subprocess.CompletedProcess([], 1, '{"error":"boom"}', "")
         with patch("claude_runner._run", return_value=response):
