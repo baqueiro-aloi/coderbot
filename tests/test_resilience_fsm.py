@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, call, patch
 
-with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
+with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
 import prompts
@@ -220,13 +220,15 @@ class QuestionReply(unittest.TestCase):
 
 class FinishTask(unittest.TestCase):
     def test_strike_success_lands_idle(self):
-        state = {"state": "WAIT_MERGE", "item": "task", "slug": "s", "session_id": "x",
-                 "pr_url": "u"}
-        with patch.object(main.gdoc_client, "mark_done", return_value=True), \
+        state = {"state": "WAIT_MERGE", "item": "task", "item_id": "PVTI_3", "slug": "s",
+                 "session_id": "x", "pr_url": "u"}
+        with patch.object(main.task_source, "mark_done", return_value=True) as done, \
              patch.object(main, "email") as email, \
              patch.object(main, "_reset_to_base_branch", return_value=[]) as reset:
             main._finish_task(state, "PR merged.", reset_repo=False)
+        done.assert_called_once_with("task", "PVTI_3")
         reset.assert_not_called()
+        self.assertNotIn("item_id", state)
         self.assertEqual(state["state"], "IDLE")
         self.assertNotIn("item", state)
         self.assertNotIn("pr_url", state)
@@ -234,12 +236,12 @@ class FinishTask(unittest.TestCase):
 
     def test_strike_failure_unclaims_and_asks_for_manual_mark(self):
         state = {"state": "WAIT_STUCK", "item": "task", "slug": "s"}
-        with patch.object(main.gdoc_client, "mark_done", return_value=False), \
-             patch.object(main.gdoc_client, "unclaim_task") as unclaim, \
+        with patch.object(main.task_source, "mark_done", return_value=False), \
+             patch.object(main.task_source, "unclaim_task") as unclaim, \
              patch.object(main, "email") as email, \
              patch.object(main, "_reset_to_base_branch", return_value=["dirty"]):
             main._finish_task(state, "DONE.", reset_repo=True)
-        unclaim.assert_called_once_with("task")
+        unclaim.assert_called_once_with("task", None)
         self.assertIn("manually", email.call_args.args[1])
         self.assertIn("dirty", email.call_args.args[2])
         self.assertEqual(state["state"], "IDLE")
@@ -322,11 +324,11 @@ class HoldAndContinue(unittest.TestCase):
                           return_value=("m1", "t1", "HOLD", False, "")), \
              patch.object(main.gmail_client, "mark_processed") as mark, \
              patch.object(main, "_commit_pending_work", return_value=["committed pending work"]), \
-             patch.object(main.gdoc_client, "hold_task", return_value=True) as hold, \
+             patch.object(main.task_source, "hold_task", return_value=True) as hold, \
              patch.object(main, "_reset_to_base_branch", return_value=[]), \
              patch.object(main, "email") as email:
             self.assertTrue(main.check_commands(state))
-        hold.assert_called_once_with("task A")
+        hold.assert_called_once_with("task A", None)
         mark.assert_called_once_with("m1")
         self.assertEqual(state["state"], "IDLE")
         self.assertNotIn("item", state)
@@ -369,6 +371,32 @@ class HoldAndContinue(unittest.TestCase):
             self.assertFalse(main.check_commands(state))
         mark.assert_not_called()
 
+    def test_hold_persists_item_id_and_resume_passes_it_through(self):
+        state = self.task_state() | {"item_id": "PVTI_7", "item_url": "https://x/issues/7"}
+        with patch.object(main, "_commit_pending_work", return_value=[]), \
+             patch.object(main.task_source, "hold_task", return_value=True) as hold, \
+             patch.object(main, "_reset_to_base_branch", return_value=[]), \
+             patch.object(main, "email"):
+            main._hold_task(state, "t1")
+        hold.assert_called_once_with("task A", "PVTI_7")
+        self.assertNotIn("item_id", state)
+        self.assertNotIn("item_url", state)
+        holds = json.loads(self.holds.read_text())
+        self.assertEqual(holds[0]["item_id"], "PVTI_7")
+        self.assertEqual(holds[0]["saved"]["item_id"], "PVTI_7")
+        self.assertEqual(holds[0]["saved"]["item_url"], "https://x/issues/7")
+
+        resumed = {"state": "IDLE"}
+        with patch.object(main, "git"), \
+             patch.object(main.task_source, "unhold_task", return_value=True) as unhold, \
+             patch.object(main.task_source, "claim_task", return_value=True) as claim, \
+             patch.object(main, "email"):
+            main._resume_held_task(resumed, holds[0])
+        unhold.assert_called_once_with("task A", "PVTI_7")
+        claim.assert_called_once_with("task A", "PVTI_7")
+        self.assertEqual(resumed["item_id"], "PVTI_7")
+        self.assertEqual(resumed["item_url"], "https://x/issues/7")
+
     def test_pick_resumes_requested_hold_first(self):
         saved = {"state": "WAIT_APPROVAL", "item": "task A", "slug": "a", "branch": "codebot-a",
                  "session_id": "sid", "thread_id": "t1"}
@@ -377,9 +405,9 @@ class HoldAndContinue(unittest.TestCase):
              "requested_at": 5, "note": "approved, go ahead", "saved": saved}]))
         state = {"state": "IDLE"}
         with patch.object(main, "git", return_value="") as git, \
-             patch.object(main.gdoc_client, "unhold_task", return_value=True), \
-             patch.object(main.gdoc_client, "claim_task", return_value=True), \
-             patch.object(main.gdoc_client, "list_pending_items") as listing, \
+             patch.object(main.task_source, "unhold_task", return_value=True), \
+             patch.object(main.task_source, "claim_task", return_value=True), \
+             patch.object(main.task_source, "list_pending_items") as listing, \
              patch.object(main, "_detect_capabilities"), \
              patch.object(main, "_seed_self_healing_items"), \
              patch.object(main, "email"), \
@@ -400,8 +428,8 @@ class HoldAndContinue(unittest.TestCase):
         self.holds.write_text(json.dumps([hold]))
         state = {"state": "IDLE"}
         with patch.object(main, "git"), \
-             patch.object(main.gdoc_client, "unhold_task", return_value=True), \
-             patch.object(main.gdoc_client, "claim_task", return_value=True), \
+             patch.object(main.task_source, "unhold_task", return_value=True), \
+             patch.object(main.task_source, "claim_task", return_value=True), \
              patch.object(main, "email") as email:
             main._resume_held_task(state, hold)
         self.assertEqual(state["state"], "WAIT_MERGE")

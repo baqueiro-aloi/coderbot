@@ -42,7 +42,7 @@ def fenced(label: str, placeholder: str) -> str:
 
 
 PICK = """Here is the list of pending improvements for the $project project (from the
-backlog Google Doc). Some items may depend on others; pick the single item that
+backlog). Some items may depend on others; pick the single item that
 makes most sense to implement NEXT (prerequisites first, easier enablers first).
 
 Each top-level bullet is one item. Indented sub-bullets under an item are the user's

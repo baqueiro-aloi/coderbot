@@ -38,7 +38,8 @@ existing_value() {
 print_current_settings() {
   local var value
   echo "Current non-secret settings:"
-  for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GIT_AUTHOR_NAME \
+  for var in CODEBOT_REPO_PATH CODEBOT_TASK_SOURCE CODEBOT_DOC_ID CODEBOT_GH_PROJECT_URL \
+    CODEBOT_PROJECT_NAME GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_MODEL OPENCODE_PROVIDER OPENCODE_MODEL \
     CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
     CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_EFFORT CODEBOT_DOC_SECTION \
@@ -230,19 +231,45 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
   done
 
   while true; do
-    raw=$(prompt_var "CODEBOT_DOC_ID" \
-      "Google Doc id of the improvements backlog. Open the Doc and copy the id from its URL (.../document/d/<ID>/edit) — pasting the full URL also works." \
-      "")
-    if [[ "$raw" =~ /document/d/([a-zA-Z0-9_-]+) ]]; then
-      CODEBOT_DOC_ID="${BASH_REMATCH[1]}"
-    else
-      CODEBOT_DOC_ID="$raw"
-    fi
-    if [[ -n "$CODEBOT_DOC_ID" && "$CODEBOT_DOC_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-      break
-    fi
-    echo "  -> that doesn't look like a valid Doc id or URL." >&2
+    CODEBOT_TASK_SOURCE=$(prompt_var "CODEBOT_TASK_SOURCE" \
+      "Where the backlog lives: 'gdoc' (a Google Doc) or 'github' (a GitHub Projects v2 board whose cards are issues of the target repo)." \
+      "gdoc")
+    case "$CODEBOT_TASK_SOURCE" in
+    gdoc | github) break ;;
+    esac
+    echo "  -> enter 'gdoc' or 'github'." >&2
   done
+
+  CODEBOT_DOC_ID="$(existing_value "CODEBOT_DOC_ID")"
+  CODEBOT_GH_PROJECT_URL="$(existing_value "CODEBOT_GH_PROJECT_URL")"
+  if [ "$CODEBOT_TASK_SOURCE" = "gdoc" ]; then
+    while true; do
+      raw=$(prompt_var "CODEBOT_DOC_ID" \
+        "Google Doc id of the improvements backlog. Open the Doc and copy the id from its URL (.../document/d/<ID>/edit) — pasting the full URL also works." \
+        "")
+      if [[ "$raw" =~ /document/d/([a-zA-Z0-9_-]+) ]]; then
+        CODEBOT_DOC_ID="${BASH_REMATCH[1]}"
+      else
+        CODEBOT_DOC_ID="$raw"
+      fi
+      if [[ -n "$CODEBOT_DOC_ID" && "$CODEBOT_DOC_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        break
+      fi
+      echo "  -> that doesn't look like a valid Doc id or URL." >&2
+    done
+  else
+    while true; do
+      raw=$(prompt_var "CODEBOT_GH_PROJECT_URL" \
+        "URL of the GitHub Projects v2 board (https://github.com/orgs/<owner>/projects/<n> or /users/<owner>/projects/<n>). The board needs Status columns Ready / In progress / In review / Done (names configurable in .env)." \
+        "")
+      if [[ "$raw" =~ github\.com/(orgs|users)/[^/]+/projects/[0-9]+ ]]; then
+        CODEBOT_GH_PROJECT_URL="${BASH_REMATCH[0]}"
+        CODEBOT_GH_PROJECT_URL="https://${CODEBOT_GH_PROJECT_URL}"
+        break
+      fi
+      echo "  -> that doesn't look like a GitHub project URL." >&2
+    done
+  fi
 
   while true; do
     CODEBOT_USER_EMAIL=$(prompt_var "CODEBOT_USER_EMAIL" \
@@ -260,8 +287,10 @@ if [ "$KEEP_EXISTING_ENV" = "no" ]; then
     gh_token_default="$(gh auth token 2>/dev/null || true)"
     [ -n "$gh_token_default" ] && gh_note="Detected via the authenticated gh CLI — press Enter to use it."
   fi
+  gh_scopes="'repo' scope"
+  [ "$CODEBOT_TASK_SOURCE" = "github" ] && gh_scopes="'repo' AND 'project' scopes (the board is read and updated through it)"
   GH_TOKEN=$(prompt_var "GH_TOKEN" \
-    "GitHub personal access token with 'repo' scope; used for git pushes over HTTPS and gh pr/api calls. $gh_note" \
+    "GitHub personal access token with $gh_scopes; used for git pushes over HTTPS and gh pr/api calls. $gh_note" \
     "$gh_token_default" "yes")
 
   while true; do
@@ -452,7 +481,9 @@ if [ "$KEEP_EXISTING_ENV" = "yes" ]; then
 else
   cat >"$ENV_FILE" <<EOF
 CODEBOT_REPO_PATH=$CODEBOT_REPO_PATH
+CODEBOT_TASK_SOURCE=$CODEBOT_TASK_SOURCE
 CODEBOT_DOC_ID=$CODEBOT_DOC_ID
+CODEBOT_GH_PROJECT_URL=$CODEBOT_GH_PROJECT_URL
 CODEBOT_PROJECT_NAME=$CODEBOT_PROJECT_NAME
 GH_TOKEN=$GH_TOKEN
 GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME
@@ -476,7 +507,8 @@ EOF
 
   echo
   echo "Wrote $ENV_FILE with:"
-  for var in CODEBOT_REPO_PATH CODEBOT_DOC_ID CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
+  for var in CODEBOT_REPO_PATH CODEBOT_TASK_SOURCE CODEBOT_DOC_ID CODEBOT_GH_PROJECT_URL \
+    CODEBOT_PROJECT_NAME GH_TOKEN GIT_AUTHOR_NAME \
     GIT_AUTHOR_EMAIL CODEBOT_AGENT CLAUDE_CODE_OAUTH_TOKEN CLAUDE_MODEL OPENCODE_PROVIDER \
     OPENCODE_MODEL CODEBOT_USER_EMAIL CODEBOT_LOG_LEVEL CODEBOT_QUALITY_GATE_MAX_ROUNDS \
     CODEBOT_ARCHIVE_MAX_ROUNDS CODEBOT_BASE_BRANCH CLAUDE_API_KEY CLAUDE_EFFORT \

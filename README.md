@@ -1,10 +1,11 @@
 # coderbot
 
-Autonomous coding agent that works the improvements backlog (a Google Doc,
-`CODEBOT_DOC_ID`) of whatever target repo you point it at (`CODEBOT_REPO_PATH`),
-plans with the managed OpenSpec workflow via a selectable headless coding agent
-(Claude Code or OpenCode), and talks to the maintainer exclusively by email
-(`CODEBOT_USER_EMAIL`). Several instances can share one mailbox and backlog doc.
+Autonomous coding agent that works the improvements backlog — a Google Doc
+(`CODEBOT_DOC_ID`) or a GitHub Projects v2 board (`CODEBOT_TASK_SOURCE=github`) —
+of whatever target repo you point it at (`CODEBOT_REPO_PATH`), plans with the
+managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
+OpenCode), and talks to the maintainer exclusively by email (`CODEBOT_USER_EMAIL`).
+Several instances can share one mailbox and backlog.
 
 ## Repository layout
 
@@ -53,7 +54,14 @@ supplies managed, pinned OpenSpec 1.9.0 and Superpowers v6.3.0 integrations for
 both Claude Code and OpenCode. Target repos and host profiles do not need their
 own Superpowers installation.
 
-## Backlog doc format
+## Backlog sources
+
+`CODEBOT_TASK_SOURCE` selects where tasks come from: `gdoc` (default) or `github`.
+`main.py` only talks to the `task_source` façade; each backend implements the same
+operations (list pending, claim, hold, unclaim, mark done, seed an item, link the
+PR). Items keep their text as the identity the agent sees, plus a backend id.
+
+### Google Doc (`CODEBOT_TASK_SOURCE=gdoc`)
 
 The backlog is a Google Doc (`CODEBOT_DOC_ID`). Each **top-level bullet** is one task.
 Indented sub-bullets under it are the user's clarifications and sub-requirements of
@@ -80,15 +88,44 @@ a task it already claimed but lost track of (e.g. `data/` was rebuilt); the
 `Codebot[n]` tagged task(s) with the lowest number; otherwise the coding agent chooses
 among all pending items (prerequisites and enablers first).
 
+### GitHub Projects v2 (`CODEBOT_TASK_SOURCE=github`)
+
+The backlog is a Projects v2 board (`CODEBOT_GH_PROJECT_URL`, e.g.
+`https://github.com/orgs/getriverly/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
+`CODEBOT_GH_PROJECT_NUMBER`). A task is a board card backed by an **issue of the
+target repo** (the checkout's `origin`, or `CODEBOT_GH_ISSUE_REPO`): the issue title
+is the task text, its body the clarifications, and images in the body are downloaded
+to `data/gh_images/`. Draft cards, pull-request cards, cards from other repos and
+closed issues are ignored (the log says how many).
+
+Cards move through the board's **Status** field (names configurable, matched
+case-insensitively):
+
+| Event | Status | Labels on the issue |
+|---|---|---|
+| pickable | one of `CODEBOT_GH_PROJECT_PICK_STATUSES` (default `Ready`) | none |
+| picked | `In progress` | `codebot:<instance>` |
+| PR opened | `In review` (PR linked in a comment; PR body says `Closes #n`) | unchanged |
+| HOLD | unchanged | `codebot-hold:<instance>` |
+| ABORT | first pick status | removed |
+| merged / DONE | `Done` | removed |
+
+`Codebot[n]` in an issue title orders tasks as in the Doc; without a tag, a
+single-select **Priority** field on the board orders them by option position.
+Self-healing items (missing e2e harness / Code Review workflow) are created as real
+issues and placed in the pick column. The labels are created on first start;
+`GH_TOKEN` needs the `project` scope in addition to `repo` (a classic PAT's
+`read:project` cannot move cards; an SSO-protected org needs the token authorized).
+
 ## Lifecycle
 
 ```
-IDLE → pick item (see "Backlog doc format") → claim it → branch <instance>-<slug>
+IDLE → pick item (see "Backlog sources") → claim it → branch <instance>-<slug>
       → EXPLORING → PROPOSING → email proposal → WAIT_APPROVAL
      → IMPLEMENTING → VERIFYING → INTERNAL_REVIEW → E2E (when present)
      → ARCHIVING → OPEN_PR → WAIT_REVIEW ⇄ ADDRESS_REVIEW → PUSHING (if review fixes exist)
      → email PR + evidence → WAIT_MERGE ⇄ ADDRESS_PR_THREADS → PUSHING
-     → merge → strike item through in the Doc → IDLE
+     → merge → mark item done (strike through in the Doc / "Done" on the board) → IDLE
 WAIT_REVIEW / WAIT_MERGE ⇄ RESOLVE_CONFLICTS → PUSHING   (when the base branch moves)
 ```
 
@@ -143,7 +180,7 @@ thread with:
 
 - **retry** — try the failed step again (clears the counter),
 - **abort** — reset to a clean slate (same as the ABORT command below),
-- **complete** — mark the task done in the backlog doc and move on, or
+- **complete** — mark the task done in the backlog and move on, or
 - **instructions** — free-form guidance; codebot applies it in the working session, then
   resumes the failed step.
 
@@ -296,8 +333,12 @@ offers to run the consent flow in step 2 for you.
    # the container at the SAME path (Claude's per-project state and the e2e
    # docker stack both depend on host==container paths).
    CODEBOT_REPO_PATH=/absolute/path/to/target-repo
-   # Required: Google Doc id of the improvements backlog
+   # Backlog: "gdoc" (default) or "github"
+   CODEBOT_TASK_SOURCE=gdoc
+   # Required when gdoc: Google Doc id of the improvements backlog
    CODEBOT_DOC_ID=<the id from the doc's URL>
+   # Required when github: the Projects v2 board (GH_TOKEN then also needs "project")
+   CODEBOT_GH_PROJECT_URL=https://github.com/orgs/<owner>/projects/<n>
    # Required: the address codebot sends to and reads replies from
    CODEBOT_USER_EMAIL=you@example.com
    GH_TOKEN=<a PAT with repo scope, e.g. from `gh auth token`>
@@ -333,7 +374,7 @@ offers to run the consent flow in step 2 for you.
    # Optional; only needed if the target repo's own .claude/settings.json defines an
    # "apiKeyHelper" that reads this variable — see "Troubleshooting" below
    CLAUDE_API_KEY=
-   # Optional; only bullets under this heading of the backlog doc are picked
+   # Optional (gdoc); only bullets under this heading of the backlog doc are picked
    CODEBOT_DOC_SECTION=
    # Optional; hand-picked instance name (see "Multiple instances")
    CODEBOT_INSTANCE=
@@ -396,18 +437,20 @@ cd /opt/coderbot && docker compose -f docker-compose.ec2.yml up -d --build
 
 ## Multiple instances
 
-Any number of codebots can share one mailbox and backlog doc. Each installation
+Any number of codebots can share one mailbox and backlog. Each installation
 generates a stable identity on first start and persists it in `data/instance_id`
 (e.g. `codebot-x7k2`). That id tags the instance's email subjects (`[codebot-x7k2]`)
 and its git branches (`codebot-x7k2-<slug>`). `CODEBOT_INSTANCE` in `.env` overrides
 the generated name — but then it must be **unique per installation**.
 
-Instances coordinate only through the backlog doc: picking a task atomically
+Instances coordinate only through the backlog. In the Doc, picking a task atomically
 appends `[implementing: <instance>]` to its bullet (the write carries the doc revision
-it was read at, so two instances can't both win); claimed tasks are invisible to the
-others' PICK until the marker is removed on completion or abort. If an installation
-is retired mid-task, send it `ABORT <name>` first (which unclaims) or delete the
-marker by hand.
+it was read at, so two instances can't both win). On a GitHub board, picking adds the
+`codebot:<instance>` label to the issue and re-reads it; if another instance's label
+landed too, both back off and repick next tick. Claimed tasks are invisible to the
+others' PICK until the marker/label is removed on completion or abort. If an
+installation is retired mid-task, send it `ABORT <name>` first (which unclaims) or
+remove the marker/label by hand.
 
 All instances share the Gmail account; each one only reads replies on its own
 threads (subjects carry its prefix). Address mailbox commands to one instance —
@@ -439,7 +482,7 @@ claude -p 'say ok' --model "$CLAUDE_MODEL" --dangerously-skip-permissions  # COD
 opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
 gh auth status                                       # GH token works
 git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
-cd src && python3 -c 'import gdoc_client; print(gdoc_client.list_pending_items())'
+cd src && python3 -c 'import task_source; task_source.validate(); print(task_source.list_pending_items())'
 cd src && python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'
 ```
 

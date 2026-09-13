@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
-with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
+with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
 # Never let a test that reaches save_state() write the real data/state.json (it would

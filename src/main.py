@@ -14,7 +14,7 @@ from pathlib import Path
 import agent_runner
 import config
 import evidence
-import gdoc_client
+import task_source
 import gmail_client
 import prompts
 
@@ -408,11 +408,11 @@ def _seed_self_healing_items(state: dict) -> None:
     """Add a backlog item for each piece of missing infrastructure, unless an
     equivalent item is already pending or done."""
     if not state["has_e2e_harness"]:
-        if gdoc_client.ensure_item(E2E_HARNESS_ITEMS[state["e2e_kind"]]):
+        if task_source.ensure_item(E2E_HARNESS_ITEMS[state["e2e_kind"]]):
             log.info("self-healing: seeded backlog item for missing e2e harness (%s)",
                      state["e2e_kind"])
     if not state["has_code_review"]:
-        if gdoc_client.ensure_item(CODE_REVIEW_ITEM):
+        if task_source.ensure_item(CODE_REVIEW_ITEM):
             log.info("self-healing: seeded backlog item for missing Code Review workflow")
 
 
@@ -497,7 +497,7 @@ def do_pick(state: dict) -> None:
         _resume_held_task(state, requested[0])
         if state["state"] != "IDLE":
             return
-    items = gdoc_client.list_pending_items()
+    items = task_source.list_pending_items()
     log.info("backlog has %d pending item(s)", len(items))
     if not items:
         log.info("no pending items; staying idle")
@@ -518,16 +518,16 @@ def do_pick(state: dict) -> None:
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
     chosen = next((i for i in items
-                   if gdoc_client.normalize(i["text"]) == gdoc_client.normalize(choice["item"])),
+                   if task_source.normalize(i["text"]) == task_source.normalize(choice["item"])),
                   None)
     if chosen is None:
         # The bullet's own text is the identity mark_done matches on later, so a paraphrase
         # (or a sub-bullet picked as an item) must not become the task. Fail the tick; PICK
         # runs again next time.
         raise ValueError(f"PICK chose text that is not a pending item: {choice['item'][:200]!r}")
-    # Claim the item in the doc BEFORE any local work: the atomic marker write is what
+    # Claim the item in the backlog BEFORE any local work: the claim write is what
     # keeps two instances off the same task. Losing the race just means repicking.
-    if not gdoc_client.claim_task(chosen["text"]):
+    if not task_source.claim_task(chosen["text"], chosen.get("id") or None):
         log.info("item was claimed by another instance meanwhile; repicking next tick: %r",
                  chosen["text"][:80])
         return  # stay IDLE
@@ -536,6 +536,7 @@ def do_pick(state: dict) -> None:
              len(chosen.get("images", [])), choice.get("reason", ""))
     state.update(item=chosen["text"], item_detail=chosen["detail"],
                  item_images=chosen.get("images", []),
+                 item_id=chosen.get("id") or None, item_url=chosen.get("url") or None,
                  slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
@@ -583,7 +584,7 @@ def render_images(paths: list[str]) -> str:
     if not existing:
         return ""
     log.info("EXPLORE prompt includes %d screenshot(s): %s", len(existing), existing)
-    return ("\nThe user attached screenshot(s) to this item in the backlog doc. They show "
+    return ("\nThe user attached screenshot(s) to this item in the backlog. They show "
             "the exact UI/behavior the item refers to — view EACH one with the Read tool "
             "before drawing conclusions:\n"
             + "\n".join(f"- {p}" for p in existing) + "\n")
@@ -1155,6 +1156,9 @@ def do_open_pr(state: dict) -> None:
         _resume_archiving(state, "archive is not committed in HEAD")
         return
     body = f"Implements: {state['item']}\n\nOpenSpec archive: `{reference}`"
+    if state.get("item_url"):
+        # A GitHub issue backs the item: let the merge close it.
+        body += f"\n\nCloses {state['item_url']}"
     if state.get("pr_url"):
         state["pr_url"] = _https_url(state["pr_url"])
     else:
@@ -1182,6 +1186,12 @@ def do_open_pr(state: dict) -> None:
             state["pr_url"] = _https_url(output)
     state["pr_summary"] = body
     log.info("PR opened: %s", state["pr_url"])
+    try:
+        # Best-effort write-back (GitHub: move the item to review, link the PR on the
+        # issue). The PR exists already; a backlog hiccup must not stall the flow.
+        task_source.note_pr(state["item"], state.get("item_id"), state["pr_url"])
+    except Exception:  # noqa: BLE001
+        log.exception("could not link the PR on the backlog item")
     if not state.get("has_code_review"):
         log.info("no Code Review workflow detected for this task; finalizing without a review wait")
         finalize_pr(state)
@@ -2219,8 +2229,8 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch",
-              "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
+RESET_KEYS = ("item", "item_id", "item_url", "item_detail", "item_images", "base_sha", "slug",
+              "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
               "pr_title_guidance",
@@ -2232,34 +2242,34 @@ RESET_KEYS = ("item", "item_detail", "item_images", "base_sha", "slug", "branch"
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
-    """End the task successfully: strike the item in the backlog doc, optionally reset the
+    """End the task successfully: mark the item done in the backlog, optionally reset the
     checkout to a clean base branch (needed when finishing before a merge — the tree may
     hold proposal artifacts or a stale branch), email confirmation, and land in IDLE."""
     item = state.get("item", "")
-    struck = gdoc_client.mark_done(item) if item else False
+    struck = task_source.mark_done(item, state.get("item_id")) if item else False
     if struck:
-        log.info("struck item through in backlog doc; task complete")
-        body = f"{note}\n\nThe item was marked done in the backlog doc:\n\n{item}"
+        log.info("marked item done in the backlog; task complete")
+        body = f"{note}\n\nThe item was marked done in the backlog:\n\n{item}"
         subj = "task complete"
     else:
-        log.warning("could not locate item in doc to strike through: %r", item[:80])
+        log.warning("could not locate item in the backlog to mark done: %r", item[:80])
         # Also release the claim: a leftover self-claim would make do_pick's resume
         # filter re-pick this FINISHED task deterministically on the next idle tick,
         # long before the user can act on this email.
         try:
-            gdoc_client.unclaim_task(item)
+            task_source.unclaim_task(item, state.get("item_id"))
         except Exception:  # noqa: BLE001 — best-effort; the email below covers it
             log.exception("could not unclaim the unmatched item")
         subj = "task complete — mark the item manually"
-        body = (f"{note}\n\nBut I could not find this item in the doc to strike it "
-                f"through:\n\n{item}\n\nPlease strike it through (or delete it) promptly "
+        body = (f"{note}\n\nBut I could not find this item in the backlog to mark it "
+                f"done:\n\n{item}\n\nPlease mark it done (or delete it) promptly "
                 "— until then it may be picked again.")
     if reset_repo:
         problems = _reset_to_base_branch()
         if problems:
             body += ("\n\nThe repo reset finished with issues (I'll re-check before the "
                      "next task):\n- " + "\n- ".join(problems))
-    body += "\n\nI'll pick up the next pending item from the backlog doc."
+    body += "\n\nI'll pick up the next pending item from the backlog."
     email(state, subj, body)
     for key in RESET_KEYS:
         state.pop(key, None)
@@ -2377,21 +2387,20 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     # instance (including this one, if its state was wiped) would ever pick it again.
     if aborted_task and aborted_task != "-":
         try:
-            if not gdoc_client.unclaim_task(aborted_task):
-                problems.append("could not find the backlog item to remove its "
-                                "[implementing] claim marker — remove it manually")
-        except Exception:  # noqa: BLE001 — a doc hiccup must not block the reset
+            if not task_source.unclaim_task(aborted_task, state.get("item_id")):
+                problems.append("could not find the backlog item to release its "
+                                "claim — release it manually")
+        except Exception:  # noqa: BLE001 — a backlog hiccup must not block the reset
             log.exception("unclaim failed during reset")
-            problems.append("could not remove the item's [implementing] claim marker in "
-                            "the backlog doc — remove it manually or no instance will "
-                            "pick the task")
+            problems.append("could not release the item's claim in the backlog — "
+                            "release it manually or no instance will pick the task")
     status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
               else "The reset finished with issues (I'll re-check the tree before starting the "
                    "next task):\n- " + "\n- ".join(problems))
     email(state, "aborted — reset to IDLE",
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
-          "from the backlog doc.", new_thread=new_thread)
+          "from the backlog.", new_thread=new_thread)
     for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
@@ -2440,23 +2449,24 @@ def _commit_pending_work(state: dict) -> list[str]:
 
 
 def _hold_task(state: dict, thread_id: str | None) -> None:
-    """Park the current task: save its work and state, mark it on hold in the backlog
-    doc, and return to IDLE so the next task can start. CONTINUE on the task's thread
+    """Park the current task: save its work and state, mark it on hold in the backlog,
+    and return to IDLE so the next task can start. CONTINUE on the task's thread
     brings it back with top priority."""
     item = state.get("item", "")
     notes = _commit_pending_work(state)
     try:
-        if not gdoc_client.hold_task(item):
-            notes.append("could not mark the item on hold in the backlog doc — another "
-                         "instance may pick it up; add [on hold: me] by hand")
-    except Exception:  # noqa: BLE001 — a doc hiccup must not lose the hold
+        if not task_source.hold_task(item, state.get("item_id")):
+            notes.append("could not mark the item on hold in the backlog — another "
+                         "instance may pick it up; mark it on hold by hand")
+    except Exception:  # noqa: BLE001 — a backlog hiccup must not lose the hold
         log.exception("hold marker failed")
-        notes.append("could not update the backlog doc (see logs)")
+        notes.append("could not update the backlog (see logs)")
     resume_state = state["state"]
     saved = {k: state[k] for k in RESET_KEYS if k in state}
     saved["state"] = resume_state
     holds = [h for h in _load_holds() if h.get("thread_id") != state.get("thread_id")]
     holds.append({"thread_id": state.get("thread_id") or thread_id, "item": item,
+                  "item_id": state.get("item_id"),
                   "slug": state.get("slug"), "branch": state.get("branch"),
                   "held_at": time.time(), "requested": False, "note": "", "saved": saved})
     _save_holds(holds)
@@ -2500,11 +2510,12 @@ def _resume_held_task(state: dict, hold: dict) -> None:
     note = hold.get("note", "")
     item = hold.get("item", "")
     log.info("resuming held task %r at %s", item[:80], resume_state)
+    item_id = hold.get("item_id")
     try:
-        gdoc_client.unhold_task(item)
+        task_source.unhold_task(item, item_id)
     except Exception:  # noqa: BLE001
         log.exception("could not remove the hold marker")
-    if not gdoc_client.claim_task(item):
+    if not task_source.claim_task(item, item_id):
         log.warning("held task could not be re-claimed (struck or claimed elsewhere); dropping "
                     "the hold: %r", item[:80])
         _save_holds([h for h in _load_holds() if h is not hold and h.get("thread_id") != hold.get("thread_id")])
@@ -2913,17 +2924,28 @@ def main() -> None:
     validate_managed_runtime()
     if not config.USER_EMAIL:
         raise SystemExit("CODEBOT_USER_EMAIL must be set in .env")
-    if not config.DOC_ID:
+    if config.TASK_SOURCE not in task_source.SOURCES:
+        raise SystemExit("CODEBOT_TASK_SOURCE must be one of: " + ", ".join(task_source.SOURCES))
+    if config.TASK_SOURCE == "gdoc" and not config.DOC_ID:
         raise SystemExit("CODEBOT_DOC_ID must be set in .env (the backlog Google Doc id)")
+    if config.TASK_SOURCE == "github" and not (config.GH_PROJECT_OWNER and config.GH_PROJECT_NUMBER):
+        raise SystemExit("CODEBOT_GH_PROJECT_URL (or CODEBOT_GH_PROJECT_OWNER and "
+                         "CODEBOT_GH_PROJECT_NUMBER) must be set in .env when "
+                         "CODEBOT_TASK_SOURCE=github")
     # .exists() not .is_dir(): in a git worktree .git is a file.
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
+    try:
+        task_source.validate()
+    except RuntimeError as err:
+        raise SystemExit(f"backlog ({config.TASK_SOURCE}) unavailable: {err}") from err
     _acquire_single_instance_lock()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
-    log.info("codebot starting; instance=%s agent=%s repo=%s doc=%s",
-             config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.DOC_ID)
-    # Re-assert the doc claim for an in-flight task: one picked before claim markers
+    log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",
+             config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.TASK_SOURCE,
+             task_source.describe())
+    # Re-assert the backlog claim for an in-flight task: one picked before claim markers
     # existed (or whose marker was hand-deleted) is invisible protection-wise, and a
     # newly spawned instance could pick it too. Best-effort — a claim now held by
     # ANOTHER instance is only logged (claim_task does); the user sorts out that
@@ -2931,8 +2953,8 @@ def main() -> None:
     try:
         startup_state = load_state()
         if startup_state.get("item"):
-            gdoc_client.claim_task(startup_state["item"])
-    except Exception:  # noqa: BLE001 — an unreachable doc must not block startup
+            task_source.claim_task(startup_state["item"], startup_state.get("item_id"))
+    except Exception:  # noqa: BLE001 — an unreachable backlog must not block startup
         log.exception("could not re-assert the in-flight task's claim at startup")
     backoff = config.POLL_INTERVAL_SECONDS
     while True:

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
+with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
 import config

@@ -42,12 +42,48 @@ def _instance_id() -> str:
 
 INSTANCE_ID = _instance_id()
 
-# Backlog Google Doc. Required — set CODEBOT_DOC_ID in .env (validated in main()).
+# Where the backlog lives: "gdoc" (a Google Doc, the default so existing deployments
+# keep working) or "github" (a GitHub Projects v2 board). Validated in main().
+TASK_SOURCE = (os.environ.get("CODEBOT_TASK_SOURCE") or "gdoc").strip().lower()
+
+# Backlog Google Doc. Required when TASK_SOURCE is "gdoc" (validated in main()).
 DOC_ID = os.environ.get("CODEBOT_DOC_ID", "")
 # When set, only tasks under this heading in the backlog doc are offered to PICK; bullets
 # under any other heading (e.g. items still under discussion) are not worked on. Empty
 # (the default) means every top-level bullet in the doc is a candidate.
 DOC_SECTION = os.environ.get("CODEBOT_DOC_SECTION") or ""
+# Backlog GitHub Projects v2 board, when TASK_SOURCE is "github". Either the project
+# URL (https://github.com/orgs/<owner>/projects/<n> or /users/<owner>/projects/<n>)
+# or the owner and number separately. Required in github mode (validated in main()).
+_GH_PROJECT_URL_RE = re.compile(r"github\.com/(?:orgs|users)/([^/\s]+)/projects/(\d+)")
+
+
+def _gh_project() -> tuple[str, int]:
+    url = os.environ.get("CODEBOT_GH_PROJECT_URL") or ""
+    m = _GH_PROJECT_URL_RE.search(url)
+    if m:
+        return m.group(1), int(m.group(2))
+    owner = (os.environ.get("CODEBOT_GH_PROJECT_OWNER") or "").strip()
+    number = (os.environ.get("CODEBOT_GH_PROJECT_NUMBER") or "").strip()
+    return owner, int(number) if number.isdigit() else 0
+
+
+GH_PROJECT_OWNER, GH_PROJECT_NUMBER = _gh_project()
+# Status columns an item may sit in to be pickable (comma-separated; default "Ready"),
+# and the columns codebot moves items to as work progresses. Names must match the
+# board's Status options (case-insensitive).
+GH_PROJECT_PICK_STATUSES = [s.strip() for s in
+                            (os.environ.get("CODEBOT_GH_PROJECT_PICK_STATUSES") or "Ready")
+                            .split(",") if s.strip()]
+GH_PROJECT_ACTIVE_STATUS = os.environ.get("CODEBOT_GH_PROJECT_ACTIVE_STATUS") or "In progress"
+GH_PROJECT_REVIEW_STATUS = os.environ.get("CODEBOT_GH_PROJECT_REVIEW_STATUS") or "In review"
+GH_PROJECT_DONE_STATUS = os.environ.get("CODEBOT_GH_PROJECT_DONE_STATUS") or "Done"
+# Issue labels that mark which instance owns an item: "<prefix>:<instance>" while
+# implementing, "<prefix>-hold:<instance>" while on hold.
+GH_LABEL_PREFIX = os.environ.get("CODEBOT_GH_LABEL_PREFIX") or "codebot"
+# "owner/repo" whose issues are the tasks (labels and seeded issues live there).
+# Defaults to the target checkout's origin remote.
+GH_ISSUE_REPO = (os.environ.get("CODEBOT_GH_ISSUE_REPO") or "").strip()
 # May be a comma-separated list: mail is SENT to the first address; mail FROM any of
 # them is trusted as the user (replies, approvals, ABORT/STATUS/DONE commands).
 USER_EMAIL = os.environ.get("CODEBOT_USER_EMAIL", "")

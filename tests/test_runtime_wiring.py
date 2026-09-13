@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 with patch.dict("sys.modules", {
     "gdoc_client": MagicMock(),
+    "task_source": MagicMock(),
     "gmail_client": MagicMock(),
 }):
     import main
@@ -92,6 +93,50 @@ class RuntimeValidationTests(unittest.TestCase):
                             self.validate()
                     finally:
                         path.write_text(contents)
+
+    def _main_env(self, **overrides):
+        values = {"AGENT": "claude", "USER_EMAIL": "user@example.test", "DOC_ID": "",
+                  "TASK_SOURCE": "gdoc", "GH_PROJECT_OWNER": "", "GH_PROJECT_NUMBER": 0}
+        values.update(overrides)
+        return [patch.object(main.config, key, value, create=True) for key, value in values.items()]
+
+    def _run_main(self, patches):
+        with patch.object(main, "validate_managed_runtime", create=True), \
+             patch.object(main.task_source, "SOURCES", ("gdoc", "github"), create=True), \
+             patch.object(main, "_acquire_single_instance_lock", create=True), \
+             patch.object(main.threading.Thread, "start"), \
+             patch.object(main, "load_state", return_value={"state": "IDLE"}), \
+             patch.object(main, "check_commands", return_value=False), \
+             patch.object(main.config, "REPO_PATH", Path(self.temporary_directory.name)), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.dict(main.PHASES, {"IDLE": MagicMock(side_effect=SystemExit("tick reached"))}):
+            for p in patches:
+                p.start()
+            try:
+                main.main()
+            finally:
+                for p in patches:
+                    p.stop()
+
+    def test_gdoc_source_still_requires_doc_id(self):
+        with self.assertRaisesRegex(SystemExit, "CODEBOT_DOC_ID"):
+            self._run_main(self._main_env())
+
+    def test_github_source_requires_project_and_not_doc_id(self):
+        with self.assertRaisesRegex(SystemExit, "CODEBOT_GH_PROJECT_URL"):
+            self._run_main(self._main_env(TASK_SOURCE="github"))
+        with patch.object(main.task_source, "validate"), \
+             patch.object(main.task_source, "describe", return_value="project=acme/1"):
+            with self.assertRaisesRegex(SystemExit, "tick reached"):
+                self._run_main(self._main_env(TASK_SOURCE="github", GH_PROJECT_OWNER="acme",
+                                              GH_PROJECT_NUMBER=1))
+
+    def test_unknown_source_and_backend_validation_failures_stop_startup(self):
+        with self.assertRaisesRegex(SystemExit, "CODEBOT_TASK_SOURCE"):
+            self._run_main(self._main_env(TASK_SOURCE="jira"))
+        with patch.object(main.task_source, "validate", side_effect=RuntimeError("no project scope")):
+            with self.assertRaisesRegex(SystemExit, "no project scope"):
+                self._run_main(self._main_env(DOC_ID="doc"))
 
     def test_main_validates_runtime_before_backlog_selection(self):
         backlog_selection = MagicMock(side_effect=SystemExit("backlog selection reached"))

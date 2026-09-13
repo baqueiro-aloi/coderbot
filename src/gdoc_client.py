@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 
 import config
 from google_auth import load_credentials
+from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
 log = logging.getLogger(__name__)
 
@@ -30,10 +31,6 @@ def _docs_service():
     return build("docs", "v1", credentials=load_credentials(), cache_discovery=False)
 
 
-def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
 # Claim marker an instance appends to a task's bullet line when it picks the task.
 CLAIM_RE = re.compile(r"\s*\[implementing:\s*([^\]]*?)\s*\]", re.IGNORECASE)
 # Hold marker: the task was paused by the user (HOLD command) and waits for CONTINUE.
@@ -46,17 +43,6 @@ def held_by(text: str) -> str | None:
     """The instance named in the text's hold marker, or None when not on hold."""
     m = HOLD_RE.search(text)
     return (m.group(1).lower() or "?") if m else None
-# Optional ordering tag the user writes in a task's text ("Codebot[1]", "codebot[2]"):
-# tagged tasks are picked before untagged ones, in ascending order.
-PRIORITY_RE = re.compile(r"\bcodebot\s*\[\s*(\d+)\s*\]", re.IGNORECASE)
-
-
-def priority_of(text: str) -> int | None:
-    """The Codebot[n] ordering number in the text, or None when untagged."""
-    m = PRIORITY_RE.search(text)
-    return int(m.group(1)) if m else None
-
-
 def strip_claims(text: str) -> str:
     """The task text with any [implementing: ...] / [on hold: ...] markers removed."""
     return _MARKER_RE.sub("", text)
@@ -181,7 +167,8 @@ def _pending(tasks: list[dict]) -> list[dict]:
             continue  # another instance is implementing it
         if held_by(t["text"]):
             continue  # paused by the user; resumed only through CONTINUE
-        items.append({"text": strip_claims(t["text"]).strip(), "detail": t["detail"],
+        items.append({"id": "", "url": "",
+                      "text": strip_claims(t["text"]).strip(), "detail": t["detail"],
                       "images": t["images"], "claimed_by_me": owner is not None,
                       "priority": priority_of(t["text"])})
     return items
@@ -344,7 +331,7 @@ def _find_mine(doc: dict) -> dict | None:
 CAS_ATTEMPTS = 3
 
 
-def claim_task(item_text: str) -> bool:
+def claim_task(item_text: str, item_id: str | None = None) -> bool:
     """Atomically append this instance's claim marker to the task's bullet line so no
     other instance picks it. False when another instance holds the claim (or the task
     vanished/completed) — the caller should pick something else."""
@@ -374,7 +361,7 @@ def claim_task(item_text: str) -> bool:
     return False
 
 
-def unclaim_task(item_text: str) -> bool:
+def unclaim_task(item_text: str, item_id: str | None = None) -> bool:
     """Remove this instance's claim marker so the task returns to the pickable pool
     (used when a task is aborted without completing). False when the task (or a
     settled write) could not be found."""
@@ -439,7 +426,7 @@ def ensure_item(item_text: str) -> bool:
     return True
 
 
-def hold_task(item_text: str) -> bool:
+def hold_task(item_text: str, item_id: str | None = None) -> bool:
     """Replace this instance's claim marker with an [on hold: <instance>] marker so no
     instance picks the task until CONTINUE. False when the task could not be found."""
     marker = f" [on hold: {config.INSTANCE_ID}]"
@@ -471,7 +458,7 @@ def hold_task(item_text: str) -> bool:
     return False
 
 
-def unhold_task(item_text: str) -> bool:
+def unhold_task(item_text: str, item_id: str | None = None) -> bool:
     """Remove this instance's hold marker (the caller then claims the task as usual)."""
     service = _docs_service()
     for _attempt in range(CAS_ATTEMPTS):
@@ -492,7 +479,7 @@ def unhold_task(item_text: str) -> bool:
     return False
 
 
-def mark_done(item_text: str) -> bool:
+def mark_done(item_text: str, item_id: str | None = None) -> bool:
     """Strike through the task matching item_text, sub-bullets included, and drop its
     claim markers (the strikethrough itself now marks it done). False if not found."""
     service = _docs_service()
@@ -535,3 +522,17 @@ def mark_done(item_text: str) -> bool:
     log.warning("could not mark done after %d attempts (doc busy): %r",
                 CAS_ATTEMPTS, item_text[:80])
     return False
+
+
+def note_pr(item_text: str, item_id: str | None, pr_url: str) -> None:
+    """The doc has no per-item link to write back; the user gets the PR by email."""
+
+
+def validate() -> None:
+    """Startup check for the doc backend (the doc itself is read lazily)."""
+    if not config.DOC_ID:
+        raise RuntimeError("CODEBOT_DOC_ID must be set in .env (the backlog Google Doc id)")
+
+
+def describe() -> str:
+    return f"doc={config.DOC_ID}"

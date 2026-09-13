@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-with patch.dict(sys.modules, {"gdoc_client": Mock(), "gmail_client": Mock()}):
+with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 
 # Never let a test that reaches save_state() write the real data/state.json (it would
@@ -534,6 +534,34 @@ class NativePullRequestTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTPS"):
                 main.do_open_pr(state)
 
+    def test_open_pr_links_backlog_issue_and_notes_pr(self):
+        state = self.state() | {"item_id": "PVTI_1",
+                                "item_url": "https://github.com/acme/project/issues/9"}
+        responses = [
+            subprocess.CompletedProcess([], 0, "[]", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
+        ]
+        with patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.task_source, "note_pr") as note_pr, \
+             patch.object(main, "_enter_review_wait"):
+            main.do_open_pr(state)
+
+        create = process.call_args_list[1].args[0]
+        body = create[create.index("--body") + 1]
+        self.assertIn("Closes https://github.com/acme/project/issues/9", body)
+        note_pr.assert_called_once_with(state["item"], "PVTI_1",
+                                        "https://github.com/acme/project/pull/42")
+
+    def test_open_pr_survives_backlog_write_back_failure(self):
+        state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
+        with patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.task_source, "note_pr", side_effect=RuntimeError("gh down")), \
+             patch.object(main, "_enter_review_wait") as enter_wait:
+            main.do_open_pr(state)
+        enter_wait.assert_called_once_with(state)
+        self.assertNotIn("Closes", state["pr_summary"])
+
     def test_open_pr_restart_reuses_persisted_url_without_external_creation(self):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
         with patch.object(main, "git", side_effect=self.ready_git) as git, \
@@ -908,7 +936,7 @@ class PushPhaseTests(unittest.TestCase):
         merged = subprocess.CompletedProcess([], 0, '{"state":"MERGED","mergeable":"MERGEABLE"}', "")
         with patch.object(main.agent_runner, "run", return_value=verdict), \
              patch.object(main.subprocess, "run", return_value=merged), \
-             patch.object(main.gdoc_client, "mark_done", return_value=True), \
+             patch.object(main.task_source, "mark_done", return_value=True), \
              patch.object(main, "email"):
             main.do_merge_reply(state, "merge")
 
