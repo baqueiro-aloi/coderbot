@@ -30,6 +30,29 @@ ENVIRONMENT = """Execution environment (facts — do not re-derive or guess):
        if config.ENVIRONMENT_NOTES else "")
 
 
+# Appended to ENVIRONMENT (so every agentic phase gets it). Wall-clock time per phase is
+# dominated by sequential tool calls and single-threaded investigation; the agent is far
+# faster when it fans independent work out to subagents and batches independent tool
+# calls. Stated as a standing instruction so each phase prompt only needs to name what
+# is parallelisable there.
+PARALLELISM = """
+Work in parallel whenever possible — this is a standing instruction for every phase:
+- Whenever a piece of work splits into independent parts (investigating separate areas
+  of the codebase, implementing independent tasks, running independent test suites or
+  checks, addressing unrelated review threads), delegate the parts to MULTIPLE
+  SUBAGENTS (the Agent / Task tool) launched together in ONE message, so they run
+  concurrently, then integrate their results yourself.
+- Issue independent tool calls (file reads, searches, shell commands with no dependency
+  on each other) in the SAME message rather than one after another.
+- Prefer several focused subagents over one long sequential investigation. Give each
+  subagent a self-contained brief and ask it for a concise conclusion, not a file dump.
+- Only serialise steps that genuinely depend on an earlier result (e.g. running tests
+  after the code they test is written, or committing after all edits are done).
+"""
+
+ENVIRONMENT += PARALLELISM
+
+
 # Fence markers for interpolating UNTRUSTED text (raw e2e output, code-review comments,
 # email reply bodies). The model is told the block is data, so an embedded instruction —
 # including a literal "NEED_USER_INPUT:" — cannot hijack the control flow.
@@ -72,7 +95,9 @@ for this item: treat them as part of the requirement and cover every one of them
 This phase is exploration only. Do not implement the change or modify project code.
 Invoke `coderbot-openspec-workflow`, `openspec-explore`, and `brainstorming`.
 Investigate the codebase, clarify the requirements, identify integration points and
-risks, and find the simplest solid design. For any material decision affecting scope,
+risks, and find the simplest solid design. Split the investigation across several
+subagents running in parallel (e.g. one per affected area: data model, API, UI, tests,
+existing conventions) and consolidate their findings. For any material decision affecting scope,
 observable behavior, compatibility, or acceptance criteria, return `NEED_USER_INPUT`;
 make minor decisions autonomously. End with a concise summary of your conclusions.
 
@@ -127,6 +152,10 @@ IMPLEMENT = ENVIRONMENT + """
 The user approved the proposal. Invoke `coderbot-openspec-workflow`,
 `openspec-apply-change`, and `test-driven-development` to implement change $slug.
 Work through every task in tasks.md, marking each complete only after its test passes.
+Tasks that do not depend on each other (e.g. touching different modules or layers)
+MUST be implemented concurrently by multiple subagents, each following strict TDD for
+its task; serialise only the tasks that build on another task's output, and run the
+integrated test suite yourself once the parallel tasks land.
 If a test or technical check fails, invoke `systematic-debugging` before fixing it.
 Mandatory:
 $e2e_note
@@ -140,7 +169,9 @@ $e2e_report_note
 VERIFY = ENVIRONMENT + """
 Invoke `coderbot-openspec-workflow` for the verification phase of change
 $slug. Run fresh, complete relevant verification commands in this phase; do not reuse
-prior evidence. Report each command and result. Strictly validate the active OpenSpec
+prior evidence. Run independent verification commands (unit tests, lint, type checks,
+e2e, OpenSpec validation) in parallel — in one message or via subagents — rather than
+one after another. Report each command and result. Strictly validate the active OpenSpec
 change and confirm all OpenSpec apply tasks are complete. Emit exactly one completion contract as the final standalone line, with no
 text after it:
 QUALITY_GATE: {"status":"pass","commands":["<command: result>"],"openspec":"pass","tasks":"N/N"}
@@ -151,6 +182,7 @@ Invoke `coderbot-openspec-workflow` for internal review of change
 $slug. Internal review is mandatory. Invoke `requesting-code-review` with a fresh
 reviewer subagent. Prior test evidence and future external review are not substitutes.
 Fix every Critical or Important finding, rerun tests covering the fixes, and obtain a clean re-review.
+Fix unrelated findings concurrently via separate subagents.
 Commit all review fixes before emitting the pass contract. Emit
 exactly one completion contract as the final standalone line, with no text after it:
 INTERNAL_REVIEW: {"status":"pass","critical":0,"important":0,"tests":["<command: result>"]}
@@ -197,7 +229,8 @@ merits — the reviewer is helpful but pattern-based and not always right.
 
 For each thread: if it points to a genuine problem, fix it properly, keep the e2e
 tests passing and updated, and commit on branch $branch with clear messages; coderbot
-will push afterward (do NOT push, do NOT merge). If it is a false positive or not
+will push afterward (do NOT push, do NOT merge). Threads that touch unrelated code
+should be evaluated and fixed concurrently by separate subagents. If it is a false positive or not
 worth acting on, do NOT change code just to silence it. Do not commit any evidence
 file (screenshot, recording, report) — those are emailed, never committed to the repo
 (see the evidence contract above).
@@ -233,7 +266,8 @@ before merging, listed below with their thread ids. Evaluate each on its merits.
 
 For each thread: if it points to a genuine problem, fix it properly, keep e2e tests
 passing and updated, and commit on branch $branch with clear messages; coderbot will
-push afterward (do NOT push, do NOT merge). If it is not worth acting on, do NOT change
+push afterward (do NOT push, do NOT merge). Threads that touch unrelated code should
+be evaluated and fixed concurrently by separate subagents. If it is not worth acting on, do NOT change
 code just to silence it — the RESOLVE reason below is your reply. Do not commit any
 evidence file (screenshot, recording, report) — those are emailed, never committed to
 the repo (see the evidence contract above).
@@ -257,8 +291,9 @@ The user reviewed the PR and requested changes. Their feedback is below.
 
 """ + fenced("user feedback", "$feedback") + """
 
-Apply the requested changes on branch $branch, keep e2e tests passing and updated,
-and commit without pushing; coderbot will push afterward. If the feature's UI or flow
+Apply the requested changes on branch $branch (independent change requests in
+parallel via subagents), keep e2e tests passing and updated, and commit without
+pushing; coderbot will push afterward. If the feature's UI or flow
 changed, update its `@evidence` demo test too — it is re-recorded as the video sent to
 the user and must still show the feature working — including its on-screen narration
 (title card, per-step captions, closing caption), which must be updated to match the new

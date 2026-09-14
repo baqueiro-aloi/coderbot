@@ -33,6 +33,19 @@ Stop after reporting phase output and evidence; coderbot performs lifecycle side
 
 For a truly material unresolved decision, return `NEED_USER_INPUT` with the decision, options, and impact. Do not ask an interactive question. Otherwise continue autonomously within the current phase.
 
+## Parallelism
+
+Wall-clock time is the cost that matters in a headless run. Whenever work splits into independent parts, fan it out to multiple subagents launched together in one message and integrate the results; batch independent tool calls into one message. Typical fan-outs per phase:
+
+| Phase | Fan out |
+|---|---|
+| EXPLORING | One subagent per affected area (data model, API, UI, tests, conventions). |
+| IMPLEMENTING | One subagent per independent `tasks.md` task, each doing strict TDD; serialise only dependent tasks. |
+| VERIFYING | Independent verification commands (unit, lint, types, e2e, OpenSpec validation) run concurrently. |
+| INTERNAL_REVIEW / review threads | Unrelated findings or threads fixed by separate subagents. |
+
+Serialise only steps that genuinely depend on an earlier result. Parallel subagents inherit every hard boundary above.
+
 ## Strict TDD
 
 Strict TDD applies to inherited production code. If production implementation exists without an observed failing test, including work from a previous agent, delete or revert it and restart test-first. Tests added afterward are not TDD. Use `test-driven-development`; do not replace its RED-GREEN-REFACTOR procedure here.

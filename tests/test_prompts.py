@@ -45,6 +45,26 @@ class PromptContractTests(unittest.TestCase):
         self.assertNotIn("Begin implementation", rendered)
         self.assert_no_integration_authority(rendered)
 
+    def test_agentic_phases_ask_for_parallel_subagents(self):
+        for name in ("EXPLORE", "IMPLEMENT", "VERIFY", "INTERNAL_REVIEW", "FIX_E2E",
+                     "ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "APPLY_PR_FEEDBACK",
+                     "RESOLVE_CONFLICTS"):
+            with self.subTest(prompt=name):
+                template = getattr(prompts, name)
+                self.assertIn(prompts.PARALLELISM, template)
+                self.assertIn("MULTIPLE SUBAGENTS", " ".join(template.split()))
+        # Phase-specific fan-out hints where independent work is typical.
+        self.assertIn("subagents running in parallel", prompts.EXPLORE)
+        self.assertIn("implemented concurrently by multiple subagents", prompts.IMPLEMENT)
+        self.assertIn("in parallel", prompts.VERIFY)
+        self.assertIn("separate subagents", prompts.ADDRESS_REVIEW)
+        self.assertIn("separate subagents", prompts.ADDRESS_PR_THREADS)
+        # One-shot classifiers stay single-call: no subagent instructions there.
+        for name in ("PICK", "CLASSIFY_APPROVAL_REPLY", "CLASSIFY_PR_REPLY",
+                     "CLASSIFY_STUCK_REPLY", "CLASSIFY_QUESTION_REPLY", "PR_TITLE"):
+            with self.subTest(prompt=name):
+                self.assertNotIn("subagent", getattr(prompts, name).lower())
+
     def test_propose_creates_only_reviewable_openspec_artifacts(self):
         e2e_note = main._e2e_note({"has_e2e_harness": True, "e2e_kind": "playwright"})
         rendered = prompts.render(
