@@ -199,6 +199,18 @@ PING_SCHEDULE_SECONDS = _parse_durations(
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))
 
+# Evidence videos (the stitched Playwright mp4) are uploaded to Google Drive and
+# linked from the email and the activity trail instead of being attached: a demo
+# longer than a couple of minutes blows through the Gmail cap above, and an issue
+# comment cannot carry an attachment at all. "off" — or a failed upload — falls
+# back to attaching the file, subject to the cap.
+EVIDENCE_UPLOAD = (os.environ.get("CODEBOT_EVIDENCE_UPLOAD") or "on").strip().lower() not in (
+    "off", "0", "false", "no")
+# Drive folder that receives the videos (a folder id, works for shared drives too).
+# Empty: a "Codebot evidence" folder is found or created at the root of My Drive.
+DRIVE_FOLDER_ID = (os.environ.get("CODEBOT_DRIVE_FOLDER_ID") or "").strip()
+DRIVE_FOLDER_NAME = "Codebot evidence"
+
 # Liveness heartbeat. A daemon thread touches HEARTBEAT_PATH every poll interval as
 # long as the current tick has run for less than HEARTBEAT_MAX_TICK (so a legitimate
 # multi-hour agent call stays healthy); once a tick exceeds that ceiling the process

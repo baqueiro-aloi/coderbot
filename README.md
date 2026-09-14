@@ -337,7 +337,8 @@ offers to run the consent flow in step 2 for you.
 1. **Google OAuth client**: in Google Cloud Console create a project, enable the
    Gmail, Google Docs and Google Drive APIs, create an OAuth client of type
    *Desktop app*, and download its JSON to `data/credentials.json`. The consent
-   asks for full Drive access (the activity trail posts comments on the doc).
+   asks for full Drive access (the activity trail posts comments on the doc and
+   evidence videos are uploaded to Drive).
 2. **Consent flow** (on the host, from the coderbot repo root):
    ```bash
    pip install -r requirements.txt
@@ -573,6 +574,20 @@ evidence for the PR email:
   `.webm` clips.
 - **Newman**: re-runs the feature's collection(s) and attaches the newest
   generated report file from `e2e/test-results/`.
+
+The stitched mp4 is not attached: it is uploaded to Google Drive
+(`CODEBOT_EVIDENCE_UPLOAD`, default on) and linked from the PR email — and, because
+the activity trail mirrors email bodies, from the issue comment or doc thread too,
+so reviewers reading the ticket can watch it. Videos land in a `Codebot evidence`
+folder found or created at the root of the bot account's My Drive, or in the folder
+given by `CODEBOT_DRIVE_FOLDER_ID` (shared drives work). Each file is named
+`<branch>-<timestamp>.mp4` and shared as "anyone with the link" (reader); if a
+Workspace policy forbids link sharing the upload still succeeds and the link is
+sent, but only the bot account can open it. Any upload failure — including a
+`data/token.json` issued before the full `drive` scope was requested (re-run
+`python3 scripts/setup_oauth.py`) — is logged and the mp4 is attached instead,
+subject to `CODEBOT_MAX_ATTACH_BYTES` as before. Newman reports and agent-supplied
+screenshots are always attached, never uploaded.
 
 If no e2e harness is present for the task, no evidence is produced and the PR
 email is sent without an attachment.

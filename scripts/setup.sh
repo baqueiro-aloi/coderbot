@@ -421,7 +421,8 @@ else
     echo "Found $CREDENTIALS_PATH already — skipping credential creation."
   else
     echo "Codebot needs a Google OAuth client to read/update the backlog Doc,"
-    echo "read Drive, and send email. First, a browser window will open to the"
+    echo "comment on it and upload evidence videos via Drive, and send email."
+    echo "First, a browser window will open to the"
     echo "Google Cloud Console so you can create or select a project."
     read -r -p "Press Enter to continue..." _
     open_url "https://console.cloud.google.com/projectselector2/home/dashboard"

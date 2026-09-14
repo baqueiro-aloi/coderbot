@@ -13,6 +13,7 @@ from pathlib import Path
 
 import agent_runner
 import config
+import drive_client
 import evidence
 import task_source
 import gmail_client
@@ -339,6 +340,34 @@ def _collect_attachments(result, e2e_specs: list[str],
             seen.add(resolved)
             combined.append(f)
     return combined
+
+
+def _offload_evidence_video(state: dict, attachments: list[Path]) -> tuple[list[Path], str | None]:
+    """Upload the evidence video(s) to Drive and take them out of the attachment list;
+    returns (remaining attachments, link text or None). Only .mp4 files move — a
+    Newman report or an agent screenshot stays attached — and an mp4 whose upload
+    failed stays too, so gmail_client attaches it exactly as before (size cap and all).
+    Named by branch + timestamp: data/evidence.mp4 is overwritten every round, the
+    branch carries the instance name, and a re-finalize must not collide."""
+    if not config.EVIDENCE_UPLOAD:
+        return attachments, None
+    remaining, links = [], []
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stem = state.get("branch") or state.get("slug") or "evidence"
+    for path in attachments:
+        if path.suffix.lower() != ".mp4":
+            remaining.append(path)
+            continue
+        suffix = f"-{len(links) + 1}" if links else ""
+        link = drive_client.upload_evidence(path, f"{stem}-{stamp}{suffix}.mp4")
+        if link:
+            links.append(link)
+        else:
+            remaining.append(path)
+    if not links:
+        return remaining, None
+    state["evidence_url"] = links[0]
+    return remaining, "\n".join(links)
 
 
 # ---------------------------------------------------------------- capability detection
@@ -1336,10 +1365,15 @@ def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
     evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
+    evidence_files, video_url = _offload_evidence_video(state, evidence_files)
     body = f"Task: {state['item']}\nPR: {state['pr_url']}\n\n{state.get('pr_summary', '')}\n\n"
     if note:
         body += note + "\n\n"
-    if evidence_files:
+    if video_url:
+        # In the body (not a separate note) so email() mirrors it to the activity
+        # trail: the issue comment / doc thread gets the same link.
+        body += f"Evidence: a Playwright video demonstrating the feature.\nVideo: {video_url}\n"
+    elif evidence_files:
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
                             else "a Playwright video (mp4)")
         body += f"Attached: {attachment_desc} demonstrating the feature.\n"
@@ -1909,9 +1943,11 @@ def do_push(state: dict) -> None:
         _enter_review_wait(state)  # the resolved branch needs its re-review
     elif continuation == "feedback":
         attachments = [Path(path) for path in context.get("attachments", [])]
-        email(state, "PR updated",
-              f"Applied your feedback.\nPR: {state['pr_url']}\n\n{context.get('output', '')}",
-              attachments)
+        attachments, video_url = _offload_evidence_video(state, attachments)
+        body = f"Applied your feedback.\nPR: {state['pr_url']}\n\n{context.get('output', '')}"
+        if video_url:
+            body += f"\n\nVideo: {video_url}"
+        email(state, "PR updated", body, attachments)
         state["state"] = "WAIT_MERGE"
     else:
         _finish_address_pr_threads(state)
@@ -2274,7 +2310,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_i
               "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
-              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at")
+              "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
+              "evidence_url")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
