@@ -59,6 +59,10 @@ class OpenCodeResult:
         return claude_runner.sentinel_question(self.output)
 
     @property
+    def preamble(self) -> str:
+        return claude_runner.sentinel_preamble(self.output)
+
+    @property
     def attachments(self) -> list[str]:
         # Delegate path validation to the established implementation.
         return claude_runner.ClaudeResult(self.session_id, self.output).attachments

@@ -203,9 +203,14 @@ def handle_result(state: dict, result, phase: str) -> bool:
     attachments = [Path(p) for p in result.attachments if Path(p).exists()]
     log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
              phase, len(attachments))
-    email(state, f"question during {phase}",
-          f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n{question}\n\n"
-          "Reply to this email to continue.", attachments)
+    # The agent often puts the substance (a design to approve, options it weighed) ABOVE
+    # the sentinel line and only the ask after it; the user needs both to answer.
+    preamble = getattr(result, "preamble", "") or ""
+    body = f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n"
+    if preamble:
+        body += f"{preamble}\n\n---\n\n"
+    body += f"{question}\n\nReply to this email to continue."
+    email(state, f"question during {phase}", body, attachments)
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
@@ -462,7 +467,7 @@ def _seed_self_healing_items(state: dict) -> None:
         if task_source.ensure_item(E2E_HARNESS_ITEMS[state["e2e_kind"]]):
             log.info("self-healing: seeded backlog item for missing e2e harness (%s)",
                      state["e2e_kind"])
-    if not state["has_code_review"]:
+    if not state["has_code_review"] and config.SELF_HEAL_CODE_REVIEW:
         if task_source.ensure_item(CODE_REVIEW_ITEM):
             log.info("self-healing: seeded backlog item for missing Code Review workflow")
 

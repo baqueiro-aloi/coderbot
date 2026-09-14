@@ -142,3 +142,18 @@ class SentinelParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SentinelPreamble(unittest.TestCase):
+    def test_text_above_the_sentinel(self):
+        out = "**Design**\n- do X\n\nNEED_USER_INPUT: approve?"
+        self.assertEqual(claude_runner.sentinel_preamble(out), "**Design**\n- do X")
+        self.assertEqual(claude_runner.sentinel_question(out), "approve?")
+
+    def test_empty_without_sentinel_or_preamble(self):
+        self.assertEqual(claude_runner.sentinel_preamble("all done"), "")
+        self.assertEqual(claude_runner.sentinel_preamble("NEED_USER_INPUT: q?"), "")
+
+    def test_indented_sentinel_is_not_a_split_point(self):
+        out = "intro\n  NEED_USER_INPUT: quoted\nNEED_USER_INPUT: real"
+        self.assertEqual(claude_runner.sentinel_preamble(out), "intro\n  NEED_USER_INPUT: quoted")

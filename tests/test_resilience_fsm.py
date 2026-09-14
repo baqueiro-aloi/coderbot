@@ -15,8 +15,9 @@ import prompts
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
-def result(output="done", question=None):
-    return Mock(session_id="sid", output=output, question=question, attachments=[])
+def result(output="done", question=None, preamble=""):
+    return Mock(session_id="sid", output=output, question=question, preamble=preamble,
+                attachments=[])
 
 
 def verdict(**fields):
@@ -93,6 +94,22 @@ class QuestionCap(unittest.TestCase):
         self.assertEqual(state["return_state"], "EXPLORING")
         self.assertEqual(state["pending_question"], "which color?")
         self.assertEqual(state["question_rounds"], 1)
+
+    def test_question_email_carries_the_agent_text_above_the_sentinel(self):
+        state = {"state": "EXPLORING", "item": "t"}
+        with patch.object(main, "email") as email:
+            main.handle_result(state, result(question="approve?", preamble="**Design**\n- do X"),
+                               "EXPLORING")
+        body = email.call_args.args[2]
+        self.assertIn("**Design**\n- do X", body)
+        self.assertLess(body.index("- do X"), body.index("approve?"))
+        self.assertEqual(state["pending_question"], "approve?")
+
+    def test_question_email_without_preamble_is_unchanged(self):
+        state = {"state": "EXPLORING", "item": "t"}
+        with patch.object(main, "email") as email:
+            main.handle_result(state, result(question="approve?"), "EXPLORING")
+        self.assertNotIn("---", email.call_args.args[2])
 
     def test_real_result_clears_question_bookkeeping(self):
         state = {"state": "EXPLORING", "question_rounds": 3, "pending_question": "q"}

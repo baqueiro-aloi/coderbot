@@ -46,7 +46,7 @@ missing:
   required for codebot's detection and review-thread polling to see it.
   - **Missing**: the post-PR review wait is skipped and the PR is emailed to
     the user immediately, and codebot adds a backlog item requesting the
-    workflow.
+    workflow (set `CODEBOT_SELF_HEAL_CODE_REVIEW=off` to not add it).
 
 OpenSpec owns requirements, design, and tasks; Superpowers owns engineering
 discipline; coderbot owns state, archive timing, push, PR, and merge. The image

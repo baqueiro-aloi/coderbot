@@ -330,3 +330,20 @@ class LifecycleGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelfHealingCodeReviewSwitch(unittest.TestCase):
+    def _seed(self, enabled):
+        state = {"has_e2e_harness": True, "e2e_kind": "playwright", "has_code_review": False}
+        with patch.object(main.config, "SELF_HEAL_CODE_REVIEW", enabled), \
+             patch.object(main.task_source, "ensure_item", return_value=True) as ensure:
+            main._seed_self_healing_items(state)
+        return ensure
+
+    def test_seeds_code_review_item_by_default(self):
+        ensure = self._seed(True)
+        ensure.assert_called_once_with(main.CODE_REVIEW_ITEM)
+
+    def test_off_skips_code_review_item(self):
+        ensure = self._seed(False)
+        ensure.assert_not_called()

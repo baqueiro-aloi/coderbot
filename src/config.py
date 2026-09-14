@@ -152,6 +152,12 @@ MAX_STATE_FAILURES = int(os.environ.get("CODEBOT_MAX_STATE_FAILURES", "5"))
 QUESTION_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUESTION_MAX_ROUNDS", "8"))
 ARCHIVE_MAX_ROUNDS = int(os.environ.get("CODEBOT_ARCHIVE_MAX_ROUNDS", "3"))
 
+# Self-healing: when the target repo lacks a "Code Review" workflow, codebot seeds a
+# backlog item asking for one. "off" disables that item (the review wait is still
+# skipped for repos without the workflow). The e2e-harness item is not affected.
+SELF_HEAL_CODE_REVIEW = (os.environ.get("CODEBOT_SELF_HEAL_CODE_REVIEW") or "on").strip().lower() not in (
+    "off", "0", "false", "no")
+
 # After opening a PR, codebot waits for the "Code Review" GitHub Action
 # (OpenCodeReview) to finish and addresses its comments before notifying the user.
 # Give up waiting for a single run after this long (the action itself caps at 30 min).
