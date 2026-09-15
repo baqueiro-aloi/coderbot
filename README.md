@@ -310,8 +310,11 @@ irreversible, so the classifier must return an explicit `force: true` for that.
 
 ## Base-branch conflicts (RESOLVE_CONFLICTS)
 
-While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks its
-mergeability. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
+While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks the PR's
+state. A PR **merged on GitHub by someone else** finishes the task exactly as codebot's
+own merge would (item marked done, "task complete" email); one **closed without
+merging** stops with a stuck email asking whether to `complete`, `abort`, or reopen it
+and `retry`. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
 through RESOLVE_CONFLICTS: the working session merges `origin/$CODEBOT_BASE_BRANCH`
 into the branch (**merge, never rebase** — the branch is pushed), re-runs the tests and
 commits; codebot pushes and the automated review re-runs before the PR can merge. A

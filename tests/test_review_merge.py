@@ -259,6 +259,35 @@ class Conflicts(unittest.TestCase):
             self.assertFalse(main.check_pr_conflicts(state))
         self.assertNotIn("conflict_rounds", state)
 
+    def test_status_finishes_task_when_merged_externally(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "item": "task"}
+        with patch.object(main, "_pr_merge_state", return_value=("MERGED", "UNKNOWN")), \
+             patch.object(main, "_finish_task") as finish, \
+             patch.object(main, "trail"):
+            self.assertTrue(main.check_pr_status(state))
+        finish.assert_called_once()
+        self.assertFalse(finish.call_args.kwargs["reset_repo"])
+        self.assertIn("merged on GitHub", finish.call_args.args[1])
+
+    def test_status_escalates_when_closed_without_merge(self):
+        state = {"state": "WAIT_REVIEW", "pr_url": PR, "item": "task"}
+        with patch.object(main, "_pr_merge_state", return_value=("CLOSED", "UNKNOWN")), \
+             patch.object(main, "email") as email:
+            self.assertTrue(main.check_pr_status(state))
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertEqual(state["stuck_return"], "WAIT_REVIEW")
+        self.assertIn("closed", email.call_args.args[2])
+
+    def test_status_falls_through_to_conflicts(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR}
+        with patch.object(main, "_pr_merge_state", return_value=("OPEN", "CONFLICTING")):
+            self.assertTrue(main.check_pr_status(state))
+        self.assertEqual(state["state"], "RESOLVE_CONFLICTS")
+        state = {"state": "WAIT_MERGE", "pr_url": PR}
+        with patch.object(main, "_pr_merge_state", return_value=(None, None)):
+            self.assertFalse(main.check_pr_status(state))
+        self.assertEqual(state["state"], "WAIT_MERGE")
+
     def test_cap_escalates_to_stuck(self):
         state = {"state": "WAIT_MERGE", "pr_url": PR, "conflict_rounds": 3, "item": "t"}
         with patch.object(main.config, "CONFLICT_MAX_ROUNDS", 3), \

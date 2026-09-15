@@ -1693,14 +1693,44 @@ def _enter_conflict_resolution(state: dict) -> bool:
     return True
 
 
+def check_pr_status(state: dict) -> bool:
+    """One PR query per reply-less waiting tick (WAIT_REVIEW / WAIT_MERGE). Handles the
+    PR having been dealt with outside codebot — MERGED by someone on GitHub finishes the
+    task exactly as codebot's own merge would; CLOSED without merging escalates to the
+    user — and otherwise falls through to the conflict check. Returns True when the
+    state changed. Query failures change nothing — the next tick re-checks."""
+    if not state.get("pr_url"):
+        return False
+    pr_state, mergeable = _pr_merge_state(state["pr_url"])
+    if pr_state == "MERGED":
+        log.info("PR %s was merged on GitHub outside codebot; finishing the task",
+                 state["pr_url"])
+        trail(state, f"PR merged on GitHub: {state['pr_url']}")
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False)
+        return True
+    if pr_state == "CLOSED":
+        log.warning("PR %s was closed without merging; asking the user", state["pr_url"])
+        _enter_stuck(state, state["state"],
+                     f"The pull request was closed on GitHub without being merged.\nPR: "
+                     f"{state['pr_url']}\n\nIf the work landed some other way, reply "
+                     "'complete'; to drop the task reply 'abort'; to keep working on it, "
+                     "reopen the PR and reply 'retry'.")
+        return True
+    return _check_pr_conflicts(state, pr_state, mergeable)
+
+
 def check_pr_conflicts(state: dict) -> bool:
+    """Conflict check alone (see check_pr_status for the per-tick entry point)."""
+    if not state.get("pr_url"):
+        return False
+    return _check_pr_conflicts(state, *_pr_merge_state(state["pr_url"]))
+
+
+def _check_pr_conflicts(state: dict, pr_state, mergeable) -> bool:
     """While waiting with an open PR, watch for the base branch having moved under it
     (another PR merged). A CONFLICTING PR is routed to RESOLVE_CONFLICTS; returns True
     when the state changed. Query failures (and GitHub's transient "UNKNOWN" while it
     recomputes mergeability) change nothing — the next tick re-checks."""
-    if not state.get("pr_url"):
-        return False
-    pr_state, mergeable = _pr_merge_state(state["pr_url"])
     if pr_state != "OPEN":
         return False  # merged/closed/unknown: nothing to resolve here
     if mergeable != "CONFLICTING":
@@ -3327,19 +3357,21 @@ def _run_loop() -> None:
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
             if check_commands(state):
                 pass  # reset to IDLE; skip normal dispatch this tick
-            elif state["state"] == "WAIT_REVIEW" and check_pr_conflicts(state):
-                pass  # the base branch moved and conflicted the PR; rerouted to
-                # RESOLVE_CONFLICTS (or WAIT_STUCK) and dispatched next tick
+            elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
+                pass  # the PR was merged/closed on GitHub, or the base branch moved
+                # and conflicted it; rerouted (IDLE / WAIT_STUCK / RESOLVE_CONFLICTS)
+                # and dispatched next tick
             elif state["state"] == "WAIT_REVIEW":
                 handle_review_wait(state)
             elif state["state"] == "WAIT_MERGE":
                 # A pending reply speaks to the CURRENT PR and is consumed first —
-                # do_merge_reply handles CONFLICTING itself. Only a reply-less tick
-                # watches for a conflict, so a reply is never silently carried across
-                # a conflict detour.
+                # do_merge_reply handles MERGED and CONFLICTING itself. Only a
+                # reply-less tick watches the PR, so a reply is never silently carried
+                # across a conflict detour. Someone merging the PR on GitHub finishes
+                # the task here instead of leaving it waiting for a 'merge' forever.
                 handle_merge_wait(state)
                 if state["state"] == "WAIT_MERGE":
-                    check_pr_conflicts(state)
+                    check_pr_status(state)
             elif state["state"] in WAITS:
                 handle_wait(state)
             else:
