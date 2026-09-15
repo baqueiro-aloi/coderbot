@@ -90,3 +90,48 @@ class HealthcheckScript(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GracefulShutdown(unittest.TestCase):
+    """SIGTERM (docker stop, Spot interruption) must interrupt a running child and make
+    main() return without touching state.json."""
+
+    def tearDown(self):
+        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    def test_sigterm_kills_running_subprocess(self):
+        import signal
+        import threading
+        main._install_shutdown_handlers()
+        threading.Timer(0.3, os.kill, args=(os.getpid(), signal.SIGTERM)).start()
+        started = time.monotonic()
+        with self.assertRaises(main.ShutdownRequested) as ctx:
+            subprocess.run(["sleep", "30"], capture_output=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(str(ctx.exception), "SIGTERM")
+
+    def test_main_exits_cleanly_without_saving_state(self):
+        import signal
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(main.config, "DATA_DIR", pathlib.Path(tmp)), \
+                patch.object(main.config, "USER_EMAIL", "u@x"), \
+                patch.object(main.config, "TASK_SOURCE", "gdoc"), \
+                patch.object(main.config, "DOC_ID", "doc"), \
+                patch.object(main.config, "REPO_PATH", ROOT), \
+                patch.object(main, "validate_managed_runtime"), \
+                patch.object(main.task_source, "SOURCES", ("gdoc",)), \
+                patch.object(main, "load_state", return_value={"state": "IDLE"}), \
+                patch.object(main, "save_state") as save, \
+                patch.object(main, "_heartbeat_loop"), \
+                patch.object(main, "check_commands", return_value=False), \
+                patch.object(main, "_maybe_ping"), \
+                patch.object(main.time, "sleep", side_effect=AssertionError("the tick failed and the loop backed off")), \
+                patch.dict(main.PHASES, {"IDLE": lambda st: os.kill(os.getpid(), signal.SIGTERM)}):
+            main.main()  # returns instead of raising
+            save.assert_not_called()
+            self.assertIsNone(main._lock_handle)
+            main._acquire_single_instance_lock()  # lock was released on the way out
+            main._lock_handle.close()
+            main._lock_handle = None

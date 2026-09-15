@@ -4,6 +4,7 @@ import fcntl
 import json
 import logging
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -2952,6 +2953,36 @@ def _heartbeat_loop() -> None:
         time.sleep(config.POLL_INTERVAL_SECONDS)
 
 
+class ShutdownRequested(BaseException):
+    """Raised in the main thread by the SIGTERM/SIGINT handler. A BaseException (not
+    Exception) so it passes through every `except Exception` in the phases, and so
+    subprocess.run() kills whatever child is running (an agent call, e2e, git) on its
+    way out instead of waiting for it."""
+
+
+def _request_shutdown(signum, _frame) -> None:
+    raise ShutdownRequested(signal.Signals(signum).name)
+
+
+def _install_shutdown_handlers() -> None:
+    """Python is PID 1 in the container and has no default SIGTERM handler there, so a
+    plain `docker stop` (Spot interruption, host shutdown, redeploy) would be ignored
+    until Docker SIGKILLs us. With the handler we drop everything at once and exit;
+    the last completed tick is already on disk, so the next start resumes from it."""
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
+
+def _release_single_instance_lock() -> None:
+    global _lock_handle
+    if _lock_handle is not None:
+        try:
+            _lock_handle.close()
+        except OSError:
+            pass
+        _lock_handle = None
+
+
 def _acquire_single_instance_lock() -> None:
     """Refuse to start a second codebot against the same data/ dir — two processes would
     interleave state.json writes. The lock is released automatically when the process exits."""
@@ -3031,6 +3062,21 @@ def main() -> None:
             task_source.claim_task(startup_state["item"], startup_state.get("item_id"))
     except Exception:  # noqa: BLE001 — an unreachable backlog must not block startup
         log.exception("could not re-assert the in-flight task's claim at startup")
+    _install_shutdown_handlers()
+    try:
+        _run_loop()
+    except ShutdownRequested as sig:
+        # Deliberately no save_state: the tick in flight may have half-mutated the
+        # state dict, while state.json still holds the last completed tick (phases
+        # that need a mid-tick checkpoint save one themselves). Resuming from that
+        # re-runs the interrupted phase, which is the same recovery as a crash.
+        log.info("received %s; stopping (the in-flight tick is discarded, state.json "
+                 "keeps the last completed one)", sig)
+    finally:
+        _release_single_instance_lock()
+
+
+def _run_loop() -> None:
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
         _liveness["tick_started"] = time.time()

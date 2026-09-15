@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Coderbot: one agent on a Spot instance with a persistent EBS volume. The Auto
+  Scaling group keeps exactly one instance; a replacement re-attaches the volume
+  and resumes the same task. Deploy with `deploy.sh agent <name> ...` (it renders
+  the boot script into this template).
+
+Parameters:
+  AgentName:
+    Type: String
+    Description: "Instance identity (CODEBOT_INSTANCE): [a-z0-9-], unique per agent"
+    AllowedPattern: "[a-z0-9][a-z0-9-]{0,30}"
+  SharedStackName:
+    Type: String
+    Default: coderbot-shared
+    Description: Name of the shared.yaml stack to import secrets/policy/SG from.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (instances need a public IP; there is no NAT).
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: AZ of SubnetId (deploy.sh derives it). The volume lives here.
+  TargetRepo:
+    Type: String
+    Description: "GitHub repo the agent works on, as owner/name"
+    AllowedPattern: "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+  CoderbotRepoUrl:
+    Type: String
+    Default: https://github.com/obaqueiro/coderbot.git
+    Description: Where the instance clones coderbot itself from.
+  CoderbotRef:
+    Type: String
+    Default: main
+    Description: Branch, tag or commit of coderbot to run.
+  VolumeSizeGb:
+    Type: Number
+    Default: 40
+    MinValue: 20
+  SnapshotId:
+    Type: String
+    Default: ""
+    Description: Optional EBS snapshot to restore the agent's volume from (move AZ / recover).
+  InstanceTypes:
+    Type: CommaDelimitedList
+    Default: "m7g.large,m6g.large,t4g.large,c7g.xlarge,m7g.xlarge"
+    Description: arm64 Spot pool, most preferred first (all must be Graviton for the AMI).
+  OnDemandPercentage:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+    Description: "0 = all Spot. Set 100 to ride out a Spot drought without redeploying anything else."
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+  ReseedSecrets:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "true: overwrite the credential files on the volume with the secrets on next boot (they are otherwise seeded only once, because the app refreshes tokens in place)."
+  RootVolumeGb:
+    Type: Number
+    Default: 16
+
+Conditions:
+  HasSnapshot: !Not [!Equals [!Ref SnapshotId, ""]]
+
+Resources:
+  # ------------------------------------------------------------- the disk
+  # Everything that must outlive an instance: coderbot's data/, the bot's ~/.claude,
+  # both git checkouts and the Docker data-root (image build cache, e2e images).
+  Volume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      Size: !Ref VolumeSizeGb
+      VolumeType: gp3
+      Encrypted: true
+      SnapshotId: !If [HasSnapshot, !Ref SnapshotId, !Ref "AWS::NoValue"]
+      Tags:
+        - Key: Name
+          Value: !Sub "coderbot-${AgentName}"
+        - Key: "coderbot:agent"
+          Value: !Ref AgentName
+
+  # ------------------------------------------------------------- IAM
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - Fn::ImportValue: !Sub "${SharedStackName}-AgentBasePolicyArn"
+      Policies:
+        - PolicyName: attach-own-volume
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ec2:AttachVolume, ec2:DetachVolume]
+                Resource:
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:volume/${Volume}"
+                  - !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    "aws:ResourceTag/coderbot:agent": !Ref AgentName
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  # ------------------------------------------------------------- compute
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "coderbot-${AgentName}"
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            SubnetId: !Ref SubnetId
+            Groups:
+              - Fn::ImportValue: !Sub "${SharedStackName}-SecurityGroupId"
+        MetadataOptions:
+          HttpTokens: required     # IMDSv2 only (the Spot watcher uses it)
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs: { VolumeSize: !Ref RootVolumeGb, VolumeType: gp3, DeleteOnTermination: true }
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "coderbot-${AgentName}" }
+              - { Key: "coderbot:agent", Value: !Ref AgentName }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "coderbot-${AgentName}-root" }
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              # Rendered by deploy.sh: the bootstrap script is inlined below, the
+              # agent parameters land in /etc/coderbot/agent.conf.
+              mkdir -p /etc/coderbot
+              cat > /etc/coderbot/agent.conf <<'EOC'
+              AGENT_NAME=${AgentName}
+              VOLUME_ID=${Volume}
+              REGION=${AWS::Region}
+              SECRET_PREFIX=${SecretPrefix}
+              TARGET_REPO=${TargetRepo}
+              CODERBOT_REPO_URL=${CoderbotRepoUrl}
+              CODERBOT_REF=${CoderbotRef}
+              RESEED_SECRETS=${ReseedSecrets}
+              EOC
+              base64 -d <<'EOB' | gunzip > /usr/local/sbin/coderbot-bootstrap
+              __BOOTSTRAP_GZ_B64__
+              EOB
+              chmod 0755 /usr/local/sbin/coderbot-bootstrap
+              exec /usr/local/sbin/coderbot-bootstrap
+            - SecretPrefix:
+                Fn::ImportValue: !Sub "${SharedStackName}-SecretPrefix"
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub "coderbot-${AgentName}"
+      MinSize: "0"
+      MaxSize: "1"
+      DesiredCapacity: "1"
+      VPCZoneIdentifier: [!Ref SubnetId]   # one AZ: the volume cannot follow
+      CapacityRebalance: true              # replace early when interruption risk is high
+      HealthCheckType: EC2
+      DefaultInstanceWarmup: 300
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandBaseCapacity: 0
+          OnDemandPercentageAboveBaseCapacity: !Ref OnDemandPercentage
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Select [0, !Ref InstanceTypes]
+            - InstanceType: !Select [1, !Ref InstanceTypes]
+            - InstanceType: !Select [2, !Ref InstanceTypes]
+            - InstanceType: !Select [3, !Ref InstanceTypes]
+            - InstanceType: !Select [4, !Ref InstanceTypes]
+      Tags:
+        - { Key: Name, Value: !Sub "coderbot-${AgentName}", PropagateAtLaunch: true }
+        - { Key: "coderbot:agent", Value: !Ref AgentName, PropagateAtLaunch: true }
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 0
+        MaxBatchSize: 1
+        PauseTime: PT0S
+
+Outputs:
+  VolumeId:
+    Value: !Ref Volume
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup

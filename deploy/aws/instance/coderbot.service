@@ -1,0 +1,19 @@
+[Unit]
+Description=coderbot agent (docker compose)
+Requires=docker.service mnt-coderbot.mount
+After=docker.service mnt-coderbot.mount network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/mnt/coderbot/coderbot
+ExecStart=/usr/bin/docker compose --env-file /mnt/coderbot/agent.env -f deploy/aws/docker-compose.aws.yml up -d --build --remove-orphans
+# SIGTERM makes src/main.py drop the in-flight tick and exit within seconds; the
+# long timeout only matters if a child of it ignores the kill.
+ExecStop=/usr/bin/docker compose --env-file /mnt/coderbot/agent.env -f deploy/aws/docker-compose.aws.yml stop -t 120
+TimeoutStartSec=1800
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

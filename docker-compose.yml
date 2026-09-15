@@ -6,6 +6,9 @@ services:
   codebot:
     build: .
     restart: unless-stopped
+    # SIGTERM makes main.py drop the in-flight tick and exit (see src/main.py); the
+    # grace period only matters if a child ignores the kill.
+    stop_grace_period: 120s
     env_file: .env # also delivers CODEBOT_REPO_PATH into the container
     volumes:
       # App code: bind-mounted so code changes take effect on restart without an

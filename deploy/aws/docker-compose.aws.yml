@@ -1,0 +1,26 @@
+# AWS Spot deployment (deploy/aws): the same single service as docker-compose.ec2.yml
+# with every path on the agent's persistent EBS volume at /mnt/coderbot, so a
+# replacement instance resumes exactly where the reclaimed one stopped:
+#   /mnt/coderbot/coderbot    this repo (build context, mounted at /app)
+#   /mnt/coderbot/data        data/ (state.json, instance_id, token.json, outbox, ...)
+#   /mnt/coderbot/repo/<x>    the target repo; CODEBOT_REPO_PATH points here
+#   /mnt/coderbot/claude      the bot's ~/.claude (credentials + resumable sessions)
+#   /mnt/coderbot/codebot.env the shared .env from Secrets Manager
+#   /mnt/coderbot/agent.env   per-agent overrides written at boot (instance, repo path)
+# Started by the coderbot systemd unit (deploy/aws/instance/coderbot.service).
+services:
+  codebot:
+    build: /mnt/coderbot/coderbot
+    restart: unless-stopped
+    stop_grace_period: 120s
+    env_file:
+      - /mnt/coderbot/codebot.env
+      - /mnt/coderbot/agent.env
+    volumes:
+      - /mnt/coderbot/coderbot:/app
+      - /mnt/coderbot/data:/app/data
+      - ${CODEBOT_REPO_PATH:?pass --env-file /mnt/coderbot/agent.env (see instance/coderbot.service)}:${CODEBOT_REPO_PATH}
+      - /mnt/coderbot/claude:/home/bot/.claude
+      - /mnt/coderbot/claude.json:/seed/.claude.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /app

@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Coderbot: account-wide pieces shared by every agent stack (agent.yaml) — the
+  secrets every agent reads at boot, the base instance policy, and the security group.
+  Deploy once per account/region with `deploy.sh shared`.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC the agents run in (the default VPC is fine).
+  SecretPrefix:
+    Type: String
+    Default: coderbot
+    Description: Secrets Manager name prefix; the five secrets are created under <prefix>/...
+    AllowedPattern: "[A-Za-z0-9/_+=.@-]+"
+
+Resources:
+  # ------------------------------------------------------------- secrets
+  # Values are pushed by `deploy.sh secrets` (never through CloudFormation, so
+  # they stay out of the template and the stack's parameter history).
+  EnvSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretPrefix}/env"
+      Description: "Coderbot .env (shared by all agents; CODEBOT_INSTANCE and CODEBOT_REPO_PATH are overridden per agent)"
+      SecretString: "REPLACE_ME"
+  ClaudeCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretPrefix}/claude-credentials"
+      Description: "Contents of ~/.claude/.credentials.json (Claude CLI OAuth session)"
+      SecretString: "REPLACE_ME"
+  ClaudeJsonSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretPrefix}/claude-json"
+      Description: "Contents of ~/.claude.json, read-only seed for the bot's copy"
+      SecretString: "{}"
+  GoogleTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretPrefix}/google-token"
+      Description: "data/token.json (Google OAuth token from scripts/setup_oauth.py)"
+      SecretString: "REPLACE_ME"
+  GoogleCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${SecretPrefix}/google-credentials"
+      Description: "data/credentials.json (Google OAuth client)"
+      SecretString: "REPLACE_ME"
+
+  # ------------------------------------------------------------- network
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "coderbot agents: no ingress (shell access via SSM), all egress"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: coderbot-agent
+
+  # ------------------------------------------------------------- IAM
+  # What every agent instance needs. Each agent stack creates its own role (so the
+  # volume-attach permission can be pinned to that agent's volume by tag) and
+  # attaches this policy plus AmazonSSMManagedInstanceCore.
+  AgentBasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "coderbot agent instance: read the shared secrets, look up volumes"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadSecrets
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              - !Ref EnvSecret
+              - !Ref ClaudeCredentialsSecret
+              - !Ref ClaudeJsonSecret
+              - !Ref GoogleTokenSecret
+              - !Ref GoogleCredentialsSecret
+          - Sid: Describe
+            Effect: Allow
+            Action:
+              - ec2:DescribeVolumes
+              - ec2:DescribeInstances
+            Resource: "*"
+
+Outputs:
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+    Export: { Name: !Sub "${AWS::StackName}-SecurityGroupId" }
+  AgentBasePolicyArn:
+    Value: !Ref AgentBasePolicy
+    Export: { Name: !Sub "${AWS::StackName}-AgentBasePolicyArn" }
+  SecretPrefix:
+    Value: !Ref SecretPrefix
+    Export: { Name: !Sub "${AWS::StackName}-SecretPrefix" }

@@ -452,6 +452,11 @@ then:
 cd /opt/coderbot && docker compose -f docker-compose.ec2.yml up -d --build
 ```
 
+For a fleet of agents on Spot instances, each with a persistent EBS volume that a
+replacement instance re-attaches (so a reclaimed agent resumes its task), see
+[`deploy/aws/`](deploy/aws/README.md): two CloudFormation templates and a
+`deploy.sh` that drives them with the AWS CLI alone.
+
 ## Multiple instances
 
 Any number of codebots can share one mailbox and backlog. Each installation
