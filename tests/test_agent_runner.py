@@ -2,11 +2,68 @@
 import json
 import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import agent_runner
+
+
+class StreamingTests(unittest.TestCase):
+    def test_summarize_events(self):
+        cases = [
+            ({"type": "text", "part": {"text": "  Running lint now.\n"}}, "[agent] Running lint now."),
+            ({"type": "tool_use", "part": {"tool": "bash", "state": {
+                "status": "completed", "title": "ignored when command present",
+                "input": {"command": "cd frontend && npm run lint"}}}},
+             "[tool bash] cd frontend && npm run lint"),
+            ({"type": "tool_use", "part": {"tool": "read", "state": {
+                "status": "completed", "input": {"filePath": "/repo/app.py"}}}},
+             "[tool read] /repo/app.py"),
+            ({"type": "tool_use", "part": {"tool": "bash", "state": {
+                "status": "error", "error": "exit 1", "input": {"command": "false"}}}},
+             "[tool bash] false -> ERROR: exit 1"),
+            ({"type": "error", "error": "bad credentials"}, "[error] bad credentials"),
+            ({"type": "step_finish", "part": {"reason": "tool-calls", "tokens": {"total": 80114}}},
+             "[step] tool-calls tokens=80114"),
+            ({"type": "step_start", "part": {}}, None),
+            ({"type": "text", "part": {"text": "   "}}, None),
+        ]
+        for event, expected in cases:
+            with self.subTest(event=event):
+                self.assertEqual(agent_runner.summarize_event(event), expected)
+
+    def test_long_details_are_clipped(self):
+        line = agent_runner.summarize_event(
+            {"type": "tool_use", "part": {"tool": "bash", "state": {"input": {"command": "x" * 1000}}}})
+        self.assertLess(len(line), 400)
+        self.assertTrue(line.endswith("[...]"))
+
+    def test_run_streaming_hands_lines_over_as_they_arrive_and_returns_completed_process(self):
+        seen = []
+        script = "import sys; print('{\"type\":\"text\"}'); print('two'); sys.stderr.write('warn'); sys.exit(3)"
+        proc = agent_runner._run_streaming(
+            [sys.executable, "-c", script], cwd=None, env=dict(os.environ), timeout=30,
+            on_line=seen.append)
+        self.assertEqual(seen, ['{"type":"text"}', "two"])
+        self.assertEqual(proc.returncode, 3)
+        self.assertEqual(proc.stdout, '{"type":"text"}\ntwo\n')
+        self.assertEqual(proc.stderr, "warn")
+
+    def test_run_streaming_kills_on_timeout(self):
+        script = "import time, sys; print('started', flush=True); time.sleep(30)"
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            agent_runner._run_streaming([sys.executable, "-c", script], cwd=None,
+                                        env=dict(os.environ), timeout=0.5, on_line=lambda _: None)
+        self.assertIn("started", raised.exception.output)
+
+    def test_stream_line_logs_tool_calls_and_ignores_garbage(self):
+        with self.assertLogs("agent", level="INFO") as logs:
+            agent_runner._stream_line("not json")
+            agent_runner._stream_line('{"type":"step_start","part":{}}')
+            agent_runner._stream_line('{"type":"tool_use","part":{"tool":"bash","state":{"input":{"command":"ls"}}}}')
+        self.assertEqual(logs.output, ["INFO:agent:[tool bash] ls"])
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
@@ -38,7 +95,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
             '{"type":"text","sessionID":"ses_123","part":{"text":"second"}}',
         ])
         proc = subprocess.CompletedProcess([], 0, stdout, "")
-        with patch("agent_runner.subprocess.run", return_value=proc):
+        with patch("agent_runner._run_streaming", return_value=proc):
             result = agent_runner._opencode("hello")
         self.assertEqual(result.session_id, "ses_123")
         self.assertEqual(result.output, "first\nsecond")
@@ -46,20 +103,20 @@ class OpenCodeRunnerTests(unittest.TestCase):
     def test_raises_for_opencode_error_event(self):
         proc = subprocess.CompletedProcess(
             [], 0, '{"type":"error","sessionID":"ses_123","error":"bad credentials"}', "")
-        with patch("agent_runner.subprocess.run", return_value=proc):
+        with patch("agent_runner._run_streaming", return_value=proc):
             with self.assertRaisesRegex(RuntimeError, "bad credentials"):
                 agent_runner._opencode("hello")
 
     def test_raises_when_session_id_is_missing(self):
         proc = subprocess.CompletedProcess([], 0, '{"type":"text","part":{"text":"done"}}', "")
-        with patch("agent_runner.subprocess.run", return_value=proc):
+        with patch("agent_runner._run_streaming", return_value=proc):
             with self.assertRaisesRegex(RuntimeError, "missing sessionID"):
                 agent_runner._opencode("hello")
 
     def test_resume_passes_session_flag(self):
         proc = subprocess.CompletedProcess(
             [], 0, '{"type":"text","sessionID":"ses_123","part":{"text":"done"}}', "")
-        with patch("agent_runner.subprocess.run", return_value=proc) as run:
+        with patch("agent_runner._run_streaming", return_value=proc) as run:
             agent_runner._opencode("continue", "ses_123")
         command = run.call_args.args[0]
         self.assertEqual(command[0:2], ["opencode", "run"])
@@ -71,7 +128,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
         recovered = subprocess.CompletedProcess(
             [], 0, '{"type":"text","sessionID":"ses_new","part":{"text":"done"}}', "")
         with patch.object(agent_runner.config, "AGENT", "opencode"), \
-             patch("agent_runner.subprocess.run", side_effect=[missing, recovered]) as run:
+             patch("agent_runner._run_streaming", side_effect=[missing, recovered]) as run:
             result = agent_runner.resume("ses_missing", "continue")
         self.assertEqual(result.session_id, "ses_new")
         first_command = run.call_args_list[0].args[0]
@@ -83,7 +140,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
     def test_resume_does_not_recover_from_other_errors(self):
         failed = subprocess.CompletedProcess([], 1, "", "Error: authentication failed")
         with patch.object(agent_runner.config, "AGENT", "opencode"), \
-             patch("agent_runner.subprocess.run", return_value=failed) as run:
+             patch("agent_runner._run_streaming", return_value=failed) as run:
             with self.assertRaisesRegex(RuntimeError, "authentication failed"):
                 agent_runner.resume("ses_123", "continue")
         self.assertEqual(run.call_count, 1)
@@ -113,7 +170,7 @@ class OpenCodeRunnerTests(unittest.TestCase):
                           create=True), \
              patch.object(agent_runner.config, "BRIDGE_PLUGIN_DIR", self.bridge, create=True), \
              patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(existing)}), \
-             patch("agent_runner.subprocess.run", side_effect=responses) as run:
+             patch("agent_runner._run_streaming", side_effect=responses) as run:
             agent_runner.run("start")
             agent_runner.resume("ses_old", "continue")
             agent_runner.resume("ses_missing", "recover")

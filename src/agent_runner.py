@@ -3,11 +3,19 @@ import json
 import logging
 import os
 import subprocess
+import threading
 
 import claude_runner
 import config
 
 log = logging.getLogger(__name__)
+# Live account of what the agent is doing (tool calls as they complete, text as it is
+# emitted), so `docker compose logs -f` shows progress during a run instead of one
+# "opencode resume" line followed by silence for an hour.
+stream_log = logging.getLogger("agent")
+
+STREAM_TEXT_MAX_CHARS = 1500
+STREAM_DETAIL_MAX_CHARS = 300
 
 SENTINEL = claude_runner.SENTINEL
 OUTBOX_DIR = claude_runner.OUTBOX_DIR
@@ -68,6 +76,100 @@ class OpenCodeResult:
         return claude_runner.ClaudeResult(self.session_id, self.output).attachments
 
 
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split()) if "\n" not in text.strip() else text.strip()
+    return text if len(text) <= limit else text[:limit] + " [...]"
+
+
+def summarize_event(event: dict) -> str | None:
+    """One log line for an OpenCode JSON event, or None for events not worth a line.
+    Shapes (from `opencode run --format json`): {"type":"text","part":{"text":..}},
+    {"type":"tool_use","part":{"tool":..,"state":{"status","input","output","title"}}},
+    {"type":"step_start"|"step_finish","part":{..}}, {"type":"error","error":..}."""
+    kind = event.get("type")
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    if kind == "text":
+        text = part.get("text")
+        text = text.strip() if isinstance(text, str) else ""
+        return f"[agent] {_clip(text, STREAM_TEXT_MAX_CHARS)}" if text else None
+    if kind == "tool_use" or part.get("type") == "tool":
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inputs = state.get("input") if isinstance(state.get("input"), dict) else {}
+        detail = None
+        for key in ("command", "filePath", "path", "pattern", "description", "prompt", "url"):
+            if isinstance(inputs.get(key), str) and inputs[key].strip():
+                detail = inputs[key]
+                break
+        if detail is None:
+            detail = state.get("title") if isinstance(state.get("title"), str) else None
+        if detail is None:
+            detail = json.dumps(inputs, ensure_ascii=False) if inputs else ""
+        line = f"[tool {part.get('tool', '?')}] {_clip(detail, STREAM_DETAIL_MAX_CHARS)}".rstrip()
+        if state.get("status") == "error":
+            line += f" -> ERROR: {_clip(str(state.get('error', '')), STREAM_DETAIL_MAX_CHARS)}"
+        return line
+    if kind == "error":
+        return f"[error] {_clip(str(event.get('error', 'unknown OpenCode error')), STREAM_DETAIL_MAX_CHARS)}"
+    if kind == "step_finish":
+        tokens = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+        total = tokens.get("total")
+        return f"[step] {part.get('reason', 'finished')}" + (f" tokens={total}" if total else "")
+    return None
+
+
+def _stream_line(line: str) -> None:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return  # the final parse in _opencode reports malformed events
+    if not isinstance(event, dict):
+        return
+    summary = summarize_event(event)
+    if summary is None:
+        return
+    stream_log.log(logging.DEBUG if summary.startswith("[step]") else logging.INFO, "%s", summary)
+
+
+def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
+                   on_line=_stream_line) -> subprocess.CompletedProcess:
+    """subprocess.run(capture_output=True, text=True, timeout=...) equivalent that hands
+    every stdout line to on_line as it arrives. Raises subprocess.TimeoutExpired (with
+    the partial output) after killing the process, as subprocess.run would."""
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    stderr_chunks: list[str] = []
+    stderr_reader = threading.Thread(
+        target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    stderr_reader.start()
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, _kill_on_timeout)
+    timer.daemon = True
+    timer.start()
+    stdout_lines: list[str] = []
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            try:
+                on_line(line.rstrip("\n"))
+            except Exception:  # noqa: BLE001 — logging must never abort the run
+                log.exception("agent stream logging failed")
+        proc.wait()
+    finally:
+        timer.cancel()
+        stderr_reader.join(timeout=5)
+        proc.stdout.close()
+        proc.stderr.close()
+    stdout, stderr = "".join(stdout_lines), "".join(stderr_chunks)
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     cmd = ["opencode", "run", "--dir", str(config.REPO_PATH), "--model", config.OPENCODE_MODEL,
            "--auto", "--format", "json"]
@@ -76,8 +178,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     cmd.append(prompt)
     log.info("opencode %s model=%s (prompt %d chars)",
              "resume" if session_id else "run", config.OPENCODE_MODEL, len(prompt))
-    proc = subprocess.run(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
-                          capture_output=True, text=True,
+    proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
                           timeout=config.AGENT_TIMEOUT_SECONDS)
 
     output, errors, observed_session = [], [], None
