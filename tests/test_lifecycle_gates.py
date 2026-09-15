@@ -38,6 +38,22 @@ class GateParserTests(unittest.TestCase):
         self.assertEqual(parsed["tasks"], "7/7")
         self.assertIsNone(reason)
 
+    def test_quality_gate_accepts_optional_preexisting_failures(self):
+        contract = ('QUALITY_GATE: {"status":"pass","commands":["npm run lint: fail (100 errors)"],'
+                    '"preexisting":["npm run lint: same 100 errors on main"],'
+                    '"openspec":"pass","tasks":"7/7"}')
+        parsed, reason = main.parse_quality_gate("ok\n" + contract)
+        self.assertIsNone(reason)
+        self.assertEqual(parsed["preexisting"], ["npm run lint: same 100 errors on main"])
+        parsed, reason = main.parse_quality_gate(contract.replace(
+            '"preexisting":["npm run lint: same 100 errors on main"],', '"preexisting":[],'))
+        self.assertIsNone(reason)
+        for bad in ('"preexisting":"lint",', '"preexisting":[""],', '"preexisting":[1],'):
+            parsed, reason = main.parse_quality_gate(contract.replace(
+                '"preexisting":["npm run lint: same 100 errors on main"],', bad))
+            self.assertIsNone(parsed, bad)
+            self.assertIn("preexisting", reason)
+
     def test_quality_gate_rejects_invalid_contracts(self):
         invalid = {
             "missing": "verification notes",
@@ -212,6 +228,44 @@ class LifecycleGateTests(unittest.TestCase):
         self.assertEqual(state["return_state"], "VERIFYING")
         self.assertEqual(state["verify_round"], 2)
         email.assert_called_once()
+
+    def test_rejected_gate_round_feeds_reason_and_report_into_retry_and_stuck_email(self):
+        failing = ('Ran everything.\nQUALITY_GATE: {"status":"fail","commands":'
+                   '["npm run lint: fail (100 errors)"],"openspec":"pass","tasks":"7/7"}')
+        state = self.base_state(state="VERIFYING", verify_round=0)
+        with patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 2, create=True), \
+             patch.object(main.config, "BASE_BRANCH", "develop", create=True), \
+             patch.object(main.agent_runner, "resume",
+                          side_effect=[result(failing), result(failing)]) as resume, \
+             patch.object(main, "email") as email:
+            main.do_verify(state)
+            first_prompt = resume.call_args.args[1]
+            main.do_verify(state)
+            second_prompt = resume.call_args.args[1]
+
+        self.assertNotIn("REJECTED", first_prompt)
+        self.assertIn("against `develop` in a throwaway `git worktree`", first_prompt)
+        self.assertIn("REJECTED (round 1 of 2)", second_prompt)
+        self.assertIn("quality gate status is not pass", second_prompt)
+        self.assertIn('"npm run lint: fail (100 errors)"', second_prompt)
+        self.assertTrue(second_prompt.endswith(first_prompt))  # feedback is prepended only
+        self.assertEqual(state["state"], "WAIT_REPLY")
+        body = email.call_args.args[2]
+        self.assertIn("Latest reason: quality gate status is not pass", body)
+        self.assertIn("Last report from the agent:", body)
+        self.assertIn('"npm run lint: fail (100 errors)"', body)
+
+    def test_passing_gate_clears_feedback_and_first_round_gets_no_feedback(self):
+        state = self.base_state(state="VERIFYING", verify_round=0,
+                                verify_round_feedback={"reason": "stale", "report": "old"})
+        self.assertEqual(main._gate_feedback(state, "verify_round"), "")  # round 0: ignored
+        with patch.object(main.agent_runner, "resume", return_value=result(QUALITY_PASS)), \
+             patch.object(main, "_run_checked", side_effect=[
+                 "", json.dumps({"state": "all_done",
+                                 "progress": {"total": 7, "complete": 7, "remaining": 0}})]):
+            main.do_verify(state)
+        self.assertEqual(state["state"], "INTERNAL_REVIEW")
+        self.assertNotIn("verify_round_feedback", state)
 
     def test_gate_reply_is_parsed_instead_of_bypassing_gate(self):
         state = self.base_state(

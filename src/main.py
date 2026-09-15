@@ -5,6 +5,8 @@ import json
 import logging
 import re
 import signal
+import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -248,12 +250,18 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     value, reason = _parse_completion_contract(output, "QUALITY_GATE")
     if reason:
         return None, reason
-    if set(value) != {"status", "commands", "openspec", "tasks"}:
+    required = {"status", "commands", "openspec", "tasks"}
+    if not required <= set(value) or set(value) - required - {"preexisting"}:
         return None, "quality gate has unexpected or missing fields"
     if value.get("status") != "pass":
         return None, "quality gate status is not pass"
     if not _nonempty_strings(value.get("commands")):
         return None, "quality gate commands must contain nonempty strings"
+    # Failures the agent confirmed on the base branch too (see prompts.VERIFY); the task
+    # is not on the hook for them, but they are recorded so the report shows them.
+    preexisting = value.get("preexisting", [])
+    if not isinstance(preexisting, list) or (preexisting and not _nonempty_strings(preexisting)):
+        return None, "quality gate preexisting must be a list of nonempty strings"
     if value.get("openspec") != "pass":
         return None, "OpenSpec validation did not pass"
     match = re.fullmatch(r"(\d+)/(\d+)", value.get("tasks", ""))
@@ -807,18 +815,56 @@ def do_implement(state: dict) -> None:
     trail(state, "Implementation complete; verifying")
 
 
-def _gate_failed(state: dict, phase: str, counter: str, reason: str) -> None:
+GATE_REPORT_MAX_CHARS = 3000
+
+
+def _gate_report(output: str, marker: str) -> str:
+    """What the agent reported in a rejected gate round: its contract line(s) when it
+    emitted any (they carry the per-command results), else the tail of its output."""
+    lines = [line.strip() for line in output.splitlines() if line.strip().startswith(marker + ":")]
+    report = "\n".join(lines) if lines else output.strip()[-GATE_REPORT_MAX_CHARS:]
+    return report[:GATE_REPORT_MAX_CHARS]
+
+
+def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "") -> None:
     state[counter] = state.get(counter, 0) + 1
+    # Fed back into the next round's prompt (and the stuck email): a retry that repeats
+    # the identical prompt just gets the identical failing report again.
+    state[f"{counter}_feedback"] = {"reason": reason, "report": report}
     log.warning("%s result rejected (round %d/%d): %s", phase, state[counter],
                 config.QUALITY_GATE_MAX_ROUNDS, reason)
     if state[counter] < config.QUALITY_GATE_MAX_ROUNDS:
         state["state"] = phase
         return
-    email(state, f"{phase.lower().replace('_', ' ')} stuck - needs your help",
-          f"Task: {state['item']}\n\nThe {phase.lower().replace('_', ' ')} gate has failed "
-          f"{state[counter]} times. Latest reason: {reason}\n\nReply with guidance to continue.")
+    label = phase.lower().replace('_', ' ')
+    body = (f"Task: {state['item']}\n\nThe {label} gate has failed {state[counter]} times. "
+            f"Latest reason: {reason}\n\n")
+    if report:
+        body += f"Last report from the agent:\n\n{report}\n\n"
+    body += "Reply with guidance to continue."
+    email(state, f"{label} stuck - needs your help", body)
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
+
+
+def _gate_feedback(state: dict, counter: str) -> str:
+    """The rejection notice to prepend to a gate prompt, or "" on a fresh first round."""
+    feedback = state.get(f"{counter}_feedback")
+    if not state.get(counter) or not isinstance(feedback, dict):
+        return ""
+    return prompts.render(prompts.GATE_FEEDBACK, round=state[counter],
+                          max=config.QUALITY_GATE_MAX_ROUNDS,
+                          reason=feedback.get("reason", ""), report=feedback.get("report", ""))
+
+
+def _verify_prompt(state: dict) -> str:
+    return (_gate_feedback(state, "verify_round")
+            + prompts.render(prompts.VERIFY, slug=state["slug"], base=config.BASE_BRANCH))
+
+
+def _internal_review_prompt(state: dict) -> str:
+    return (_gate_feedback(state, "review_gate_round")
+            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
 
 
 def _complete_verify(state: dict, result) -> None:
@@ -826,7 +872,8 @@ def _complete_verify(state: dict, result) -> None:
         return
     parsed, reason = parse_quality_gate(result.output)
     if parsed is None:
-        _gate_failed(state, "VERIFYING", "verify_round", reason)
+        _gate_failed(state, "VERIFYING", "verify_round", reason,
+                     _gate_report(result.output, "QUALITY_GATE"))
         return
     try:
         slug = _validated_slug(state.get("slug"))
@@ -844,17 +891,18 @@ def _complete_verify(state: dict, result) -> None:
                 remaining != 0 or complete != total:
             raise ValueError("OpenSpec apply progress is incomplete")
     except Exception as error:
-        _gate_failed(state, "VERIFYING", "verify_round", str(error))
+        _gate_failed(state, "VERIFYING", "verify_round", str(error),
+                     _gate_report(result.output, "QUALITY_GATE"))
         return
     state.pop("verify_round", None)
+    state.pop("verify_round_feedback", None)
     state["review_gate_round"] = 0
     state["state"] = "INTERNAL_REVIEW"
     trail(state, "Verification passed; running internal review")
 
 
 def do_verify(state: dict) -> None:
-    result = agent_runner.resume(
-        state["session_id"], prompts.render(prompts.VERIFY, slug=state["slug"]))
+    result = agent_runner.resume(state["session_id"], _verify_prompt(state))
     _complete_verify(state, result)
 
 
@@ -863,17 +911,18 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
-        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason)
+        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
+                     _gate_report(result.output, "INTERNAL_REVIEW"))
         return
     state.pop("review_gate_round", None)
+    state.pop("review_gate_round_feedback", None)
     state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
 
 
 def do_internal_review(state: dict) -> None:
-    result = agent_runner.resume(
-        state["session_id"], prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
+    result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
     _complete_internal_review(state, result)
 
 
@@ -2625,6 +2674,18 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         email(state, "resumed", f"Resuming this task from state {state['state']}.")
 
 
+def _is_transient_network_error(error: BaseException) -> bool:
+    """A network blip talking to Gmail/GitHub (TLS EOF, connection reset, DNS, timeout,
+    5xx/429), as opposed to a fault in the state being executed."""
+    if isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError,
+                          socket.gaierror, socket.herror)):
+        return True
+    if type(error).__module__.startswith("httplib2"):  # ServerNotFoundError & co.
+        return True
+    status = getattr(getattr(error, "resp", None), "status", None)  # googleapiclient HttpError
+    return status in (429, 500, 502, 503, 504)
+
+
 def check_commands(state: dict) -> bool:
     """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
     the tick should skip normal dispatch (an ABORT reset or a DONE completion).
@@ -2637,8 +2698,12 @@ def check_commands(state: dict) -> bool:
     """
     try:
         polled = gmail_client.poll_command()
-    except Exception:
-        log.exception("command check could not poll gmail; skipping this tick")
+    except Exception as error:
+        if _is_transient_network_error(error):
+            log.warning("command check could not poll gmail (%s: %s); skipping this tick",
+                        type(error).__name__, error)
+        else:
+            log.exception("command check could not poll gmail; skipping this tick")
         return False
     if polled is None:
         return False
@@ -2875,9 +2940,8 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
     re-issue their own contract prompt (the answer alone would not make the session emit
     the completion contract again); every other phase gets the answer plus its rules."""
     if phase in ("VERIFYING", "INTERNAL_REVIEW"):
-        template = prompts.VERIFY if phase == "VERIFYING" else prompts.INTERNAL_REVIEW
-        return (f"User recovery guidance:\n{reply}\n\n"
-                + prompts.render(template, slug=state["slug"]))
+        gate_prompt = _verify_prompt if phase == "VERIFYING" else _internal_review_prompt
+        return f"User recovery guidance:\n{reply}\n\n" + gate_prompt(state)
     if phase == "ARCHIVING":
         return prompts.render(prompts.FIX_ARCHIVE,
                               error=state.get("archive_error", "unknown archival failure"),
@@ -3125,18 +3189,24 @@ def _run_loop() -> None:
             _maybe_ping(state)
             save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
-        except Exception:
-            failures = state.setdefault("failures", {})
-            failures[prev] = failures.get(prev, 0) + 1
-            log.exception("cycle failed in %s (%d/%d); retrying in %ss",
-                          prev, failures[prev], config.MAX_STATE_FAILURES, backoff)
-            if failures[prev] >= config.MAX_STATE_FAILURES and _escalate(state, prev):
-                if state["state"] != prev:
-                    state["last_transition"] = time.time()
-                save_state(state)
-                backoff = config.POLL_INTERVAL_SECONDS
-                time.sleep(config.POLL_INTERVAL_SECONDS)
-                continue
+        except Exception as error:
+            if _is_transient_network_error(error):
+                # A network blip is not a fault of this state: one line, no traceback,
+                # and no progress toward the WAIT_STUCK escalation.
+                log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                            "retrying in %ss", prev, type(error).__name__, error, backoff)
+            else:
+                failures = state.setdefault("failures", {})
+                failures[prev] = failures.get(prev, 0) + 1
+                log.exception("cycle failed in %s (%d/%d); retrying in %ss",
+                              prev, failures[prev], config.MAX_STATE_FAILURES, backoff)
+                if failures[prev] >= config.MAX_STATE_FAILURES and _escalate(state, prev):
+                    if state["state"] != prev:
+                        state["last_transition"] = time.time()
+                    save_state(state)
+                    backoff = config.POLL_INTERVAL_SECONDS
+                    time.sleep(config.POLL_INTERVAL_SECONDS)
+                    continue
             _maybe_ping(state)  # a failing step is exactly when "is it stuck?" gets asked
             save_state(state)
             time.sleep(backoff)

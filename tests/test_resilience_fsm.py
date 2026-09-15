@@ -350,6 +350,42 @@ class Commands(unittest.TestCase):
         mark.assert_called_once_with("m1")
 
 
+class TransientNetworkErrors(unittest.TestCase):
+    """A TLS EOF / reset / DNS blip while polling Gmail is logged in one line and never
+    counted as a failure of the state that happened to be executing."""
+
+    def test_classifier(self):
+        import ssl
+        import socket
+        from types import SimpleNamespace
+        for error in (ssl.SSLEOFError("EOF occurred in violation of protocol"),
+                      ConnectionResetError(), TimeoutError(), socket.gaierror(),
+                      SimpleNamespace(resp=SimpleNamespace(status=503))):
+            self.assertTrue(main._is_transient_network_error(error), error)
+        for error in (KeyError("thread_id"), RuntimeError("git failed"), ValueError(),
+                      SimpleNamespace(resp=SimpleNamespace(status=404))):
+            self.assertFalse(main._is_transient_network_error(error), error)
+
+    def test_check_commands_logs_transient_error_without_traceback(self):
+        import ssl
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        with patch.object(main.gmail_client, "poll_command",
+                          side_effect=ssl.SSLEOFError("EOF occurred in violation of protocol")), \
+             self.assertLogs(main.log, level="WARNING") as logs:
+            self.assertFalse(main.check_commands(state))
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].levelname, "WARNING")
+        self.assertIsNone(logs.records[0].exc_info)
+        self.assertIn("SSLEOFError", logs.output[0])
+
+    def test_check_commands_still_logs_traceback_for_real_bugs(self):
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        with patch.object(main.gmail_client, "poll_command", side_effect=KeyError("boom")), \
+             self.assertLogs(main.log, level="ERROR") as logs:
+            self.assertFalse(main.check_commands(state))
+        self.assertIsNotNone(logs.records[0].exc_info)
+
+
 class HoldAndContinue(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
