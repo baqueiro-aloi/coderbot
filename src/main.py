@@ -246,6 +246,24 @@ def _nonempty_strings(value) -> bool:
             all(isinstance(item, str) and item.strip() for item in value))
 
 
+def _looks_failing(entry: str) -> bool:
+    """Whether a "<command>: <result>" entry reports a failure rather than a pass."""
+    result = entry.rsplit(":", 1)[-1].strip().lower() if ":" in entry else entry.lower()
+    if result.startswith(("pass", "ok", "success", "green")):
+        return False
+    return bool(re.search(r"\bfail|\berror|\bfatal|\bcrash|timed? ?out|✖|✗", result))
+
+
+def _failing_summary(commands) -> str:
+    """" (failing: ...)" listing the commands the agent itself reported as failing, so the
+    rejection reason names the real problem (e.g. 100 lint errors) instead of just
+    "status is not pass"."""
+    if not isinstance(commands, list):
+        return ""
+    failing = [c.strip() for c in commands if isinstance(c, str) and c.strip() and _looks_failing(c)]
+    return f" (failing: {'; '.join(failing)})" if failing else ""
+
+
 def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     value, reason = _parse_completion_contract(output, "QUALITY_GATE")
     if reason:
@@ -254,7 +272,7 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     if not required <= set(value) or set(value) - required - {"preexisting"}:
         return None, "quality gate has unexpected or missing fields"
     if value.get("status") != "pass":
-        return None, "quality gate status is not pass"
+        return None, "quality gate status is not pass" + _failing_summary(value.get("commands"))
     if not _nonempty_strings(value.get("commands")):
         return None, "quality gate commands must contain nonempty strings"
     # Failures the agent confirmed on the base branch too (see prompts.VERIFY); the task
@@ -816,14 +834,56 @@ def do_implement(state: dict) -> None:
 
 
 GATE_REPORT_MAX_CHARS = 3000
+GATE_NOTES_MAX_CHARS = 2500
+
+# Contract fields that hold "<command>: <result>" entries, per gate marker.
+_GATE_CHECK_FIELDS = {"QUALITY_GATE": ("commands", "preexisting"),
+                      "INTERNAL_REVIEW": ("tests",)}
 
 
 def _gate_report(output: str, marker: str) -> str:
-    """What the agent reported in a rejected gate round: its contract line(s) when it
-    emitted any (they carry the per-command results), else the tail of its output."""
-    lines = [line.strip() for line in output.splitlines() if line.strip().startswith(marker + ":")]
-    report = "\n".join(lines) if lines else output.strip()[-GATE_REPORT_MAX_CHARS:]
-    return report[:GATE_REPORT_MAX_CHARS]
+    """A human-readable account of a rejected gate round for the retry prompt and the
+    stuck email: every check the agent reported (failing ones first), the contract's
+    other fields, then the agent's own notes (the prose before the contract). The bare
+    contract JSON is deliberately NOT what the user sees — a live incident emailed only
+    "status is not pass" while the real story (100 lint errors) sat in a JSON list."""
+    prefix = marker + ":"
+    contract_lines = [line.strip() for line in output.splitlines()
+                      if line.strip().startswith(prefix)]
+    notes = "\n".join(line for line in output.splitlines()
+                      if not line.strip().startswith(prefix)).strip()
+    parts: list[str] = []
+    value = None
+    if contract_lines:
+        try:
+            value = json.loads(contract_lines[-1][len(prefix):].strip())
+        except ValueError:
+            value = None
+    if isinstance(value, dict):
+        checks = []
+        for field in _GATE_CHECK_FIELDS.get(marker, ()):
+            entries = value.get(field)
+            if isinstance(entries, list):
+                label = "" if field in ("commands", "tests") else f" [{field}]"
+                checks += [(str(e).strip() + label) for e in entries if str(e).strip()]
+        if checks:
+            failing = [c for c in checks if _looks_failing(c)]
+            passing = [c for c in checks if not _looks_failing(c)]
+            parts.append("Checks the agent reported (failing first):\n"
+                         + "\n".join(f"- {c}" for c in failing + passing))
+        others = {k: v for k, v in value.items()
+                  if k not in _GATE_CHECK_FIELDS.get(marker, ()) and k != "status"}
+        if others:
+            parts.append("Other contract fields: "
+                         + ", ".join(f"{k}={json.dumps(v)}" for k, v in others.items()))
+    elif contract_lines:
+        parts.append("Contract line as emitted (malformed): " + contract_lines[-1][:500])
+    if notes:
+        tail = notes[-GATE_NOTES_MAX_CHARS:]
+        if len(notes) > GATE_NOTES_MAX_CHARS:
+            tail = "[...]\n" + tail
+        parts.append("Agent's notes:\n" + tail)
+    return "\n\n".join(parts)[:GATE_REPORT_MAX_CHARS + GATE_NOTES_MAX_CHARS]
 
 
 def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "") -> None:
@@ -840,8 +900,10 @@ def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str
     body = (f"Task: {state['item']}\n\nThe {label} gate has failed {state[counter]} times. "
             f"Latest reason: {reason}\n\n")
     if report:
-        body += f"Last report from the agent:\n\n{report}\n\n"
-    body += "Reply with guidance to continue."
+        body += f"{report}\n\n"
+    body += ("Reply with guidance to continue — e.g. tell the agent to fix a failure, or that a "
+             "failure is pre-existing on the base branch (it will confirm that there and "
+             "report it as pre-existing).")
     email(state, f"{label} stuck - needs your help", body)
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
