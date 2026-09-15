@@ -23,7 +23,11 @@ class RuntimeValidationTests(unittest.TestCase):
         root = Path(self.temporary_directory.name)
         self.superpowers = root / "superpowers"
         self.bridge = root / "bridge"
+        self.openspec = root / "openspec-skills"
         for path in (
+            self.openspec / ".claude-plugin/plugin.json",
+            self.openspec / "skills/openspec-explore/SKILL.md",
+            self.openspec / "opencode/openspec-explore/SKILL.md",
             self.superpowers / ".claude-plugin/plugin.json",
             self.superpowers / "skills/using-superpowers/SKILL.md",
             self.superpowers / ".opencode/plugins/superpowers.js",
@@ -37,6 +41,7 @@ class RuntimeValidationTests(unittest.TestCase):
         self.path_patches = (
             patch.object(main.config, "SUPERPOWERS_PLUGIN_DIR", self.superpowers, create=True),
             patch.object(main.config, "BRIDGE_PLUGIN_DIR", self.bridge, create=True),
+            patch.object(main.config, "OPENSPEC_SKILLS_DIR", self.openspec, create=True),
         )
         for path_patch in self.path_patches:
             path_patch.start()
@@ -62,6 +67,8 @@ class RuntimeValidationTests(unittest.TestCase):
             "Superpowers skill tree": self.superpowers / "skills/using-superpowers/SKILL.md",
             "bridge manifest": self.bridge / ".claude-plugin/plugin.json",
             "bridge skill": self.bridge / "skills/coderbot-openspec-workflow/SKILL.md",
+            "OpenSpec skills manifest": self.openspec / ".claude-plugin/plugin.json",
+            "OpenSpec Claude skills": self.openspec / "skills/openspec-explore/SKILL.md",
         }
         with patch.object(main.config, "AGENT", "claude"):
             for label, path in components.items():
@@ -82,6 +89,7 @@ class RuntimeValidationTests(unittest.TestCase):
             "bridge skill": self.bridge / "skills/coderbot-openspec-workflow/SKILL.md",
             "bridge OpenCode package": self.bridge / "package.json",
             "bridge OpenCode entrypoint": self.bridge / ".opencode/plugins/coderbot-openspec.js",
+            "OpenSpec OpenCode skills": self.openspec / "opencode/openspec-explore/SKILL.md",
         }
         with patch.object(main.config, "AGENT", "opencode"):
             for label, path in components.items():

@@ -52,6 +52,10 @@ def _opencode_environment() -> dict[str, str]:
 
     managed_plugins = [str(config.SUPERPOWERS_PLUGIN_DIR), str(config.BRIDGE_PLUGIN_DIR)]
     inline["plugin"] = list(dict.fromkeys([*plugins, *managed_plugins]))
+    # The bridge plugin adds its own skills dir; the openspec-* skills live outside any
+    # plugin, so they are added here (the OpenCode variant of the generated set).
+    openspec_skills = str(config.OPENSPEC_SKILLS_DIR / "opencode")
+    inline["skills"] = {**skills, "paths": list(dict.fromkeys([*paths, openspec_skills]))}
     inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
     return env

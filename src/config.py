@@ -128,6 +128,11 @@ SUPERPOWERS_PLUGIN_DIR = Path(os.environ.get(
     "CODEBOT_SUPERPOWERS_PLUGIN_DIR") or "/opt/coderbot/plugins/node_modules/superpowers")
 BRIDGE_PLUGIN_DIR = Path(os.environ.get(
     "CODEBOT_BRIDGE_PLUGIN_DIR") or "/opt/coderbot/agent-plugin")
+# The openspec-* skills (`openspec init` output for the pinned CLI), generated into the
+# image so no target repo has to carry them: `skills/` holds the Claude Code variant
+# (the dir doubles as a Claude plugin), `opencode/` the OpenCode variant.
+OPENSPEC_SKILLS_DIR = Path(os.environ.get(
+    "CODEBOT_OPENSPEC_SKILLS_DIR") or "/opt/coderbot/openspec-skills")
 
 # DEBUG surfaces per-email/video/git detail in `docker compose logs`.
 LOG_LEVEL = (os.environ.get("CODEBOT_LOG_LEVEL") or "DEBUG").upper()

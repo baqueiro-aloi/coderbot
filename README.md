@@ -51,8 +51,11 @@ missing:
 OpenSpec owns requirements, design, and tasks; Superpowers owns engineering
 discipline; coderbot owns state, archive timing, push, PR, and merge. The image
 supplies managed, pinned OpenSpec 1.9.0 and Superpowers v6.3.0 integrations for
-both Claude Code and OpenCode. Target repos and host profiles do not need their
-own Superpowers installation.
+both Claude Code and OpenCode: the `openspec-*` skills (`openspec-explore`,
+`openspec-propose`, `openspec-apply-change`, …) are generated at image build time by
+the pinned `openspec init` into `/opt/coderbot/openspec-skills` and loaded as a Claude
+plugin dir / an OpenCode `skills.paths` entry, so target repos need neither an
+`openspec init` of their own nor a Superpowers installation.
 
 ## Backlog sources
 
@@ -527,9 +530,10 @@ python3 -m unittest discover -s tests -t .
 ## Troubleshooting
 
 **`managed runtime unavailable: missing ...`**: coderbot fails closed at startup if
-the image's managed Superpowers or coderbot/OpenSpec bridge files are absent. Rebuild
-the image from this repository and check that no volume mount replaces
-`/opt/coderbot/plugins` or `/opt/coderbot/agent-plugin`; do not install Superpowers in
+the image's managed Superpowers, coderbot/OpenSpec bridge or generated OpenSpec skill
+files are absent. Rebuild the image from this repository and check that no volume
+mount replaces `/opt/coderbot/plugins`, `/opt/coderbot/agent-plugin` or
+`/opt/coderbot/openspec-skills`; do not install Superpowers or run `openspec init` in
 the target repo or host profile as a workaround.
 
 **`Claude Code X does not support this model; version Y or newer is required`** (or

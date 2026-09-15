@@ -211,6 +211,7 @@ def _invoke_with_model(args: list[str], prompt: str,
            "--effort", config.CLAUDE_EFFORT,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
+           "--plugin-dir", str(config.OPENSPEC_SKILLS_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, config.CLAUDE_EFFORT,

@@ -12,6 +12,7 @@ class ClaudeRunnerTests(unittest.TestCase):
     def test_new_and_resumed_sessions_load_both_managed_plugins(self):
         superpowers = Path("/managed/superpowers")
         bridge = Path("/managed/bridge")
+        openspec = Path("/managed/openspec-skills")
         responses = [
             subprocess.CompletedProcess(
                 [], 0, json.dumps({"session_id": "new", "result": "done"}), ""),
@@ -21,6 +22,7 @@ class ClaudeRunnerTests(unittest.TestCase):
         with patch.object(claude_runner.config, "SUPERPOWERS_PLUGIN_DIR", superpowers,
                           create=True), \
              patch.object(claude_runner.config, "BRIDGE_PLUGIN_DIR", bridge, create=True), \
+             patch.object(claude_runner.config, "OPENSPEC_SKILLS_DIR", openspec, create=True), \
              patch("claude_runner._run", side_effect=responses) as run:
             claude_runner.run("start")
             claude_runner.resume("old", "continue")
@@ -35,6 +37,7 @@ class ClaudeRunnerTests(unittest.TestCase):
             self.assertEqual(plugin_dirs, [
                 str(superpowers),
                 str(bridge),
+                str(openspec),
             ])
 
     def test_effort_flag_passed(self):

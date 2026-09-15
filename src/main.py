@@ -3268,10 +3268,18 @@ def validate_managed_runtime() -> None:
          config.BRIDGE_PLUGIN_DIR / "skills/coderbot-openspec-workflow/SKILL.md"),
     ]
     if config.AGENT == "claude":
-        required.append(("Superpowers Claude manifest",
-                         config.SUPERPOWERS_PLUGIN_DIR / ".claude-plugin/plugin.json"))
+        required.extend([
+            ("Superpowers Claude manifest",
+             config.SUPERPOWERS_PLUGIN_DIR / ".claude-plugin/plugin.json"),
+            ("OpenSpec skills manifest",
+             config.OPENSPEC_SKILLS_DIR / ".claude-plugin/plugin.json"),
+            ("OpenSpec Claude skills",
+             config.OPENSPEC_SKILLS_DIR / "skills/openspec-explore/SKILL.md"),
+        ])
     elif config.AGENT == "opencode":
         required.extend([
+            ("OpenSpec OpenCode skills",
+             config.OPENSPEC_SKILLS_DIR / "opencode/openspec-explore/SKILL.md"),
             ("Superpowers OpenCode entrypoint",
              config.SUPERPOWERS_PLUGIN_DIR / ".opencode/plugins/superpowers.js"),
             ("bridge OpenCode package", config.BRIDGE_PLUGIN_DIR / "package.json"),

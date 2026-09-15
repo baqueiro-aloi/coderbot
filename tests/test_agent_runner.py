@@ -87,6 +87,8 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertIs(inline["autoupdate"], False)
         self.assertEqual(inline["plugin"].count(str(self.superpowers)), 1)
         self.assertEqual(inline["plugin"].count(str(self.bridge)), 1)
+        self.assertEqual(inline["skills"]["paths"].count(
+            str(agent_runner.config.OPENSPEC_SKILLS_DIR / "opencode")), 1)
 
     def test_collects_final_text_and_session_id(self):
         stdout = '\n'.join([
@@ -181,16 +183,19 @@ class OpenCodeRunnerTests(unittest.TestCase):
             inline = json.loads(call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             self.assertEqual(inline["theme"], "custom")
             self.assertEqual(inline["permission"], {"bash": "ask"})
-            self.assertEqual(inline["skills"], existing["skills"])
+            self.assertEqual(inline["skills"]["urls"], existing["skills"]["urls"])
+            self.assertEqual(inline["skills"]["paths"][0], "/existing/skills")
             self.assertIn("existing-plugin", inline["plugin"])
 
-    def test_does_not_create_inline_skills_config(self):
+    def test_adds_openspec_skills_path_to_empty_config(self):
         with patch.object(agent_runner.config, "SUPERPOWERS_PLUGIN_DIR", self.superpowers), \
              patch.object(agent_runner.config, "BRIDGE_PLUGIN_DIR", self.bridge), \
+             patch.object(agent_runner.config, "OPENSPEC_SKILLS_DIR", Path("/managed/os"),
+                          create=True), \
              patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": "{}"}):
             inline = json.loads(agent_runner._opencode_environment()[
                 "OPENCODE_CONFIG_CONTENT"])
-        self.assertNotIn("skills", inline)
+        self.assertEqual(inline["skills"], {"paths": ["/managed/os/opencode"]})
         self.assertEqual(inline["plugin"], [str(self.superpowers), str(self.bridge)])
 
     def test_rejects_non_string_plugin_entries(self):
