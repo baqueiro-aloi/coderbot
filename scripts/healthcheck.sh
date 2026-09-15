@@ -5,7 +5,8 @@
 # current tick is younger than CODEBOT_HEARTBEAT_MAX_TICK, so a legitimate multi-hour agent
 # call stays healthy. A stale heartbeat therefore means the loop is wedged beyond any real
 # operation. Past a hard threshold we kill PID 1 so `restart: unless-stopped` takes over
-# (Docker does not restart merely-unhealthy containers on its own).
+# (Docker does not restart merely-unhealthy containers on its own). PID 1 is docker-init
+# (`init: true` in compose), which forwards the signal to main.py and exits with it.
 set -u
 
 DATA_DIR="${CODEBOT_DATA_DIR:-/app/data}"
