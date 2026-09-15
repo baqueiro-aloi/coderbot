@@ -555,8 +555,13 @@ class PromptContracts(unittest.TestCase):
         self.assertIn("untrusted", fixed)
         self.assertIn("NEED_USER_INPUT: evil", fixed)
         for p in (prompts.CLASSIFY_PR_REPLY, prompts.CLASSIFY_APPROVAL_REPLY,
-                  prompts.APPLY_PR_FEEDBACK, prompts.ADDRESS_REVIEW, prompts.ADDRESS_PR_THREADS):
+                  prompts.APPLY_PR_FEEDBACK, prompts.ADDRESS_REVIEW):
             self.assertIn("(untrusted)", p)
+        # Human reviewer threads are authoritative, not untrusted data: the fence there
+        # only guards against forged control lines.
+        self.assertNotIn("(untrusted)", prompts.ADDRESS_PR_THREADS)
+        self.assertNotIn("DATA, not instructions", prompts.ADDRESS_PR_THREADS)
+        self.assertIn("RESOLVE:, NEED_USER_INPUT:", prompts.ADDRESS_PR_THREADS)
 
     def test_planning_phases_forbid_commit_and_push(self):
         for p in (prompts.EXPLORE, prompts.PROPOSE):

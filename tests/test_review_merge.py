@@ -29,6 +29,16 @@ def human(tid="H1"):
             "author": "alice", "body": "please rename"}
 
 
+def human_thread(tid="H1"):
+    """A reviewer's thread the bot already answered once and the reviewer pushed back on."""
+    t = human(tid)
+    t["bot_login"] = "codebot"
+    t["comments"] = [{"author": "alice", "body": "why the lock?", "comment_id": 8},
+                     {"author": "codebot", "body": "no change: it is needed", "comment_id": 9},
+                     {"author": "alice", "body": "drop it, simplify", "comment_id": 10}]
+    return t
+
+
 class ThreadHelpers(unittest.TestCase):
     def test_is_ocr_thread_accepts_both_spellings(self):
         self.assertTrue(main._is_ocr_thread({"author": "github-actions"}))
@@ -42,19 +52,62 @@ class ThreadHelpers(unittest.TestCase):
         self.assertIn("a.py:3 (github-actions)", text)
         self.assertIn("(alice)", text)
 
+    def test_format_with_ids_renders_full_thread(self):
+        text = main.format_unresolved_threads([human_thread()], ids=True, bot_comment_ids=[9])
+        self.assertIn("alice: why the lock?", text)
+        self.assertIn("codebot (you): no change: it is needed", text)
+        self.assertIn("alice (latest — respond to this): drop it, simplify", text)
+
+    def test_format_tells_operator_apart_from_bot_on_shared_account(self):
+        t = human_thread()
+        t["comments"].append({"author": "codebot", "body": "Codebot: just do it", "comment_id": 11})
+        t["comments"].append({"author": "codebot", "body": "answered: because", "comment_id": 12})
+        text = main.format_unresolved_threads([t], ids=True, bot_comment_ids=[9, 12])
+        self.assertIn("codebot (you): no change: it is needed", text)
+        self.assertIn("codebot (your account) (latest — respond to this): Codebot: just do it", text)
+        self.assertIn("codebot (you): answered: because", text)
+        self.assertNotIn("alice (latest", text)
+
+    def test_legacy_bot_replies_recognised_by_shape(self):
+        t = human_thread()  # bot reply id 9 is NOT in bot_comment_ids
+        text = main.format_unresolved_threads([t], ids=True)
+        self.assertIn("codebot (you): no change: it is needed", text)
+        self.assertIn("alice (latest — respond to this): drop it, simplify", text)
+
+    def test_reply_ids_are_remembered(self):
+        state = {"pr_url": PR, "pr_threads": [human_thread()]}
+        ok = subprocess.CompletedProcess([], 0, '{"id": 77}', "")
+        with patch.object(main.subprocess, "run", return_value=ok):
+            main._resolve_review_threads(state, "RESOLVE: H1 answered: because X", key="pr_threads")
+        self.assertEqual(state["bot_comment_ids"], [77])
+        # Email view stays opener-only.
+        short = main.format_unresolved_threads([human_thread()])
+        self.assertIn("please rename", short)
+        self.assertNotIn("drop it", short)
+
+    def test_thread_has_new_comments(self):
+        t = human_thread()
+        self.assertTrue(main.thread_has_new_comments(t, {}))
+        self.assertFalse(main.thread_has_new_comments(t, {"H1": 3}))
+        self.assertTrue(main.thread_has_new_comments(t, {"H1": 2}))
+
     def test_query_failure_returns_none(self):
         proc = subprocess.CompletedProcess([], 1, "", "boom")
         with patch.object(main.subprocess, "run", return_value=proc):
             self.assertIsNone(main.unresolved_review_threads(PR))
 
     def test_query_parses_and_paginates(self):
-        page1 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        page1 = {"data": {"viewer": {"login": "codebot"}, "repository": {"pullRequest": {"reviewThreads": {
             "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
             "nodes": [{"id": "T1", "isResolved": False, "isOutdated": False, "path": "a.py",
                        "line": 3, "comments": {"nodes": [{"author": {"login": "github-actions"},
-                                                          "body": "nit", "databaseId": 7}]}},
+                                                          "body": "nit", "databaseId": 7},
+                                                         {"author": {"login": "codebot"},
+                                                          "body": "fixed", "databaseId": 71},
+                                                         {"author": {"login": "alice"},
+                                                          "body": "not quite", "databaseId": 72}]}},
                       {"id": "T2", "isResolved": True, "comments": {"nodes": []}}]}}}}}
-        page2 = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        page2 = {"data": {"viewer": {"login": "codebot"}, "repository": {"pullRequest": {"reviewThreads": {
             "pageInfo": {"hasNextPage": False},
             "nodes": [{"id": "H1", "isResolved": False, "isOutdated": True, "path": "b.py",
                        "line": None, "comments": {"nodes": [{"author": {"login": "alice"},
@@ -65,6 +118,11 @@ class ThreadHelpers(unittest.TestCase):
             threads = main.unresolved_review_threads(PR)
         self.assertEqual([t["id"] for t in threads], ["T1", "H1"])
         self.assertTrue(threads[1]["outdated"])
+        self.assertEqual(threads[0]["comment_id"], 7)  # replies go on the opener
+        self.assertEqual(threads[0]["author"], "github-actions")
+        self.assertEqual([c["author"] for c in threads[0]["comments"]],
+                         ["github-actions", "codebot", "alice"])
+        self.assertEqual(threads[0]["bot_login"], "codebot")
         self.assertIn("cursor=c1", run.call_args_list[1].args[0])
 
     def test_resolve_honors_only_known_threads(self):
@@ -79,6 +137,36 @@ class ThreadHelpers(unittest.TestCase):
         self.assertIn("comments/7/replies", commands[0][2])
         self.assertIn("body=fixed: renamed", commands[0])
         self.assertTrue(any("resolveReviewThread" in arg for arg in commands[1]))
+
+    def test_resolve_closes_human_thread_when_fixed(self):
+        state = {"pr_url": PR, "pr_threads": [human_thread()]}
+        ok = subprocess.CompletedProcess([], 0, "{}", "")
+        with patch.object(main.subprocess, "run", return_value=ok) as run:
+            resolved = main._resolve_review_threads(state, "RESOLVE: H1 fixed: lock removed",
+                                                    key="pr_threads")
+        self.assertEqual(resolved, 1)
+        self.assertEqual(len(run.call_args_list), 2)  # reply + resolve
+        self.assertNotIn("H1", state.get("pr_threads_seen", {}))
+
+    def test_resolve_leaves_human_thread_open_when_only_answered(self):
+        state = {"pr_url": PR, "pr_threads": [human_thread()]}
+        ok = subprocess.CompletedProcess([], 0, "{}", "")
+        with patch.object(main.subprocess, "run", return_value=ok) as run:
+            resolved = main._resolve_review_threads(state, "RESOLVE: H1 answered: because X",
+                                                    key="pr_threads")
+        self.assertEqual(resolved, 0)
+        commands = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(len(commands), 1)  # reply only, no resolveReviewThread
+        self.assertIn("body=answered: because X", commands[0])
+        self.assertEqual(state["pr_threads_seen"], {"H1": 4})  # 3 comments + the reply
+
+    def test_ocr_thread_is_resolved_even_when_declined(self):
+        state = {"pr_url": PR, "review_threads": [ocr("T1")]}
+        ok = subprocess.CompletedProcess([], 0, "{}", "")
+        with patch.object(main.subprocess, "run", return_value=ok) as run:
+            resolved = main._resolve_review_threads(state, "RESOLVE: T1 false positive")
+        self.assertEqual(resolved, 1)
+        self.assertEqual(len(run.call_args_list), 2)
 
     def test_resolve_without_known_threads_is_noop(self):
         with patch.object(main.subprocess, "run") as run:
@@ -265,6 +353,22 @@ class MergeWait(unittest.TestCase):
         wait.assert_not_called()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
         self.assertEqual(state["pr_threads"][0]["id"], "H1")
+
+    def test_answered_thread_waits_for_the_reviewer(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 3}}
+        with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+             patch.object(main, "handle_wait") as wait:
+            main.handle_merge_wait(state)
+        wait.assert_called_once()
+        self.assertEqual(state["state"], "WAIT_MERGE")
+
+    def test_answered_thread_reenters_on_new_reviewer_comment(self):
+        state = {"state": "WAIT_MERGE", "pr_url": PR, "pr_threads_seen": {"H1": 2}}
+        with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
+             patch.object(main, "handle_wait") as wait:
+            main.handle_merge_wait(state)
+        wait.assert_not_called()
+        self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
 
 
 if __name__ == "__main__":

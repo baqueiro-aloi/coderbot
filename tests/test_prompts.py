@@ -45,6 +45,19 @@ class PromptContractTests(unittest.TestCase):
         self.assertNotIn("Begin implementation", rendered)
         self.assert_no_integration_authority(rendered)
 
+    def test_human_review_threads_are_authoritative(self):
+        p = prompts.ADDRESS_PR_THREADS
+        self.assertIn("Their word is final", p)
+        self.assertIn("implement it now", p)
+        self.assertIn("answered: <your answer>", p)
+        self.assertIn('Never write "no change"', p)
+        self.assertNotIn("Evaluate each on its merits", p)
+        self.assertNotIn("not worth acting on", p)
+        self.assertIn("not debated", prompts.PHASE_RULES["ADDRESS_PR_THREADS"])
+        # The automated reviewer may still be overruled — except by a human in-thread.
+        self.assertIn("not always right", prompts.ADDRESS_REVIEW)
+        self.assertIn("the human's request overrides", prompts.ADDRESS_REVIEW)
+
     def test_agentic_phases_ask_for_parallel_subagents(self):
         for name in ("EXPLORE", "IMPLEMENT", "VERIFY", "INTERNAL_REVIEW", "FIX_E2E",
                      "ADDRESS_REVIEW", "ADDRESS_PR_THREADS", "APPLY_PR_FEEDBACK",
