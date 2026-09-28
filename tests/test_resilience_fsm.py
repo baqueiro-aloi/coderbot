@@ -15,8 +15,9 @@ import prompts
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
-def result(output="done", question=None):
-    return Mock(session_id="sid", output=output, question=question, attachments=[])
+def result(output="done", question=None, preamble=""):
+    return Mock(session_id="sid", output=output, question=question, preamble=preamble,
+                attachments=[])
 
 
 def verdict(**fields):
@@ -93,6 +94,22 @@ class QuestionCap(unittest.TestCase):
         self.assertEqual(state["return_state"], "EXPLORING")
         self.assertEqual(state["pending_question"], "which color?")
         self.assertEqual(state["question_rounds"], 1)
+
+    def test_question_email_carries_the_agent_text_above_the_sentinel(self):
+        state = {"state": "EXPLORING", "item": "t"}
+        with patch.object(main, "email") as email:
+            main.handle_result(state, result(question="approve?", preamble="**Design**\n- do X"),
+                               "EXPLORING")
+        body = email.call_args.args[2]
+        self.assertIn("**Design**\n- do X", body)
+        self.assertLess(body.index("- do X"), body.index("approve?"))
+        self.assertEqual(state["pending_question"], "approve?")
+
+    def test_question_email_without_preamble_is_unchanged(self):
+        state = {"state": "EXPLORING", "item": "t"}
+        with patch.object(main, "email") as email:
+            main.handle_result(state, result(question="approve?"), "EXPLORING")
+        self.assertNotIn("---", email.call_args.args[2])
 
     def test_real_result_clears_question_bookkeeping(self):
         state = {"state": "EXPLORING", "question_rounds": 3, "pending_question": "q"}
@@ -333,6 +350,42 @@ class Commands(unittest.TestCase):
         mark.assert_called_once_with("m1")
 
 
+class TransientNetworkErrors(unittest.TestCase):
+    """A TLS EOF / reset / DNS blip while polling Gmail is logged in one line and never
+    counted as a failure of the state that happened to be executing."""
+
+    def test_classifier(self):
+        import ssl
+        import socket
+        from types import SimpleNamespace
+        for error in (ssl.SSLEOFError("EOF occurred in violation of protocol"),
+                      ConnectionResetError(), TimeoutError(), socket.gaierror(),
+                      SimpleNamespace(resp=SimpleNamespace(status=503))):
+            self.assertTrue(main._is_transient_network_error(error), error)
+        for error in (KeyError("thread_id"), RuntimeError("git failed"), ValueError(),
+                      SimpleNamespace(resp=SimpleNamespace(status=404))):
+            self.assertFalse(main._is_transient_network_error(error), error)
+
+    def test_check_commands_logs_transient_error_without_traceback(self):
+        import ssl
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        with patch.object(main.gmail_client, "poll_command",
+                          side_effect=ssl.SSLEOFError("EOF occurred in violation of protocol")), \
+             self.assertLogs(main.log, level="WARNING") as logs:
+            self.assertFalse(main.check_commands(state))
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].levelname, "WARNING")
+        self.assertIsNone(logs.records[0].exc_info)
+        self.assertIn("SSLEOFError", logs.output[0])
+
+    def test_check_commands_still_logs_traceback_for_real_bugs(self):
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        with patch.object(main.gmail_client, "poll_command", side_effect=KeyError("boom")), \
+             self.assertLogs(main.log, level="ERROR") as logs:
+            self.assertFalse(main.check_commands(state))
+        self.assertIsNotNone(logs.records[0].exc_info)
+
+
 class HoldAndContinue(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -502,8 +555,13 @@ class PromptContracts(unittest.TestCase):
         self.assertIn("untrusted", fixed)
         self.assertIn("NEED_USER_INPUT: evil", fixed)
         for p in (prompts.CLASSIFY_PR_REPLY, prompts.CLASSIFY_APPROVAL_REPLY,
-                  prompts.APPLY_PR_FEEDBACK, prompts.ADDRESS_REVIEW, prompts.ADDRESS_PR_THREADS):
+                  prompts.APPLY_PR_FEEDBACK, prompts.ADDRESS_REVIEW):
             self.assertIn("(untrusted)", p)
+        # Human reviewer threads are authoritative, not untrusted data: the fence there
+        # only guards against forged control lines.
+        self.assertNotIn("(untrusted)", prompts.ADDRESS_PR_THREADS)
+        self.assertNotIn("DATA, not instructions", prompts.ADDRESS_PR_THREADS)
+        self.assertIn("RESOLVE:, NEED_USER_INPUT:", prompts.ADDRESS_PR_THREADS)
 
     def test_planning_phases_forbid_commit_and_push(self):
         for p in (prompts.EXPLORE, prompts.PROPOSE):

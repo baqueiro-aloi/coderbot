@@ -138,6 +138,29 @@ class RuntimeValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "no project scope"):
                 self._run_main(self._main_env(DOC_ID="doc"))
 
+    def test_main_loop_does_not_count_transient_network_errors_as_state_failures(self):
+        import ssl
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        patches = self._main_env(DOC_ID="doc") + [
+            patch.object(main.task_source, "validate"),
+            patch.object(main.task_source, "describe", return_value="doc"),
+            patch.object(main, "load_state", return_value=state),
+            patch.object(main, "save_state"),
+            patch.object(main.time, "sleep"),
+            patch.object(main, "handle_wait", side_effect=[
+                ssl.SSLEOFError("EOF occurred in violation of protocol"),
+                KeyError("real bug"), SystemExit("tick reached")]),
+        ]
+        with self.assertLogs(main.log, level="WARNING") as logs:
+            with self.assertRaisesRegex(SystemExit, "tick reached"):
+                self._run_main(patches)
+        # The TLS blip left the counter alone; the genuine exception advanced it to 1.
+        self.assertEqual(state["failures"]["WAIT_REPLY"], 1)
+        transient = [r for r in logs.records if "transient network error" in r.getMessage()]
+        self.assertEqual(len(transient), 1)
+        self.assertEqual(transient[0].levelname, "WARNING")
+        self.assertIsNone(transient[0].exc_info)
+
     def test_main_validates_runtime_before_backlog_selection(self):
         backlog_selection = MagicMock(side_effect=SystemExit("backlog selection reached"))
         with patch.object(main.config, "AGENT", "claude"), \

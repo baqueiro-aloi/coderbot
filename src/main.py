@@ -5,6 +5,8 @@ import json
 import logging
 import re
 import signal
+import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -203,9 +205,14 @@ def handle_result(state: dict, result, phase: str) -> bool:
     attachments = [Path(p) for p in result.attachments if Path(p).exists()]
     log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
              phase, len(attachments))
-    email(state, f"question during {phase}",
-          f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n{question}\n\n"
-          "Reply to this email to continue.", attachments)
+    # The agent often puts the substance (a design to approve, options it weighed) ABOVE
+    # the sentinel line and only the ask after it; the user needs both to answer.
+    preamble = getattr(result, "preamble", "") or ""
+    body = f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n"
+    if preamble:
+        body += f"{preamble}\n\n---\n\n"
+    body += f"{question}\n\nReply to this email to continue."
+    email(state, f"question during {phase}", body, attachments)
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
@@ -239,16 +246,40 @@ def _nonempty_strings(value) -> bool:
             all(isinstance(item, str) and item.strip() for item in value))
 
 
+def _looks_failing(entry: str) -> bool:
+    """Whether a "<command>: <result>" entry reports a failure rather than a pass."""
+    result = entry.rsplit(":", 1)[-1].strip().lower() if ":" in entry else entry.lower()
+    if result.startswith(("pass", "ok", "success", "green")):
+        return False
+    return bool(re.search(r"\bfail|\berror|\bfatal|\bcrash|timed? ?out|✖|✗", result))
+
+
+def _failing_summary(commands) -> str:
+    """" (failing: ...)" listing the commands the agent itself reported as failing, so the
+    rejection reason names the real problem (e.g. 100 lint errors) instead of just
+    "status is not pass"."""
+    if not isinstance(commands, list):
+        return ""
+    failing = [c.strip() for c in commands if isinstance(c, str) and c.strip() and _looks_failing(c)]
+    return f" (failing: {'; '.join(failing)})" if failing else ""
+
+
 def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     value, reason = _parse_completion_contract(output, "QUALITY_GATE")
     if reason:
         return None, reason
-    if set(value) != {"status", "commands", "openspec", "tasks"}:
+    required = {"status", "commands", "openspec", "tasks"}
+    if not required <= set(value) or set(value) - required - {"preexisting"}:
         return None, "quality gate has unexpected or missing fields"
     if value.get("status") != "pass":
-        return None, "quality gate status is not pass"
+        return None, "quality gate status is not pass" + _failing_summary(value.get("commands"))
     if not _nonempty_strings(value.get("commands")):
         return None, "quality gate commands must contain nonempty strings"
+    # Failures the agent confirmed on the base branch too (see prompts.VERIFY); the task
+    # is not on the hook for them, but they are recorded so the report shows them.
+    preexisting = value.get("preexisting", [])
+    if not isinstance(preexisting, list) or (preexisting and not _nonempty_strings(preexisting)):
+        return None, "quality gate preexisting must be a list of nonempty strings"
     if value.get("openspec") != "pass":
         return None, "OpenSpec validation did not pass"
     match = re.fullmatch(r"(\d+)/(\d+)", value.get("tasks", ""))
@@ -462,7 +493,7 @@ def _seed_self_healing_items(state: dict) -> None:
         if task_source.ensure_item(E2E_HARNESS_ITEMS[state["e2e_kind"]]):
             log.info("self-healing: seeded backlog item for missing e2e harness (%s)",
                      state["e2e_kind"])
-    if not state["has_code_review"]:
+    if not state["has_code_review"] and config.SELF_HEAL_CODE_REVIEW:
         if task_source.ensure_item(CODE_REVIEW_ITEM):
             log.info("self-healing: seeded backlog item for missing Code Review workflow")
 
@@ -802,18 +833,100 @@ def do_implement(state: dict) -> None:
     trail(state, "Implementation complete; verifying")
 
 
-def _gate_failed(state: dict, phase: str, counter: str, reason: str) -> None:
+GATE_REPORT_MAX_CHARS = 3000
+GATE_NOTES_MAX_CHARS = 2500
+
+# Contract fields that hold "<command>: <result>" entries, per gate marker.
+_GATE_CHECK_FIELDS = {"QUALITY_GATE": ("commands", "preexisting"),
+                      "INTERNAL_REVIEW": ("tests",)}
+
+
+def _gate_report(output: str, marker: str) -> str:
+    """A human-readable account of a rejected gate round for the retry prompt and the
+    stuck email: every check the agent reported (failing ones first), the contract's
+    other fields, then the agent's own notes (the prose before the contract). The bare
+    contract JSON is deliberately NOT what the user sees — a live incident emailed only
+    "status is not pass" while the real story (100 lint errors) sat in a JSON list."""
+    prefix = marker + ":"
+    contract_lines = [line.strip() for line in output.splitlines()
+                      if line.strip().startswith(prefix)]
+    notes = "\n".join(line for line in output.splitlines()
+                      if not line.strip().startswith(prefix)).strip()
+    parts: list[str] = []
+    value = None
+    if contract_lines:
+        try:
+            value = json.loads(contract_lines[-1][len(prefix):].strip())
+        except ValueError:
+            value = None
+    if isinstance(value, dict):
+        checks = []
+        for field in _GATE_CHECK_FIELDS.get(marker, ()):
+            entries = value.get(field)
+            if isinstance(entries, list):
+                label = "" if field in ("commands", "tests") else f" [{field}]"
+                checks += [(str(e).strip() + label) for e in entries if str(e).strip()]
+        if checks:
+            failing = [c for c in checks if _looks_failing(c)]
+            passing = [c for c in checks if not _looks_failing(c)]
+            parts.append("Checks the agent reported (failing first):\n"
+                         + "\n".join(f"- {c}" for c in failing + passing))
+        others = {k: v for k, v in value.items()
+                  if k not in _GATE_CHECK_FIELDS.get(marker, ()) and k != "status"}
+        if others:
+            parts.append("Other contract fields: "
+                         + ", ".join(f"{k}={json.dumps(v)}" for k, v in others.items()))
+    elif contract_lines:
+        parts.append("Contract line as emitted (malformed): " + contract_lines[-1][:500])
+    if notes:
+        tail = notes[-GATE_NOTES_MAX_CHARS:]
+        if len(notes) > GATE_NOTES_MAX_CHARS:
+            tail = "[...]\n" + tail
+        parts.append("Agent's notes:\n" + tail)
+    return "\n\n".join(parts)[:GATE_REPORT_MAX_CHARS + GATE_NOTES_MAX_CHARS]
+
+
+def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "") -> None:
     state[counter] = state.get(counter, 0) + 1
+    # Fed back into the next round's prompt (and the stuck email): a retry that repeats
+    # the identical prompt just gets the identical failing report again.
+    state[f"{counter}_feedback"] = {"reason": reason, "report": report}
     log.warning("%s result rejected (round %d/%d): %s", phase, state[counter],
                 config.QUALITY_GATE_MAX_ROUNDS, reason)
     if state[counter] < config.QUALITY_GATE_MAX_ROUNDS:
         state["state"] = phase
         return
-    email(state, f"{phase.lower().replace('_', ' ')} stuck - needs your help",
-          f"Task: {state['item']}\n\nThe {phase.lower().replace('_', ' ')} gate has failed "
-          f"{state[counter]} times. Latest reason: {reason}\n\nReply with guidance to continue.")
+    label = phase.lower().replace('_', ' ')
+    body = (f"Task: {state['item']}\n\nThe {label} gate has failed {state[counter]} times. "
+            f"Latest reason: {reason}\n\n")
+    if report:
+        body += f"{report}\n\n"
+    body += ("Reply with guidance to continue — e.g. tell the agent to fix a failure, or that a "
+             "failure is pre-existing on the base branch (it will confirm that there and "
+             "report it as pre-existing).")
+    email(state, f"{label} stuck - needs your help", body)
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
+
+
+def _gate_feedback(state: dict, counter: str) -> str:
+    """The rejection notice to prepend to a gate prompt, or "" on a fresh first round."""
+    feedback = state.get(f"{counter}_feedback")
+    if not state.get(counter) or not isinstance(feedback, dict):
+        return ""
+    return prompts.render(prompts.GATE_FEEDBACK, round=state[counter],
+                          max=config.QUALITY_GATE_MAX_ROUNDS,
+                          reason=feedback.get("reason", ""), report=feedback.get("report", ""))
+
+
+def _verify_prompt(state: dict) -> str:
+    return (_gate_feedback(state, "verify_round")
+            + prompts.render(prompts.VERIFY, slug=state["slug"], base=config.BASE_BRANCH))
+
+
+def _internal_review_prompt(state: dict) -> str:
+    return (_gate_feedback(state, "review_gate_round")
+            + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
 
 
 def _complete_verify(state: dict, result) -> None:
@@ -821,7 +934,8 @@ def _complete_verify(state: dict, result) -> None:
         return
     parsed, reason = parse_quality_gate(result.output)
     if parsed is None:
-        _gate_failed(state, "VERIFYING", "verify_round", reason)
+        _gate_failed(state, "VERIFYING", "verify_round", reason,
+                     _gate_report(result.output, "QUALITY_GATE"))
         return
     try:
         slug = _validated_slug(state.get("slug"))
@@ -839,17 +953,18 @@ def _complete_verify(state: dict, result) -> None:
                 remaining != 0 or complete != total:
             raise ValueError("OpenSpec apply progress is incomplete")
     except Exception as error:
-        _gate_failed(state, "VERIFYING", "verify_round", str(error))
+        _gate_failed(state, "VERIFYING", "verify_round", str(error),
+                     _gate_report(result.output, "QUALITY_GATE"))
         return
     state.pop("verify_round", None)
+    state.pop("verify_round_feedback", None)
     state["review_gate_round"] = 0
     state["state"] = "INTERNAL_REVIEW"
     trail(state, "Verification passed; running internal review")
 
 
 def do_verify(state: dict) -> None:
-    result = agent_runner.resume(
-        state["session_id"], prompts.render(prompts.VERIFY, slug=state["slug"]))
+    result = agent_runner.resume(state["session_id"], _verify_prompt(state))
     _complete_verify(state, result)
 
 
@@ -858,17 +973,18 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
-        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason)
+        _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
+                     _gate_report(result.output, "INTERNAL_REVIEW"))
         return
     state.pop("review_gate_round", None)
+    state.pop("review_gate_round_feedback", None)
     state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
 
 
 def do_internal_review(state: dict) -> None:
-    result = agent_runner.resume(
-        state["session_id"], prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
+    result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
     _complete_internal_review(state, result)
 
 
@@ -1355,7 +1471,8 @@ def _enter_review_wait(state: dict, expect_new_run: bool = True) -> None:
 
 
 def _render_review_threads(state: dict, key: str = "review_threads") -> str:
-    rendered = format_unresolved_threads(state.get(key, []), ids=True)
+    rendered = format_unresolved_threads(state.get(key, []), ids=True,
+                                         bot_comment_ids=state.get("bot_comment_ids", []))
     summary = review_summary(state)
     if summary:
         rendered = "Reviewer summary (context):\n" + summary + "\n\n" + rendered
@@ -1576,14 +1693,44 @@ def _enter_conflict_resolution(state: dict) -> bool:
     return True
 
 
+def check_pr_status(state: dict) -> bool:
+    """One PR query per reply-less waiting tick (WAIT_REVIEW / WAIT_MERGE). Handles the
+    PR having been dealt with outside codebot — MERGED by someone on GitHub finishes the
+    task exactly as codebot's own merge would; CLOSED without merging escalates to the
+    user — and otherwise falls through to the conflict check. Returns True when the
+    state changed. Query failures change nothing — the next tick re-checks."""
+    if not state.get("pr_url"):
+        return False
+    pr_state, mergeable = _pr_merge_state(state["pr_url"])
+    if pr_state == "MERGED":
+        log.info("PR %s was merged on GitHub outside codebot; finishing the task",
+                 state["pr_url"])
+        trail(state, f"PR merged on GitHub: {state['pr_url']}")
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False)
+        return True
+    if pr_state == "CLOSED":
+        log.warning("PR %s was closed without merging; asking the user", state["pr_url"])
+        _enter_stuck(state, state["state"],
+                     f"The pull request was closed on GitHub without being merged.\nPR: "
+                     f"{state['pr_url']}\n\nIf the work landed some other way, reply "
+                     "'complete'; to drop the task reply 'abort'; to keep working on it, "
+                     "reopen the PR and reply 'retry'.")
+        return True
+    return _check_pr_conflicts(state, pr_state, mergeable)
+
+
 def check_pr_conflicts(state: dict) -> bool:
+    """Conflict check alone (see check_pr_status for the per-tick entry point)."""
+    if not state.get("pr_url"):
+        return False
+    return _check_pr_conflicts(state, *_pr_merge_state(state["pr_url"]))
+
+
+def _check_pr_conflicts(state: dict, pr_state, mergeable) -> bool:
     """While waiting with an open PR, watch for the base branch having moved under it
     (another PR merged). A CONFLICTING PR is routed to RESOLVE_CONFLICTS; returns True
     when the state changed. Query failures (and GitHub's transient "UNKNOWN" while it
     recomputes mergeability) change nothing — the next tick re-checks."""
-    if not state.get("pr_url"):
-        return False
-    pr_state, mergeable = _pr_merge_state(state["pr_url"])
     if pr_state != "OPEN":
         return False  # merged/closed/unknown: nothing to resolve here
     if mergeable != "CONFLICTING":
@@ -1644,15 +1791,19 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
     irreversible merge, so it fails closed."""
     owner_repo, number = _pr_owner_number(pr_url)
     owner, repo = owner_repo.split("/", 1)
+    # The WHOLE thread is fetched, not just the opener: a reviewer's follow-up ("no, do
+    # it this way") lives in later comments, and the agent must see both it and its own
+    # earlier reply. `viewer` is the bot's own login, used to label those replies.
     query = """
     query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+      viewer { login }
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
           reviewThreads(first: 100, after: $cursor) {
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line
-              comments(first: 1) { nodes { author { login } body databaseId } } } } } } }"""
+              comments(first: 100) { nodes { author { login } body databaseId createdAt } } } } } } }"""
     threads: list[dict] = []
     cursor = None
     while True:
@@ -1673,23 +1824,34 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             log.warning("gh api graphql (review threads) failed: %s", proc.stderr[-300:])
             return None
         try:
-            conn = (json.loads(proc.stdout)["data"]["repository"]["pullRequest"]
-                    ["reviewThreads"])
+            data = json.loads(proc.stdout)["data"]
+            conn = data["repository"]["pullRequest"]["reviewThreads"]
         except (json.JSONDecodeError, KeyError, TypeError) as err:
             log.warning("unexpected review-threads payload (%s): %s", err, proc.stdout[:300])
             return None
+        bot_login = ((data.get("viewer") or {}).get("login") or "").strip()
         for node in conn.get("nodes") or []:
             if node.get("isResolved"):
                 continue
-            first = ((node.get("comments") or {}).get("nodes") or [{}])[0]
+            comments = [{
+                "author": (c.get("author") or {}).get("login", "?"),
+                "body": c.get("body", ""),
+                "comment_id": c.get("databaseId"),
+                "created_at": c.get("createdAt"),
+            } for c in ((node.get("comments") or {}).get("nodes") or []) if c]
+            first = comments[0] if comments else {}
             threads.append({
                 "id": node.get("id"),
-                "comment_id": first.get("databaseId"),
+                # The REST reply endpoint takes the OPENING comment's id: replies to it
+                # land at the bottom of the thread whatever its depth.
+                "comment_id": first.get("comment_id"),
                 "path": node.get("path"),
                 "line": node.get("line"),
                 "outdated": bool(node.get("isOutdated")),
-                "author": (first.get("author") or {}).get("login", "?"),
+                "author": first.get("author", "?"),
                 "body": first.get("body", ""),
+                "comments": comments,
+                "bot_login": bot_login,
             })
         page = conn.get("pageInfo") or {}
         if not page.get("hasNextPage"):
@@ -1699,19 +1861,67 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
     return threads
 
 
-def format_unresolved_threads(threads: list[dict], ids: bool = False) -> str:
+def _comment_label(comment: dict, thread: dict, bot_ids: set) -> tuple[str, bool]:
+    """(label, is_bot). The bot's GitHub login is often the operator's own account, so
+    only replies coderbot itself posted (ids recorded in state) are "codebot (you)"; any
+    other comment from that login is flagged as coming from the shared account — the
+    operator giving instructions through it."""
+    author = (comment.get("author") or "?").strip() or "?"
+    if comment.get("comment_id") in bot_ids:
+        return "codebot (you)", True
+    login = (thread.get("bot_login") or "").strip()
+    if login and author == login:
+        # Replies posted before their ids were tracked: recognise the RESOLVE-reason shape.
+        if _BOT_REPLY_SHAPE.match((comment.get("body") or "").strip()):
+            return "codebot (you)", True
+        return f"{author} (your account)", False
+    return author, False
+
+
+_BOT_REPLY_SHAPE = re.compile(
+    r"^(fixed|answered|no change|not applicable|covered|already correct|resolved by codebot)\b",
+    re.IGNORECASE)
+
+
+def format_unresolved_threads(threads: list[dict], ids: bool = False,
+                              bot_comment_ids=()) -> str:
+    """`ids=False`: the compact opener-only listing for emails. `ids=True`: the worker
+    view — thread id plus EVERY comment in order, the bot's own replies labelled as its
+    own and the latest human comment marked as the one to respond to, so a reviewer's
+    follow-up (and the fact that the bot already answered once) is never lost."""
+    bot_ids = set(bot_comment_ids or ())
     lines = []
     for i, t in enumerate(threads, 1):
         loc = f"{t['path']}:{t['line']}" if t.get("line") else (t.get("path") or "(general)")
         tag = " [outdated code]" if t.get("outdated") else ""
         head = f"[{i}] {loc} ({t.get('author', '?')}){tag}"
-        if ids:
-            head += f"\nthread_id: {t.get('id')}"
-        body = (t.get("body") or "").strip()
-        if len(body) > 400 and not ids:  # full text when the worker must act on it
-            body = body[:400] + "…"
-        lines.append(f"{head}\n{body}")
+        if not ids:
+            body = (t.get("body") or "").strip()
+            if len(body) > 400:
+                body = body[:400] + "…"
+            lines.append(f"{head}\n{body}")
+            continue
+        head += f"\nthread_id: {t.get('id')}"
+        comments = t.get("comments") or [{"author": t.get("author", "?"), "body": t.get("body", "")}]
+        labels = [_comment_label(c, t, bot_ids) for c in comments]
+        latest = max((j for j, (_, is_bot) in enumerate(labels) if not is_bot), default=None)
+        rendered = []
+        for j, (c, (who, _)) in enumerate(zip(comments, labels)):
+            if j == latest and len(comments) > 1:
+                who += " (latest — respond to this)"
+            rendered.append(f"{who}: {(c.get('body') or '').strip()}")
+        lines.append(head + "\n" + "\n".join(rendered))
     return "\n\n".join(lines)
+
+
+def thread_has_new_comments(thread: dict, seen: dict) -> bool:
+    """True unless the bot already replied on this thread and nothing was posted since.
+    `seen` maps thread id -> number of comments at the time of the bot's last reply
+    (state["pr_threads_seen"])."""
+    n_seen = seen.get(thread.get("id"))
+    if n_seen is None:
+        return True
+    return len(thread.get("comments") or []) > n_seen
 
 
 def _is_ocr_thread(thread: dict) -> bool:
@@ -1731,6 +1941,7 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
     if not known:
         return 0
     owner_repo, number = _pr_owner_number(state["pr_url"])
+    seen = state.setdefault("pr_threads_seen", {})
     resolved = 0
     for line in output.splitlines():
         if not line.startswith("RESOLVE:"):
@@ -1751,13 +1962,43 @@ def _resolve_review_threads(state: dict, output: str, key: str = "review_threads
                 if reply.returncode != 0:
                     log.warning("could not reply on thread %s: %s",
                                 thread_id, reply.stderr[-300:])
+                else:
+                    _remember_bot_comment(state, reply.stdout)
+            if _answered_only(thread, reason):
+                # A human's thread that got an answer but no code change stays open:
+                # closing it over the reviewer's head is their call, not the bot's. It is
+                # not picked up again until the reviewer posts something new.
+                seen[thread_id] = len(thread.get("comments") or []) + 1
+                log.info("answered human thread %s without resolving it (%s)",
+                         thread_id, reason[:100])
+                continue
             if resolve_review_thread(thread_id):
                 resolved += 1
+                seen.pop(thread_id, None)
                 log.info("resolved review thread %s (%s)", thread_id, reason[:100])
         except subprocess.TimeoutExpired:
             log.warning("resolving thread %s timed out", thread_id)
     log.info("resolved %d/%d review thread(s) from RESOLVE lines", resolved, len(known))
     return resolved
+
+
+def _remember_bot_comment(state: dict, reply_json: str) -> None:
+    """Record the id of a reply coderbot posted, so the thread view can tell its own
+    words from the operator's (they may share the GitHub account)."""
+    try:
+        cid = json.loads(reply_json).get("id")
+    except (json.JSONDecodeError, AttributeError):
+        return
+    if cid is not None:
+        ids = state.setdefault("bot_comment_ids", [])
+        if cid not in ids:
+            ids.append(cid)
+
+
+def _answered_only(thread: dict, reason: str) -> bool:
+    """A RESOLVE reason on a human-opened thread that reports no code change (anything
+    not starting with "fixed")."""
+    return not _is_ocr_thread(thread) and not reason.lower().startswith("fixed")
 
 
 def resolve_review_thread(thread_id: str) -> bool:
@@ -1891,9 +2132,10 @@ def _finish_address_pr_threads(state: dict) -> None:
     output = (state.get("push_context") or {}).get("output", "")
     resolved = _resolve_review_threads(state, output, key="pr_threads")
     threads = state.pop("pr_threads", [])
-    if resolved < len(threads):
+    answered = sum(1 for t in threads if t.get("id") in (state.get("pr_threads_seen") or {}))
+    if resolved + answered < len(threads):
         log.warning("%d/%d review thread(s) still unresolved after the round",
-                    len(threads) - resolved, len(threads))
+                    len(threads) - resolved - answered, len(threads))
     state["state"] = "WAIT_MERGE"
 
 
@@ -2220,6 +2462,11 @@ def handle_merge_wait(state: dict) -> None:
     human reviewer's) and address them, so live feedback gets fixed before the user
     even says 'merge'. Falls through to the normal inbox check either way."""
     threads = unresolved_review_threads(state["pr_url"])
+    if threads is not None:
+        # A human thread the bot already answered (without a code change) is left open
+        # for the reviewer to close; it re-enters the queue only once they post again.
+        seen = state.get("pr_threads_seen") or {}
+        threads = [t for t in threads if thread_has_new_comments(t, seen)]
     if threads is None:
         log.warning("could not fetch review threads; checking the inbox only this tick")
     elif not threads:
@@ -2307,7 +2554,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_i
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
               "pr_title_guidance",
-              "pr_threads", "pr_thread_round", "pr_thread_notified", "verify_round",
+              "pr_threads", "pr_thread_round", "pr_thread_notified", "pr_threads_seen",
+              "bot_comment_ids", "verify_round",
               "review_gate_round", "archive_round", "archive_path", "e2e_repair_head",
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
@@ -2620,6 +2868,18 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         email(state, "resumed", f"Resuming this task from state {state['state']}.")
 
 
+def _is_transient_network_error(error: BaseException) -> bool:
+    """A network blip talking to Gmail/GitHub (TLS EOF, connection reset, DNS, timeout,
+    5xx/429), as opposed to a fault in the state being executed."""
+    if isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError,
+                          socket.gaierror, socket.herror)):
+        return True
+    if type(error).__module__.startswith("httplib2"):  # ServerNotFoundError & co.
+        return True
+    status = getattr(getattr(error, "resp", None), "status", None)  # googleapiclient HttpError
+    return status in (429, 500, 502, 503, 504)
+
+
 def check_commands(state: dict) -> bool:
     """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
     the tick should skip normal dispatch (an ABORT reset or a DONE completion).
@@ -2632,8 +2892,12 @@ def check_commands(state: dict) -> bool:
     """
     try:
         polled = gmail_client.poll_command()
-    except Exception:
-        log.exception("command check could not poll gmail; skipping this tick")
+    except Exception as error:
+        if _is_transient_network_error(error):
+            log.warning("command check could not poll gmail (%s: %s); skipping this tick",
+                        type(error).__name__, error)
+        else:
+            log.exception("command check could not poll gmail; skipping this tick")
         return False
     if polled is None:
         return False
@@ -2870,9 +3134,8 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
     re-issue their own contract prompt (the answer alone would not make the session emit
     the completion contract again); every other phase gets the answer plus its rules."""
     if phase in ("VERIFYING", "INTERNAL_REVIEW"):
-        template = prompts.VERIFY if phase == "VERIFYING" else prompts.INTERNAL_REVIEW
-        return (f"User recovery guidance:\n{reply}\n\n"
-                + prompts.render(template, slug=state["slug"]))
+        gate_prompt = _verify_prompt if phase == "VERIFYING" else _internal_review_prompt
+        return f"User recovery guidance:\n{reply}\n\n" + gate_prompt(state)
     if phase == "ARCHIVING":
         return prompts.render(prompts.FIX_ARCHIVE,
                               error=state.get("archive_error", "unknown archival failure"),
@@ -3094,19 +3357,21 @@ def _run_loop() -> None:
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
             if check_commands(state):
                 pass  # reset to IDLE; skip normal dispatch this tick
-            elif state["state"] == "WAIT_REVIEW" and check_pr_conflicts(state):
-                pass  # the base branch moved and conflicted the PR; rerouted to
-                # RESOLVE_CONFLICTS (or WAIT_STUCK) and dispatched next tick
+            elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
+                pass  # the PR was merged/closed on GitHub, or the base branch moved
+                # and conflicted it; rerouted (IDLE / WAIT_STUCK / RESOLVE_CONFLICTS)
+                # and dispatched next tick
             elif state["state"] == "WAIT_REVIEW":
                 handle_review_wait(state)
             elif state["state"] == "WAIT_MERGE":
                 # A pending reply speaks to the CURRENT PR and is consumed first —
-                # do_merge_reply handles CONFLICTING itself. Only a reply-less tick
-                # watches for a conflict, so a reply is never silently carried across
-                # a conflict detour.
+                # do_merge_reply handles MERGED and CONFLICTING itself. Only a
+                # reply-less tick watches the PR, so a reply is never silently carried
+                # across a conflict detour. Someone merging the PR on GitHub finishes
+                # the task here instead of leaving it waiting for a 'merge' forever.
                 handle_merge_wait(state)
                 if state["state"] == "WAIT_MERGE":
-                    check_pr_conflicts(state)
+                    check_pr_status(state)
             elif state["state"] in WAITS:
                 handle_wait(state)
             else:
@@ -3120,18 +3385,24 @@ def _run_loop() -> None:
             _maybe_ping(state)
             save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
-        except Exception:
-            failures = state.setdefault("failures", {})
-            failures[prev] = failures.get(prev, 0) + 1
-            log.exception("cycle failed in %s (%d/%d); retrying in %ss",
-                          prev, failures[prev], config.MAX_STATE_FAILURES, backoff)
-            if failures[prev] >= config.MAX_STATE_FAILURES and _escalate(state, prev):
-                if state["state"] != prev:
-                    state["last_transition"] = time.time()
-                save_state(state)
-                backoff = config.POLL_INTERVAL_SECONDS
-                time.sleep(config.POLL_INTERVAL_SECONDS)
-                continue
+        except Exception as error:
+            if _is_transient_network_error(error):
+                # A network blip is not a fault of this state: one line, no traceback,
+                # and no progress toward the WAIT_STUCK escalation.
+                log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                            "retrying in %ss", prev, type(error).__name__, error, backoff)
+            else:
+                failures = state.setdefault("failures", {})
+                failures[prev] = failures.get(prev, 0) + 1
+                log.exception("cycle failed in %s (%d/%d); retrying in %ss",
+                              prev, failures[prev], config.MAX_STATE_FAILURES, backoff)
+                if failures[prev] >= config.MAX_STATE_FAILURES and _escalate(state, prev):
+                    if state["state"] != prev:
+                        state["last_transition"] = time.time()
+                    save_state(state)
+                    backoff = config.POLL_INTERVAL_SECONDS
+                    time.sleep(config.POLL_INTERVAL_SECONDS)
+                    continue
             _maybe_ping(state)  # a failing step is exactly when "is it stuck?" gets asked
             save_state(state)
             time.sleep(backoff)

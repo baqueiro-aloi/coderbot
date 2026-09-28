@@ -46,7 +46,7 @@ missing:
   required for codebot's detection and review-thread polling to see it.
   - **Missing**: the post-PR review wait is skipped and the PR is emailed to
     the user immediately, and codebot adds a backlog item requesting the
-    workflow.
+    workflow (set `CODEBOT_SELF_HEAL_CODE_REVIEW=off` to not add it).
 
 OpenSpec owns requirements, design, and tasks; Superpowers owns engineering
 discipline; coderbot owns state, archive timing, push, PR, and merge. The image
@@ -296,16 +296,25 @@ loop is capped by `CODEBOT_REVIEW_MAX_ROUNDS` (default 3); leftovers are mention
 the "PR ready" email. A failed thread query is never read as "no threads".
 
 While waiting for your merge decision (WAIT_MERGE) codebot keeps polling the PR for
-unresolved threads from anyone (a human reviewer included) and addresses them the same
-way (ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). On `merge` it
-re-checks: unresolved threads (or a failed query) **block the merge** with an email
-listing them; reply `merge anyway` to force. Merging is irreversible, so the classifier
-must return an explicit `force: true` for that.
+unresolved threads from anyone (a human reviewer included) and addresses them
+(ADDRESS_PR_THREADS, capped by `CODEBOT_PR_THREAD_MAX_ROUNDS`). Human threads are
+handled differently from the bot reviewer's: the agent sees the **whole thread** (every
+comment, its own earlier replies labelled, the latest comment marked as the one to
+answer) and is told the reviewer's word is final — a change request is implemented, not
+debated, and a repeated request after an earlier explanation is implemented without
+further argument. A thread that only asked a question gets an `answered: …` reply and is
+**left open** for the reviewer to close; codebot does not touch it again until they post
+something new. On `merge` it re-checks: unresolved threads (or a failed query) **block
+the merge** with an email listing them; reply `merge anyway` to force. Merging is
+irreversible, so the classifier must return an explicit `force: true` for that.
 
 ## Base-branch conflicts (RESOLVE_CONFLICTS)
 
-While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks its
-mergeability. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
+While a PR is open (WAIT_REVIEW / WAIT_MERGE), every reply-less tick checks the PR's
+state. A PR **merged on GitHub by someone else** finishes the task exactly as codebot's
+own merge would (item marked done, "task complete" email); one **closed without
+merging** stops with a stuck email asking whether to `complete`, `abort`, or reopen it
+and `retry`. A `CONFLICTING` PR (the base branch moved — another PR merged) detours
 through RESOLVE_CONFLICTS: the working session merges `origin/$CODEBOT_BASE_BRANCH`
 into the branch (**merge, never rebase** — the branch is pushed), re-runs the tests and
 commits; codebot pushes and the automated review re-runs before the PR can merge. A

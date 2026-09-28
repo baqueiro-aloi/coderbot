@@ -12,6 +12,11 @@ services:
   codebot:
     build: /mnt/coderbot/coderbot
     restart: unless-stopped
+    # Run Docker's tiny init as PID 1 so orphaned children of the agent's tool calls get
+    # reaped; without it main.py is PID 1, never reaps them, and zombies pile up over a
+    # long run. init forwards SIGTERM to main.py, so `kill 1` in healthcheck.sh and
+    # `docker stop` behave as before.
+    init: true
     stop_grace_period: 120s
     env_file:
       - /mnt/coderbot/codebot.env

@@ -50,6 +50,17 @@ task will free it up later.
 """
 
 
+def sentinel_preamble(output: str) -> str:
+    """Everything the agent wrote BEFORE the sentinel line that sentinel_question()
+    returns the question from (e.g. the design it is asking the user to approve), or
+    "" when there is no sentinel or nothing precedes it."""
+    lines = output.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(SENTINEL):
+            return "\n".join(lines[:i]).strip()
+    return ""
+
+
 def sentinel_question(output: str) -> str | None:
     """The question after the LAST sentinel that BEGINS A LINE at column 0 (exactly as
     the contract instructs the model to emit it), else None. Untrusted text interpolated
@@ -72,6 +83,10 @@ class ClaudeResult:
     @property
     def question(self) -> str | None:
         return sentinel_question(self.output)
+
+    @property
+    def preamble(self) -> str:
+        return sentinel_preamble(self.output)
 
     @property
     def attachments(self) -> list[str]:
