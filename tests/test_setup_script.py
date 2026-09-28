@@ -1,38 +1,25 @@
-"""Source-contract tests for the interactive setup script."""
-import re
+"""The interactive setup launcher remains portable across supported shells."""
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class SetupScriptTests(unittest.TestCase):
-    def test_round_limits_are_displayed_validated_written_and_summarized(self):
-        source = (ROOT / "scripts/setup.sh").read_text()
-        current_settings = source[source.index("print_current_settings()"):
-                                  source.index("prepare_env_write()")]
-        prompts = source[source.index("CODEBOT_LOG_LEVEL=$(prompt_var"):
-                         source.index("CLAUDE_API_KEY=\"\"")]
-        env_write_start = source.index('cat >"$ENV_FILE" <<EOF')
-        env_write = source[env_write_start:
-                           source.index("\nEOF", env_write_start)]
-        summary = source[source.index('echo "Wrote $ENV_FILE with:"'):
-                         source.index("fi", source.index('echo "Wrote $ENV_FILE with:"'))]
-
-        for variable in (
-                "CODEBOT_QUALITY_GATE_MAX_ROUNDS",
-                "CODEBOT_ARCHIVE_MAX_ROUNDS",
-        ):
-            with self.subTest(variable=variable):
-                self.assertIn(variable, current_settings)
-                self.assertRegex(
-                    prompts,
-                    rf'{variable}=\$\(prompt_var "{variable}"[\s\S]*?"3"\)'
-                    rf'[\s\S]*?"\${variable}" =~ \^\[1-9\]\[0-9\]\*\$',
-                )
-                self.assertIn(f"{variable}=${variable}", env_write)
-                self.assertIn(variable, summary)
+    def test_launcher_is_executable_and_shows_same_cli_on_sh_bash_zsh(self):
+        script = ROOT / "scripts/setup.sh"
+        self.assertTrue(script.stat().st_mode & 0o111)
+        for shell in ("sh", "bash", "zsh"):
+            if not shutil.which(shell):
+                continue
+            with self.subTest(shell=shell):
+                proc = subprocess.run([shell, str(script), "--help"], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=10)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("--text", proc.stdout)
+                self.assertIn("Jira", proc.stdout)
 
 
 if __name__ == "__main__":

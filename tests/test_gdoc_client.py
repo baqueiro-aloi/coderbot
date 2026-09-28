@@ -2,8 +2,13 @@
 
 Pure functions over a fake Docs payload — the Google client libs are stubbed."""
 import sys
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import config
 
 with patch.dict(sys.modules, {"googleapiclient": MagicMock(),
                               "googleapiclient.discovery": MagicMock(),
@@ -13,8 +18,6 @@ with patch.dict(sys.modules, {"googleapiclient": MagicMock(),
                               "google.auth.transport.requests": MagicMock(),
                               "google_auth": MagicMock()}):
     import gdoc_client
-
-import config
 
 SECTION = "Backlog:"
 
@@ -121,7 +124,7 @@ class ClaimMarkers(unittest.TestCase):
         self.assertIsNone(gdoc_client.claimed_by("Task with no marker"))
 
     def test_foreign_claims_hidden_own_claim_flagged(self):
-        tasks = [_task(f"mine [implementing: {config.INSTANCE_ID}]"),
+        tasks = [_task(f"mine [implementing: {gdoc_client.ownership.me()}]"),
                  _task("theirs [implementing: another-bot]"), _task("free")]
         with patch.object(config, "DOC_SECTION", SECTION):
             pend = gdoc_client._pending(tasks)
@@ -133,6 +136,26 @@ class ClaimMarkers(unittest.TestCase):
         self.assertEqual(gdoc_client.claimed_by("x [implementing: ] [implementing: alpha]"), "?")
         with patch.object(config, "DOC_SECTION", SECTION):
             self.assertEqual(gdoc_client._pending([_task("half [implementing: ]")]), [])
+
+    def test_same_readable_name_other_fingerprint_is_foreign(self):
+        stranger = f"{config.INSTANCE_ID}@{'f' * 32}"
+        if stranger == gdoc_client.ownership.me():
+            stranger = f"{config.INSTANCE_ID}@{'e' * 32}"
+        with patch.object(config, "DOC_SECTION", SECTION):
+            pending = gdoc_client._pending([_task(f"different [implementing: {stranger}]"),
+                                             _task(f"own [implementing: {gdoc_client.ownership.me()}]")])
+        self.assertEqual([(item["text"], item["claimed_by_me"]) for item in pending],
+                         [("own", True)])
+
+    def test_legacy_claim_without_local_state_stays_reserved(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(config, "STATE_PATH", Path(tmp) / "state.json"), \
+                patch.object(config, "HOLDS_PATH", Path(tmp) / "holds.json"):
+            self.assertEqual(gdoc_client._pending([
+                _task(f"legacy [implementing: {config.INSTANCE_ID}]")]), [])
+            (Path(tmp) / "state.json").write_text(json.dumps({"item": "legacy"}))
+            self.assertEqual([i["text"] for i in gdoc_client._pending([
+                _task(f"legacy [implementing: {config.INSTANCE_ID}]")])], ["legacy"])
 
     def test_marker_ranges_use_utf16_offsets(self):
         doc = {"body": {"content": [
@@ -158,7 +181,7 @@ class HoldMarkers(unittest.TestCase):
     def test_find_task_prefers_own_hold(self):
         doc = {"body": {"content": [
             _para("dup", 20, level=0),
-            _para(f"dup [on hold: {config.INSTANCE_ID}]", 60, level=0),
+            _para(f"dup [on hold: {gdoc_client.ownership.me()}]", 60, level=0),
         ]}}
         self.assertEqual(gdoc_client._find_task(doc, "dup")["ranges"][0][0], 60)
 
@@ -182,7 +205,7 @@ class TaskIdentity(unittest.TestCase):
             _para(SECTION, 1, heading=True),
             _para("dup task", 20, level=0, struck=True),
             _para("dup task", 40, level=0),
-            _para(f"other [implementing: {config.INSTANCE_ID}]", 60, level=0),
+            _para(f"other [implementing: {gdoc_client.ownership.me()}]", 60, level=0),
             _para("other", 200, level=0),
         ]}}
         self.assertEqual(gdoc_client._find_task(doc, "dup task")["ranges"][0][0], 40)
@@ -191,7 +214,7 @@ class TaskIdentity(unittest.TestCase):
     def test_find_mine_after_bullet_edit(self):
         doc = {"body": {"content": [
             _para(SECTION, 1, heading=True),
-            _para(f"renamed bullet text [implementing: {config.INSTANCE_ID}]", 20, level=0),
+            _para(f"renamed bullet text [implementing: {gdoc_client.ownership.me()}]", 20, level=0),
             _para("some other task", 300, level=0),
         ]}}
         self.assertIsNone(gdoc_client._find_task(doc, "original bullet text"))
@@ -199,8 +222,8 @@ class TaskIdentity(unittest.TestCase):
 
     def test_find_mine_refuses_to_guess(self):
         doc = {"body": {"content": [
-            _para(f"a [implementing: {config.INSTANCE_ID}]", 20, level=0),
-            _para(f"b [implementing: {config.INSTANCE_ID}]", 200, level=0),
+            _para(f"a [implementing: {gdoc_client.ownership.me()}]", 20, level=0),
+            _para(f"b [implementing: {gdoc_client.ownership.me()}]", 200, level=0),
         ]}}
         self.assertIsNone(gdoc_client._find_mine(doc))
 

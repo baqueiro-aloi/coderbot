@@ -4,6 +4,7 @@ import fcntl
 import json
 import logging
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -19,7 +20,7 @@ import config
 import drive_client
 import evidence
 import task_source
-import gmail_client
+import conversation as gmail_client
 import prompts
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
@@ -61,11 +62,20 @@ def subject(state: dict, phase: str) -> str:
     return f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — {phase}"
 
 
+def _reply_here() -> str:
+    return ("Reply in this Slack thread to continue." if config.COMM_CHANNEL == "slack"
+            else "Reply to this email to continue.")
+
+
+def _contact_name() -> str:
+    return "Slack message" if config.COMM_CHANNEL == "slack" else "email"
+
+
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
           new_thread: bool = False) -> None:
-    thread_id = None if new_thread else state.get("thread_id")
+    thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     subj = subject(state, phase)
-    log.info("emailing %r (thread=%s, %d attachment(s), %d body chars)",
+    log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
     state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
@@ -73,7 +83,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
     _note_contact(state)
     names = [Path(a).name for a in (attachments or [])]
-    trail(state, phase, body + (f"\n\nAttachments (emailed): {', '.join(names)}" if names else ""))
+    trail(state, phase, body + (f"\n\nAttachments ({'emailed' if config.COMM_CHANNEL == 'email' else 'shared'}): {', '.join(names)}" if names else ""))
 
 
 def trail(state: dict, headline: str, body: str = "") -> None:
@@ -211,7 +221,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     body = f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n"
     if preamble:
         body += f"{preamble}\n\n---\n\n"
-    body += f"{question}\n\nReply to this email to continue."
+    body += f"{question}\n\n{_reply_here()}"
     email(state, f"question during {phase}", body, attachments)
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
@@ -510,7 +520,7 @@ _EVIDENCE_CONTRACT = (
 
 _DEMO_TEST_CONTRACT = (
     "\n- ONE of those tests must be a demo test whose title contains the tag `@evidence`. "
-    "Codebot records ONLY this test as the video evidence emailed to the user, so it must "
+    "Codebot records ONLY this test as the video evidence shared with the user, so it must "
     "show THIS feature working, on its own, as a watchable walkthrough:\n"
     "  - Navigate to where the feature lives and exercise it end-to-end in one continuous flow.\n"
     "  - Before and after each key interaction, make sure the relevant UI is actually visible "
@@ -561,11 +571,19 @@ def do_pick(state: dict) -> None:
     # Only tracked, uncommitted changes matter — untracked files (e.g. host-side
     # git-ignored config not excluded inside the container) don't block a checkout.
     if git("status", "--porcelain", "--untracked-files=no"):
-        email(state, "blocked: dirty working tree",
-              "The repo working tree has uncommitted changes; codebot will not start a "
-              "new task. Clean it up and reply to this email to retry.", new_thread=True)
+        if config.COMM_CHANNEL == "slack":
+            if not state.get("dirty_notified"):
+                gmail_client.announce(
+                    f"[{config.INSTANCE_ID}] The working tree in {config.REPO_PATH} is dirty. "
+                    "I will recheck it automatically and start the next task once clean.")
+                state["dirty_notified"] = True
+        else:
+            email(state, "blocked: dirty working tree",
+                  "The repo working tree has uncommitted changes; codebot will not start a "
+                  "new task. Clean it up and reply to this email to retry.", new_thread=True)
         state["state"] = "WAIT_CLEAN"
         return
+    state.pop("dirty_notified", None)
     # Sync to the base branch before detecting target-repo capabilities and seeding
     # any self-healing item, so both reflect its actual current state rather than
     # whatever branch was last checked out.
@@ -619,6 +637,7 @@ def do_pick(state: dict) -> None:
     state.update(item=chosen["text"], item_detail=chosen["detail"],
                  item_images=chosen.get("images", []),
                  item_id=chosen.get("id") or None, item_url=chosen.get("url") or None,
+                 item_key=chosen.get("key") or None,
                  slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
@@ -630,6 +649,13 @@ def do_pick(state: dict) -> None:
     # The branch's starting point: later phases measure overreach against it.
     state["base_sha"] = git("rev-parse", "HEAD")
     state["state"] = "EXPLORING"
+    if config.COMM_CHANNEL == "slack":
+        # Checkpoint the correlation nonce before the network call; retry can
+        # reconcile a root Slack accepted just before a process crash.
+        state["thread_nonce"] = secrets.token_hex(12)
+        save_state(state)
+        state["thread_id"] = gmail_client.open_thread(state)
+        save_state(state)
     log.info("picked %r -> %s", choice["item"], branch)
     trail(state, f"Picked this item; working on branch {branch}", choice.get("reason", ""))
 
@@ -1333,7 +1359,10 @@ def do_open_pr(state: dict) -> None:
         _resume_archiving(state, "archive is not committed in HEAD")
         return
     body = f"Implements: {state['item']}\n\nOpenSpec archive: `{reference}`"
-    if state.get("item_url"):
+    if config.TASK_SOURCE == "jira" and state.get("item_url"):
+        key = state.get("item_key") or state["item_url"].rstrip("/").rsplit("/", 1)[-1]
+        body += f"\n\nCloses {key}\nJira: {state['item_url']}"
+    elif state.get("item_url"):
         # A GitHub issue backs the item: let the merge close it.
         body += f"\n\nCloses {state['item_url']}"
     if state.get("pr_url"):
@@ -2076,9 +2105,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
                       f"`{config.BASE_BRANCH}` has changed and this PR now conflicts with "
                       f"it, so I can't merge it yet.\nPR: {state['pr_url']}\n\n"
                       "I'm resolving the conflicts now. If any conflict has genuinely "
-                      "different reasonable resolutions I'll email you the alternatives; "
+                      "different reasonable resolutions I'll send you the alternatives; "
                       "otherwise the automated review re-runs on the resolved branch and "
-                      "I'll email when it's clean — reply 'merge' then.")
+                      "I'll message you when it's clean — reply 'merge' then.")
             return
         # Review-thread gate: inline review threads may appear at any time, including
         # after the "PR ready" email (handle_merge_wait addresses them proactively, but
@@ -2293,7 +2322,7 @@ def _expected_from_user(state: dict) -> str:
                      "reply 'merge anyway' to merge regardless.")
         return text
     if st == "WAIT_REPLY":
-        question = state.get("pending_question") or "(question not recorded; see my last email below)"
+        question = state.get("pending_question") or "(question not recorded; see my last message below)"
         return (f"your answer to the question I asked during {state.get('return_state', '?')}:"
                 f"\n\n{question}")
     if st == "WAIT_STUCK":
@@ -2308,7 +2337,7 @@ def _expected_from_user(state: dict) -> str:
         return (f"a clean working tree in {config.REPO_PATH}: it has uncommitted changes to "
                 "tracked files and I won't start a task on top of them. Commit, stash or "
                 "discard them, then reply to this thread (any text) and I'll retry.")
-    return "your reply to my last email (quoted below)."
+    return "your reply to my last message (quoted below)."
 
 
 def _review_wait_status(state: dict, now: float) -> str:
@@ -2319,10 +2348,10 @@ def _review_wait_status(state: dict, now: float) -> str:
         remaining = config.REVIEW_WAIT_TIMEOUT_SECONDS - (now - since)
         line = f"Waiting since {_fmt_ts(since)} ({_fmt_dur(now - since)} so far)"
         if remaining > 0:
-            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll email "
+            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll message "
                      "you the PR without it.")
         else:
-            line += "; that is past my wait limit, so I'm about to email you the PR without it."
+            line += "; that is past my wait limit, so I'm about to message you the PR without it."
         lines.append(line)
     try:
         check = code_review_check(pr_url)
@@ -2341,7 +2370,7 @@ def _review_wait_status(state: dict, now: float) -> str:
         lines.append(f"Automated review round {state['review_round']} of at most "
                      f"{config.REVIEW_MAX_ROUNDS}.")
     lines.append("When it finishes I'll fix or answer any unresolved review threads, then "
-                 "email you the PR.")
+                 "send you the PR.")
     return "\n".join(lines)
 
 
@@ -2366,14 +2395,14 @@ def _ping_body(state: dict, now: float, count: int) -> str:
     if last_contact is None:
         last_contact = now
     lines = [f"Task: {state.get('item', '-')}", f"State: {st}",
-             f"This thread has been quiet for {_fmt_dur(now - last_contact)} (last real email "
+             f"This thread has been quiet for {_fmt_dur(now - last_contact)} (last real {_contact_name()} "
              f"sent or received: {_fmt_ts(last_contact)}), so here is where things stand.", ""]
     if st in USER_SIDE_WAITS:
         lines.append("The ball is in your court: I'm waiting for " + _expected_from_user(state))
-        lines += ["", "Nothing has changed on my side since my last email."]
+        lines += ["", "Nothing has changed on my side since my last message."]
         last = state.get("last_email")
         if last:
-            lines += ["", f"--- For reference, my last email ({_fmt_ts(last['sent_at'])}) ---",
+            lines += ["", f"--- For reference, my last message ({_fmt_ts(last['sent_at'])}) ---",
                       f"Subject: {last['subject']}", "", last["body"]]
     else:
         lines.append("The ball is in my court; nothing is needed from you right now.")
@@ -2383,7 +2412,7 @@ def _ping_body(state: dict, now: float, count: int) -> str:
             lines.append(f"Heads up: the last {failed} attempt(s) at this step failed and I'm "
                          f"retrying; after {config.MAX_STATE_FAILURES} in a row I'll stop and "
                          "ask for your help.")
-        lines.append("I'll email you as soon as I need something from you or have a result "
+        lines.append("I'll message you as soon as I need something from you or have a result "
                      "to show.")
     lines += ["", f"(Check-in {count}. Unless something happens on this thread, the next one "
                   f"comes in about {_fmt_dur(_ping_interval(count))}. Reply STATUS for a full "
@@ -2434,12 +2463,22 @@ PHASES = {
 WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_CLEAN", "WAIT_REVIEW", "WAIT_STUCK"}
 
 
+def check_clean_checkout(state: dict) -> None:
+    """Slack's pre-task block retries itself; email keeps waiting for a reply."""
+    if not git("status", "--porcelain", "--untracked-files=no"):
+        state.pop("dirty_notified", None)
+        state["state"] = "IDLE"
+
+
 def handle_wait(state: dict) -> None:
     polled = gmail_client.poll_reply(state["thread_id"]) if state.get("thread_id") else None
     if polled is None:
         log.debug("%s: no reply yet on thread %s", state["state"], state.get("thread_id"))
         return
     msg_id, reply = polled
+    if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
+        gmail_client.mark_processed(msg_id)
+        return
     target = gmail_client.foreign_command(reply)
     if target:
         # A command addressed to ANOTHER instance, replied on our thread. That
@@ -2451,6 +2490,11 @@ def handle_wait(state: dict) -> None:
     log.info("reply received in %s: %r", state["state"], reply[:200])
     _note_contact(state)
     _handle_reply(state, reply)
+    if config.COMM_CHANNEL == "slack":
+        # Persist the state transition before clearing the durable inbox entry.
+        # If the process dies between those writes, restart skips reapplying it.
+        state["slack_last_handled_id"] = msg_id
+        save_state(state)
     # Consume the reply only now that handling finished without raising. If it threw
     # (e.g. a transient claude failure), the message stays unprocessed so the next tick
     # re-reads and re-handles it instead of silently dropping the user's reply.
@@ -2549,7 +2593,7 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_images", "base_sha", "slug",
+RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "base_sha", "slug", "thread_nonce",
               "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
@@ -2593,6 +2637,8 @@ def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
                      "next task):\n- " + "\n- ".join(problems))
     body += "\n\nI'll pick up the next pending item from the backlog."
     email(state, subj, body)
+    if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
+        state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
@@ -2723,6 +2769,8 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
           "from the backlog.", new_thread=new_thread)
+    if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
+        state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
@@ -2902,6 +2950,17 @@ def check_commands(state: dict) -> bool:
     if polled is None:
         return False
     msg_id, thread_id, command, targeted, note = polled
+    if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
+        gmail_client.mark_processed(msg_id)
+        return False
+    if (config.COMM_CHANNEL == "slack" and thread_id != state.get("thread_id")
+            and not any(h.get("thread_id") == thread_id for h in _load_holds())):
+        # A completed/aborted hold may still have a queued event before its root
+        # is retired. Never let that event target an unrelated active task.
+        gmail_client.mark_processed(msg_id)
+        return False
+    if config.COMM_CHANNEL == "slack" and _handle_held_command(msg_id, thread_id, command, note):
+        return False  # command addressed a held task, not the active one
     if command == "CONTINUE":
         if not _request_continue(thread_id, note):
             if thread_id and thread_id == state.get("thread_id"):
@@ -2914,10 +2973,16 @@ def check_commands(state: dict) -> bool:
                               "CONTINUE received, but no task is on hold on this thread.",
                               thread_id)
             return False
-        gmail_client.mark_processed(msg_id)
+        if config.COMM_CHANNEL == "email":
+            gmail_client.mark_processed(msg_id)
         gmail_client.send(f"{config.SUBJECT_PREFIX} general — will continue",
                           "Got it — this task is next: I'll resume it as soon as my current "
                           "work is done (right away if I'm idle).", thread_id)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+        if config.COMM_CHANNEL == "slack":
+            gmail_client.mark_processed(msg_id)
         return False
     if command == "HOLD":
         if not state.get("item"):
@@ -2928,6 +2993,9 @@ def check_commands(state: dict) -> bool:
             return False
         # Consume only AFTER handling (multi-step side effects, like DONE).
         _hold_task(state, thread_id)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
         gmail_client.mark_processed(msg_id)
         return True
     if command == "DONE":
@@ -2951,18 +3019,65 @@ def check_commands(state: dict) -> bool:
         # to re-run (a struck item just reports "mark manually" on the retry).
         _finish_task(state, "DONE command received: marking the current task complete.",
                      reset_repo=True)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
         gmail_client.mark_processed(msg_id)
         return True
-    # ABORT / STATUS: consume the trigger first — handling is idempotent, and marking it
-    # processed up front guarantees a failure afterwards can't loop us into re-running it.
-    gmail_client.mark_processed(msg_id)
+    # Gmail retains its mailbox-wide consume-first semantics. Slack's SQLite inbox
+    # instead checkpoints successful handling before marking an event consumed.
+    if config.COMM_CHANNEL == "email":
+        gmail_client.mark_processed(msg_id)
     if command == "STATUS":
         _send_status(state, thread_id)
         if thread_id and thread_id == state.get("thread_id"):
             _note_contact(state)  # a STATUS exchange on the task thread is contact too
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+            gmail_client.mark_processed(msg_id)
         return False  # STATUS is read-only; let the tick proceed normally
     _abort_and_reset(state, "ABORT received: I stopped the task in progress and reset myself "
                             "to a clean slate.", new_thread=True)
+    if config.COMM_CHANNEL == "slack":
+        state["slack_last_handled_id"] = msg_id
+        save_state(state)
+        gmail_client.mark_processed(msg_id)
+    return True
+
+
+def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -> bool:
+    """A held Slack thread addresses its own task, never the unrelated active task."""
+    hold = next((h for h in _load_holds() if h.get("thread_id") == thread_id), None)
+    if not hold:
+        return False
+    item, item_id = hold["item"], hold.get("item_id")
+    if command == "CONTINUE":
+        _request_continue(thread_id, note)
+        response = "I'll resume this task after the current work is done."
+    elif command == "STATUS":
+        response = (f"{config.INSTANCE_ID} · on hold: {item}\n"
+                    f"Branch: {hold.get('branch', '-')}\n"
+                    f"Resume requested: {bool(hold.get('requested'))}")
+    elif command == "HOLD":
+        response = f"Task is already on hold: {item}"
+    elif command == "ABORT":
+        task_source.unhold_task(item, item_id)
+        if not task_source.unclaim_task(item, item_id):
+            raise RuntimeError(f"could not release held task {item!r} from backlog")
+        _save_holds([h for h in _load_holds() if h.get("thread_id") != thread_id])
+        response = f"Released held task to the backlog: {item}"
+    elif command == "DONE":
+        if not task_source.mark_done(item, item_id):
+            raise RuntimeError(f"could not mark held task {item!r} done in backlog")
+        _save_holds([h for h in _load_holds() if h.get("thread_id") != thread_id])
+        response = f"Marked held task done: {item}"
+    else:
+        return False
+    gmail_client.send(f"{config.SUBJECT_PREFIX} held task — {command}", response, thread_id)
+    gmail_client.mark_processed(msg_id)
+    if command in ("ABORT", "DONE"):
+        gmail_client.close_thread(thread_id)
     return True
 
 
@@ -3011,7 +3126,7 @@ def _send_status(state: dict, thread_id: str) -> None:
     if state.get("last_transition"):
         lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
     if state.get("last_contact") is not None:
-        lines.append(f"Last real email on the task thread: {_fmt_ts(state['last_contact'])}")
+        lines.append(f"Last real {_contact_name()} on the task thread: {_fmt_ts(state['last_contact'])}")
     if state.get("ping_count"):
         lines.append(f"Silence check-ins sent since then: {state['ping_count']} "
                      f"(last at {_fmt_ts(state['last_ping_at'])})")
@@ -3023,7 +3138,7 @@ def _send_status(state: dict, thread_id: str) -> None:
     body = "codebot status:\n\n" + "\n".join(lines)
     last = state.get("last_email")
     if last:
-        body += (f"\n\n--- Last email sent ({_fmt_ts(last['sent_at'])}) ---\n"
+        body += (f"\n\n--- Last {'email' if config.COMM_CHANNEL == 'email' else 'Slack message'} sent ({_fmt_ts(last['sent_at'])}) ---\n"
                  f"Subject: {last['subject']}\n\n{last['body']}")
     subj = f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — status"
     gmail_client.send(subj, body, thread_id)
@@ -3299,8 +3414,18 @@ def main() -> None:
             "/" not in config.OPENCODE_MODEL or config.OPENCODE_MODEL.endswith("/")):
         raise SystemExit("OPENCODE_MODEL must be set to provider/model when CODEBOT_AGENT=opencode")
     validate_managed_runtime()
-    if not config.USER_EMAIL:
+    if config.COMM_CHANNEL not in ("email", "slack"):
+        raise SystemExit("CODEBOT_COMM_CHANNEL must be 'email' or 'slack'")
+    if config.COMM_CHANNEL == "email" and not config.USER_EMAIL:
         raise SystemExit("CODEBOT_USER_EMAIL must be set in .env")
+    if config.COMM_CHANNEL == "slack":
+        for setting, value in (("CODEBOT_SLACK_CHANNEL_ID", config.SLACK_CHANNEL_ID),
+                               ("CODEBOT_SLACK_BOT_TOKEN", config.SLACK_BOT_TOKEN),
+                               ("CODEBOT_SLACK_APP_TOKEN", config.SLACK_APP_TOKEN)):
+            if not value:
+                raise SystemExit(f"{setting} must be set when CODEBOT_COMM_CHANNEL=slack")
+        if not re.fullmatch(r"C[A-Z0-9]+", config.SLACK_CHANNEL_ID):
+            raise SystemExit("CODEBOT_SLACK_CHANNEL_ID must be a public channel ID (C...)")
     if config.TASK_SOURCE not in task_source.SOURCES:
         raise SystemExit("CODEBOT_TASK_SOURCE must be one of: " + ", ".join(task_source.SOURCES))
     if config.TASK_SOURCE == "gdoc" and not config.DOC_ID:
@@ -3309,6 +3434,21 @@ def main() -> None:
         raise SystemExit("CODEBOT_GH_PROJECT_URL (or CODEBOT_GH_PROJECT_OWNER and "
                          "CODEBOT_GH_PROJECT_NUMBER) must be set in .env when "
                          "CODEBOT_TASK_SOURCE=github")
+    if config.TASK_SOURCE == "jira":
+        for setting, value in (("CODEBOT_JIRA_URL", config.JIRA_URL),
+                               ("CODEBOT_JIRA_PROJECT_KEY", config.JIRA_PROJECT_KEY),
+                               ("CODEBOT_JIRA_EMAIL", config.JIRA_EMAIL),
+                               ("CODEBOT_JIRA_API_TOKEN", config.JIRA_API_TOKEN)):
+            if not value:
+                raise SystemExit(f"{setting} must be set when CODEBOT_TASK_SOURCE=jira")
+        if not re.fullmatch(r"https://[^/\s]+\.atlassian\.net", config.JIRA_URL):
+            raise SystemExit("CODEBOT_JIRA_URL must be an https://<site>.atlassian.net URL")
+        for setting, value in (("CODEBOT_JIRA_PICK_STATUS", config.JIRA_PICK_STATUS),
+                               ("CODEBOT_JIRA_ACTIVE_STATUS", config.JIRA_ACTIVE_STATUS),
+                               ("CODEBOT_JIRA_REVIEW_STATUS", config.JIRA_REVIEW_STATUS),
+                               ("CODEBOT_JIRA_DONE_STATUS", config.JIRA_DONE_STATUS)):
+            if not value:
+                raise SystemExit(f"{setting} must name a Jira workflow status")
     # .exists() not .is_dir(): in a git worktree .git is a file.
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
@@ -3318,6 +3458,7 @@ def main() -> None:
     except RuntimeError as err:
         raise SystemExit(f"backlog ({config.TASK_SOURCE}) unavailable: {err}") from err
     _acquire_single_instance_lock()
+    gmail_client.start()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.TASK_SOURCE,
@@ -3362,6 +3503,14 @@ def _run_loop() -> None:
             continue
         prev = state["state"]
         try:
+            if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
+                gmail_client.close_thread(state["retire_thread_id"])
+                state.pop("retire_thread_id")
+                save_state(state)
+            if (config.COMM_CHANNEL == "slack" and state.get("item")
+                    and state["state"] != "IDLE" and not state.get("thread_id")):
+                state["thread_id"] = gmail_client.open_thread(state)
+                save_state(state)
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
             if check_commands(state):
                 pass  # reset to IDLE; skip normal dispatch this tick
@@ -3380,6 +3529,8 @@ def _run_loop() -> None:
                 handle_merge_wait(state)
                 if state["state"] == "WAIT_MERGE":
                     check_pr_status(state)
+            elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
+                check_clean_checkout(state)
             elif state["state"] in WAITS:
                 handle_wait(state)
             else:
@@ -3392,6 +3543,10 @@ def _run_loop() -> None:
                 state["last_transition"] = time.time()
             _maybe_ping(state)
             save_state(state)
+            if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
+                gmail_client.close_thread(state["retire_thread_id"])
+                state.pop("retire_thread_id")
+                save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
         except Exception as error:
             if _is_transient_network_error(error):
@@ -3417,7 +3572,7 @@ def _run_loop() -> None:
             backoff = min(backoff * 2, 3600)
             continue
         if state["state"] in WAITS or state["state"] == "IDLE":
-            time.sleep(config.POLL_INTERVAL_SECONDS)
+            gmail_client.wait(config.POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
 """GitHub Projects v2 backend, against a fake `gh` that answers canned payloads."""
 import json
 import subprocess
+import tempfile
 import unittest
+import urllib.parse
+from pathlib import Path
 from unittest.mock import patch
 
 import config
@@ -91,7 +94,7 @@ class FakeGh:
                 if self.rival:
                     labels.append({"name": self.rival})
             else:
-                label = args[3].rsplit("/", 1)[1].replace("%3A", ":")
+                label = urllib.parse.unquote(args[3].rsplit("/", 1)[1])
                 labels[:] = [l for l in labels if l["name"] != label]
             return "[]"
         if args[0] == "label":
@@ -173,6 +176,37 @@ class Listing(Base):
 
 
 class Claiming(Base):
+    def test_same_name_different_fingerprint_is_foreign(self):
+        other = f"{config.GH_LABEL_PREFIX}:{config.INSTANCE_ID}@{'f' * 32}"
+        if other == ghp.claim_label():
+            other = f"{config.GH_LABEL_PREFIX}:{config.INSTANCE_ID}@{'e' * 32}"
+        fake = self.gh([issue("A", 1, "task", "Ready", labels=[other])])
+        self.assertFalse(ghp.claim_task("task", "A"))
+        self.assertEqual(fake.label_calls(), [])
+        self.assertEqual(ghp.list_pending_items(), [])
+
+    def test_foreign_hold_with_matching_readable_name_is_not_removed(self):
+        other = f"{config.GH_LABEL_PREFIX}-hold:{config.INSTANCE_ID}@{'f' * 32}"
+        if other == ghp.hold_label():
+            other = f"{config.GH_LABEL_PREFIX}-hold:{config.INSTANCE_ID}@{'e' * 32}"
+        fake = self.gh([issue("A", 1, "task", "In progress", labels=[other])])
+        self.assertFalse(ghp.hold_task("task", "A"))
+        self.assertFalse(ghp.unhold_task("task", "A"))
+        self.assertEqual(fake.label_calls(), [])
+
+    def test_legacy_marker_requires_local_state_before_migration(self):
+        legacy = f"{config.GH_LABEL_PREFIX}:{config.INSTANCE_ID}"
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(config, "STATE_PATH", Path(tmp) / "state.json"), \
+                patch.object(config, "HOLDS_PATH", Path(tmp) / "holds.json"):
+            fake = self.gh([issue("A", 1, "task", "In progress", labels=[legacy])])
+            self.assertFalse(ghp.claim_task("task", "A"))
+            self.assertEqual(fake.label_calls(), [])
+            (Path(tmp) / "state.json").write_text(json.dumps({"item_id": "A", "item": "task"}))
+            self.assertTrue(ghp.claim_task("task", "A"))
+            self.assertEqual({label["name"] for label in fake.items[0]["content"]["labels"]["nodes"]},
+                             {ghp.claim_label()})
+
     def test_claim_adds_label_verifies_and_moves_to_in_progress(self):
         fake = self.gh([issue("A", 1, "task", "Ready")])
         self.assertTrue(ghp.claim_task("task", "A"))

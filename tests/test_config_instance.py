@@ -27,7 +27,7 @@ class InstanceId(unittest.TestCase):
                 patch.dict(os.environ, {"CODEBOT_INSTANCE": ""}), \
                 patch.object(config, "DATA_DIR", Path(tmp)):
             first = config._instance_id()
-            self.assertRegex(first, r"^codebot-[abcdefghjkmnpqrstuvwxyz23456789]{4}$")
+            self.assertRegex(first, r"^codebot-[a-z]+-[a-z]+$")
             self.assertEqual((Path(tmp) / "instance_id").read_text().strip(), first)
             self.assertEqual(config._instance_id(), first)
 
@@ -36,7 +36,30 @@ class InstanceId(unittest.TestCase):
                 patch.dict(os.environ, {"CODEBOT_INSTANCE": ""}), \
                 patch.object(config, "DATA_DIR", Path(tmp)):
             (Path(tmp) / "instance_id").write_text("Bad Name!\n")
-            self.assertRegex(config._instance_id(), r"^codebot-[a-z0-9]{4}$")
+            self.assertRegex(config._instance_id(), r"^codebot-[a-z]+-[a-z]+$")
+
+    def test_existing_generated_id_keeps_ownership_after_upgrade(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(os.environ, {"CODEBOT_INSTANCE": ""}), \
+                patch.object(config, "DATA_DIR", Path(tmp)):
+            (Path(tmp) / "instance_id").write_text("codebot-x7k2\n")
+            self.assertEqual(config._instance_id(), "codebot-x7k2")
+
+    def test_warty_warthog_is_a_valid_generated_pair(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(os.environ, {"CODEBOT_INSTANCE": ""}), \
+                patch.object(config, "DATA_DIR", Path(tmp)), \
+                patch.object(config.secrets, "choice", side_effect=["warty", "warthog"]):
+            self.assertEqual(config._instance_id(), "codebot-warty-warthog")
+
+    def test_fingerprint_persists_and_separates_identical_names(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            with patch.object(config, "DATA_DIR", Path(a)):
+                first = config._instance_fingerprint()
+                self.assertEqual(config._instance_fingerprint(), first)
+                self.assertRegex(first, r"^[0-9a-f]{32}$")
+            with patch.object(config, "DATA_DIR", Path(b)):
+                self.assertNotEqual(config._instance_fingerprint(), first)
 
 
 if __name__ == "__main__":

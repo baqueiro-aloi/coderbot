@@ -554,7 +554,27 @@ class NativePullRequestTests(unittest.TestCase):
         body = create[create.index("--body") + 1]
         self.assertIn("Closes https://github.com/acme/project/issues/9", body)
         note_pr.assert_called_once_with(state["item"], "PVTI_1",
-                                        "https://github.com/acme/project/pull/42")
+                                         "https://github.com/acme/project/pull/42")
+
+    def test_jira_pr_references_issue_without_relying_on_github_auto_close(self):
+        state = self.state() | {"item_id": "10001", "item_key": "TEAM-7",
+                                "item_url": "https://team.atlassian.net/browse/TEAM-7"}
+        responses = [
+            subprocess.CompletedProcess([], 0, "[]", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
+        ]
+        with patch.object(main.config, "TASK_SOURCE", "jira"), \
+             patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.task_source, "note_pr") as note_pr, \
+             patch.object(main, "_enter_review_wait"):
+            main.do_open_pr(state)
+        create = process.call_args_list[1].args[0]
+        body = create[create.index("--body") + 1]
+        self.assertIn("Closes TEAM-7", body)
+        self.assertIn("Jira: https://team.atlassian.net/browse/TEAM-7", body)
+        note_pr.assert_called_once_with(state["item"], "10001",
+                                         "https://github.com/acme/project/pull/42")
 
     def test_open_pr_survives_backlog_write_back_failure(self):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}

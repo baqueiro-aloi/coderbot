@@ -7,6 +7,31 @@ from pathlib import Path
 CODEBOT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 DATA_DIR = Path(os.environ.get("CODEBOT_DATA_DIR", CODEBOT_DIR / "data"))
 
+# Names are readable in a busy Slack channel and still safe in branch names and
+# backlog ownership markers. Two independent word choices give 3600+ pairs.
+_ADJECTIVES = (
+    "amber", "amused", "ancient", "ardent", "artful", "autumn", "azure", "bold",
+    "brave", "bright", "brisk", "calm", "candid", "clever", "cloudy", "cozy",
+    "curious", "daring", "dapper", "dawn", "dazzling", "eager", "earnest",
+    "elated", "fair", "fancy", "fearless", "fluffy", "flying", "gentle", "glad",
+    "golden", "grand", "happy", "hardy", "heroic", "honest", "jolly", "keen",
+    "kind", "lively", "lucky", "merry", "mighty", "noble", "nimble", "patient",
+    "peaceful", "perky", "playful", "plucky", "proud", "quiet", "radiant",
+    "ready", "rosy", "royal", "sincere", "spry", "steady", "sunny", "swift",
+    "tidy", "warty", "wise", "witty", "zesty",
+)
+_ANIMALS = (
+    "albatross", "alpaca", "antelope", "armadillo", "badger", "beaver", "bison",
+    "bobcat", "buffalo", "camel", "capybara", "cheetah", "cougar", "coyote",
+    "crane", "dolphin", "donkey", "dragonfly", "eagle", "falcon", "ferret",
+    "finch", "fox", "gazelle", "gecko", "giraffe", "goat", "goose", "hedgehog",
+    "heron", "hippo", "ibex", "iguana", "jaguar", "koala", "lemur", "leopard",
+    "llama", "lynx", "manatee", "marmot", "meerkat", "moose", "narwhal", "otter",
+    "owl", "panda", "panther", "penguin", "platypus", "puma", "quokka", "raven",
+    "rhino", "seal", "sloth", "sparrow", "swan", "tapir", "tiger", "turtle",
+    "walrus", "warthog", "weasel", "whale", "wombat", "yak", "zebra",
+)
+
 
 def _instance_id() -> str:
     """This installation's stable identity, for multi-instance coordination. It tags
@@ -31,10 +56,7 @@ def _instance_id() -> str:
         saved = ""
     if saved and re.fullmatch(r"[a-z0-9-]+", saved):
         return saved
-    # Unambiguous alphabet (no 0/o, 1/l/i): these ids appear in email subjects and
-    # commands the user types back ("ABORT codebot-x7k2").
-    generated = "codebot-" + "".join(
-        secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(4))
+    generated = f"codebot-{secrets.choice(_ADJECTIVES)}-{secrets.choice(_ANIMALS)}"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     path.write_text(generated + "\n")
     return generated
@@ -42,9 +64,53 @@ def _instance_id() -> str:
 
 INSTANCE_ID = _instance_id()
 
+
+def _instance_fingerprint() -> str:
+    """A separate, stable ownership discriminator for installations sharing a name.
+
+    This value is not a credential; it must survive restarts alongside instance_id
+    so the bot can recognize its own backlog claim and hold markers.
+    """
+    path = DATA_DIR / "instance_fingerprint"
+    try:
+        value = path.read_text().strip().lower()
+    except OSError:
+        value = ""
+    if re.fullmatch(r"[0-9a-f]{32}", value):
+        return value
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    value = secrets.token_hex(16)
+    path.write_text(value + "\n")
+    path.chmod(0o600)
+    return value
+
+
+INSTANCE_FINGERPRINT = _instance_fingerprint()
+OWNER_ID = f"{INSTANCE_ID}@{INSTANCE_FINGERPRINT}"
+
 # Where the backlog lives: "gdoc" (a Google Doc, the default so existing deployments
 # keep working) or "github" (a GitHub Projects v2 board). Validated in main().
 TASK_SOURCE = (os.environ.get("CODEBOT_TASK_SOURCE") or "gdoc").strip().lower()
+# Where conversations take place, selected independently of the task source.
+COMM_CHANNEL = (os.environ.get("CODEBOT_COMM_CHANNEL") or "email").strip().lower()
+
+# Jira Cloud account and project. Status names refer to Jira workflow statuses,
+# not board columns; the backend resolves the issue's available transitions.
+JIRA_URL = (os.environ.get("CODEBOT_JIRA_URL") or "").strip().rstrip("/")
+JIRA_PROJECT_KEY = (os.environ.get("CODEBOT_JIRA_PROJECT_KEY") or "").strip()
+JIRA_EMAIL = (os.environ.get("CODEBOT_JIRA_EMAIL") or "").strip()
+JIRA_API_TOKEN = (os.environ.get("CODEBOT_JIRA_API_TOKEN") or "").strip()
+JIRA_PICK_STATUS = (os.environ.get("CODEBOT_JIRA_PICK_STATUS") or "Ready").strip()
+JIRA_ACTIVE_STATUS = (os.environ.get("CODEBOT_JIRA_ACTIVE_STATUS") or "In progress").strip()
+JIRA_REVIEW_STATUS = (os.environ.get("CODEBOT_JIRA_REVIEW_STATUS") or "In review").strip()
+JIRA_DONE_STATUS = (os.environ.get("CODEBOT_JIRA_DONE_STATUS") or "Done").strip()
+JIRA_ISSUE_TYPE = (os.environ.get("CODEBOT_JIRA_ISSUE_TYPE") or "Task").strip()
+
+# One Slack app (and bot identity) per installation. Public channel IDs are
+# stable across channel renames, unlike names.
+SLACK_CHANNEL_ID = (os.environ.get("CODEBOT_SLACK_CHANNEL_ID") or "").strip()
+SLACK_BOT_TOKEN = (os.environ.get("CODEBOT_SLACK_BOT_TOKEN") or "").strip()
+SLACK_APP_TOKEN = (os.environ.get("CODEBOT_SLACK_APP_TOKEN") or "").strip()
 
 # Backlog Google Doc. Required when TASK_SOURCE is "gdoc" (validated in main()).
 DOC_ID = os.environ.get("CODEBOT_DOC_ID", "")
@@ -252,13 +318,15 @@ STATE_PATH = DATA_DIR / "state.json"
 # Tasks paused with the HOLD command, keyed by their email thread (see main._hold_task).
 HOLDS_PATH = DATA_DIR / "holds.json"
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/documents",
-    # Full Drive access (not drive.readonly): the activity trail posts comments on
-    # the backlog doc. Widening the scope requires re-running scripts/setup_oauth.py.
-    "https://www.googleapis.com/auth/drive",
-]
+SCOPES = []
+if COMM_CHANNEL == "email":
+    SCOPES.append("https://www.googleapis.com/auth/gmail.modify")
+if TASK_SOURCE == "gdoc":
+    SCOPES.append("https://www.googleapis.com/auth/documents")
+if TASK_SOURCE == "gdoc" or EVIDENCE_UPLOAD:
+    # Full Drive access posts Doc comments and uploads evidence videos. Changes to
+    # selected integrations may require re-consent for newly needed scopes.
+    SCOPES.append("https://www.googleapis.com/auth/drive")
 
 # Subjects carry the instance id so the user can tell instances' threads apart and
 # address mailbox commands to one instance (a reply keeps the subject).

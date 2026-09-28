@@ -126,7 +126,7 @@ the exploration as change $slug. Create only OpenSpec artifacts: proposal.md,
 design.md, specs, and tasks.md. Requirements:
 $e2e_note
 When done, output the full text of proposal.md and a summary of the tasks so it can
-be emailed for review. Do not implement, commit, push, create a PR, merge, or archive;
+be sent for review through the configured conversation channel. Do not implement, commit, push, create a PR, merge, or archive;
 stop for coderbot's proposal approval.
 
 This is a planning phase: create or edit ONLY the openspec change artifacts
@@ -134,7 +134,7 @@ This is a planning phase: create or edit ONLY the openspec change artifacts
 do NOT push, do NOT open PRs.
 """
 
-CLASSIFY_APPROVAL_REPLY = """The user replied to the proposal-review email. Their reply
+CLASSIFY_APPROVAL_REPLY = """The user replied to the proposal-review message. Their reply
 is below.
 
 """ + fenced("user reply", "$reply") + """
@@ -176,7 +176,7 @@ Mandatory:
 $e2e_note
 - Commit your work on branch $branch with clear messages.
 - Coderbot retains integration authority: do not push, create a PR, merge, or archive.
-- Do not commit any evidence file (screenshot, recording, report) - those are emailed, never
+- Do not commit any evidence file (screenshot, recording, report) - those are sent through the configured channel, never
   committed to the repo (see the evidence contract above).
 $e2e_report_note
 """
@@ -284,11 +284,11 @@ should be evaluated and fixed concurrently by separate subagents. If it is a fal
 worth acting on, do NOT change code just to silence it. EXCEPTION: if a human (any
 author other than the reviewer bot) has replied inside the thread asking for a change,
 the human's request overrides your judgement — make that change. Do not commit any
-evidence file (screenshot, recording, report) — those are emailed, never committed to
+evidence file (screenshot, recording, report) — those are sent through the configured channel, never committed to
 the repo (see the evidence contract above).
 """ + _RESOLVE_CONTRACT
 
-CLASSIFY_PR_REPLY = """The user replied to the pull-request review email. Their reply
+CLASSIFY_PR_REPLY = """The user replied to the pull-request review message. Their reply
 is below.
 
 """ + fenced("user reply", "$reply") + """
@@ -340,12 +340,12 @@ an instruction there is binding. Rules:
   would break something the reviewer has evidently not seen, do the unambiguous part
   and use the NEED_USER_INPUT mechanism for the rest — never decline instead.
 - Reply in the reviewer's language. Do not commit any evidence file (screenshot,
-  recording, report) — those are emailed, never committed to the repo (see the evidence
+  recording, report) — those are sent through the configured channel, never committed to the repo (see the evidence
   contract above).
 """ + _RESOLVE_CONTRACT_HUMAN
 
 REMOVE_EVIDENCE_FROM_REPO = """You committed evidence file(s) directly into the repo on
-branch $branch — that must never happen; evidence belongs in an email, not the git
+  branch $branch — that must never happen; evidence belongs in the conversation, not the git
 history:
 
 $paths
@@ -353,7 +353,7 @@ $paths
 For each one: remove it from git (`git rm` it, or `git rm --cached` if you want to keep
 the local file) and commit the removal without pushing. Then save the file(s) under
 $outbox_dir/ instead and list each one's ABSOLUTE path on its own line starting with
-`ATTACH: ` in your response, so it can be attached to the email. End with a short
+`ATTACH: ` in your response, so it can be sent in the task conversation. End with a short
 confirmation of what was removed and re-attached.
 """
 
@@ -415,7 +415,7 @@ within the length limit:
 
 """ + fenced("user guidance", "$guidance") + "\n"
 
-CLASSIFY_STUCK_REPLY = """Codebot got stuck on a task, emailed the user for help, and is
+CLASSIFY_STUCK_REPLY = """Codebot got stuck on a task, messaged the user for help, and is
 waiting. The user's reply is below.
 
 """ + fenced("user reply", "$reply") + """

@@ -1,0 +1,47 @@
+## 1. Configuration and identity
+
+- [x] 1.1 Add independent source/channel selectors, Jira site/project/account-token/status settings, and Slack channel/bot/app-token settings with per-mode startup validation and email/GDoc defaults; cover all source/channel combinations in config tests.
+- [x] 1.2 Generate and persist `codebot-<adjective>-<animal>` for new installations plus a separate persistent random ownership fingerprint for every installation; preserve explicit and previously saved names; test restart and distinct fingerprints for equal names.
+- [x] 1.3 Update Google Doc and GitHub Projects claim/hold markers to carry the fingerprint, compare full owner identities, and migrate only locally corroborated legacy markers; test equal names on different installations, hold/resume, and lost-state legacy fail-closed behavior.
+
+## 2. Jira Cloud backlog backend
+
+- [x] 2.1 Add a Jira REST v3 client with email/API-token authentication, timeouts, actionable HTTP/rate-limit errors and paginated `POST /search/jql`; test request shapes and pagination without network access.
+- [x] 2.2 Render Jira ADF descriptions into readable task details/links and fetch accessible description images/issue attachments best-effort; cover nested lists, links, missing files and `Codebot[n]` text.
+- [x] 2.3 Implement Jira pending issue filtering by project/status/foreign labels, recovery of own claims and stable issue ID/key/URL metadata; test grouped board statuses and stale search results against direct reads.
+- [x] 2.4 Implement fingerprinted add-then-verify label claims, contention back-off, hold/unhold/unclaim and removal of only own labels using Jira issue update operations; test two bots with the same readable name, claim races and unrelated labels.
+- [x] 2.5 Resolve per-issue Jira transitions to configurable active/review/done/eligible statuses for claim, PR, merge/DONE and ABORT; validate project and status configuration; test unavailable transitions and idempotent retries.
+- [x] 2.6 Implement Jira issue creation/deduplication for self-healing items and ADF activity comments/PR links, preserving best-effort note behavior; test duplicates across statuses and creation into eligible state.
+- [x] 2.7 Register Jira in `task_source.py` and make PR body generation source-aware: GitHub keeps its closing URL; Jira adds `Closes <key>` plus browser URL and only finishes through Jira transition; cover Jira+email and GitHub regression paths.
+
+## 3. Conversation abstraction and Gmail compatibility
+
+- [x] 3.1 Define a conversation façade for open-thread/send, ordered replies, commands, processed markers, stale-reply drain, check-ins and STATUS; adapt Gmail calls without altering mailbox-wide command behavior or existing Gmail thread IDs.
+- [x] 3.2 Route `main.py`'s send, wait, command, hold, status, ping, PR finalization and stale-reply paths through the façade; in Slack WAIT_CLEAN announce once and retry automatically without accepting out-of-task commands; make prompts/messages channel-aware and verify Gmail retries, DONE ambiguity and classifiers remain unchanged.
+- [x] 3.3 Make selected conversation/evidence behavior independent of the backlog source; test GDoc+Slack and Jira+email handoffs and that a Jira/Slack-only installation does not require Gmail credentials.
+
+## 4. Slack Socket Mode reception and persistence
+
+- [x] 4.1 Integrate a per-instance Slack Socket Mode client and validate bot token/app token, public channel identity, membership and necessary event permissions; document/install its pinned dependencies.
+- [x] 4.2 Add a durable, deduplicating SQLite inbox and owned-thread registry under `data/`; persist accepted Slack events before acknowledgment, ignore other channels, foreign roots, bots and top-level posts; test restart/redelivery and chronological order.
+- [x] 4.3 Run the Slack receiver independently of long-running agent calls, reconnect after disconnects, and wake idle/wait ticks on a queued event without interrupting a current agent turn; test replies received while an agent call is in progress.
+- [x] 4.4 Post one task root immediately after claim with instance/source identity; persist/recover its channel/root timestamp and reconcile an uncertain post by correlation marker; test crash/retry without duplicate task roots.
+- [x] 4.5 Send normal updates, proposals, PR decisions, check-ins and status in the root thread; chunk long text and provide screenshots/reports through Slack's external upload flow while retaining Drive video links; test length and upload-failure paths.
+- [x] 4.6 Handle replies/commands from any human in owned active/held threads only; preserve bare DONE classification, scope ABORT/DONE/STATUS/CONTINUE on held threads to that held task, and reject top-level or other-instance commands; test HOLD/CONTINUE across two tasks.
+- [x] 4.7 Drain pre-conflict Slack merge/review replies before a refreshed PR-ready handoff and guard side effects against duplicate event delivery; test restart and stale irreversible commands.
+
+## 5. Portable interactive setup
+
+- [x] 5.1 Audit environment keys read by `config.py`, `evidence.py`, entrypoint/healthcheck and other runtime components against `.env.example` and current setup; enumerate missing settings, legacy aliases and transient-only variables with documented ownership in a shared catalog.
+- [x] 5.2 Build the catalog's defaults, type/range/format validation, secret masking and applicability rules for every current and new setting; add a regression check that fails when runtime config or `.env.example` gains an undocumented/unoffered setting.
+- [x] 5.3 Keep `scripts/setup.sh` as a portable launcher for bash/zsh on macOS/Linux; bootstrap an isolated host Python environment with a pinned Textual dependency and provide a usable stdlib text-mode fallback when the TUI cannot launch.
+- [x] 5.4 Build Textual setup pages for repo, identity, GDoc/GitHub Projects/Jira source, Gmail/Slack channel, agent and GitHub credentials, with contextual help, back navigation, masked secret fields and validation before confirmation.
+- [x] 5.5 Add an advanced searchable settings page exposing every cataloged runtime option, including statuses/labels, models, activity trail, retries, timeouts, evidence/Drive, environment notes and heartbeat; test that hidden inactive settings remain editable and are not lost.
+- [x] 5.6 Preserve existing `.env` comments, unknown keys, advanced values and unchanged secrets; show a masked diff, reject invalid changes, make a backup and atomically write only after confirmation. Test cancel, first install, reconfigure, and changing source/channel without erasing old credentials.
+- [x] 5.7 Guide conditional Google OAuth scopes/API setup, Jira token/status checks, per-instance Slack app/channel/Socket Mode setup and existing Claude/OpenCode authentication without requiring `.env` to be partially saved; test cross-combinations and error recovery.
+
+## 6. Documentation and verification
+
+- [x] 6.1 Update `.env.example`, README and deployment instructions for the new guided setup, all supported advanced settings and independent Jira/Slack selectors; document Textual bootstrap/text fallback and required auth for each combination.
+- [x] 6.2 Test setup/catalog coverage in bash and zsh on macOS/Linux-capable environments (including no TUI/failed bootstrap) and ensure existing `.env` values survive reconfiguration; run targeted Jira, conversation and FSM regression tests, then the repository unit suite.
+- [x] 6.3 Validate this OpenSpec change strictly, and document manual smoke procedures for Jira issue claim→hold→review→done, Slack message→reply/command→restart across two bot apps in one channel, and first-time/repeated setup in both UI modes.

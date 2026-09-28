@@ -11,6 +11,7 @@ from pathlib import Path
 from googleapiclient.discovery import build
 
 import config
+from command_text import COMMANDS, parse_command
 from google_auth import load_credentials
 
 try:
@@ -164,32 +165,6 @@ def mark_processed(message_id: str) -> None:
         _save_processed(processed)
 
 
-COMMANDS = ("ABORT", "STATUS", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME")
-# Canonical command per accepted spelling.
-_ALIASES = {"PAUSE": "HOLD", "RESUME": "CONTINUE"}
-# Trailing punctuation ("status ?", "STATUS!") is tolerated: users naturally add it,
-# and an unmatched command falls through to the reply classifiers as ordinary text.
-_CMD_RE = re.compile(r"^(ABORT|STATUS|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
-                     re.IGNORECASE)
-# CONTINUE/RESUME may carry a free-form note after the word ("continue, but use option
-# B"), which is handed to the resumed task. An optional instance target comes first.
-_CONTINUE_RE = re.compile(
-    r"^(CONTINUE|RESUME)\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",
-    re.IGNORECASE | re.DOTALL)
-
-
-def parse_command(body: str) -> tuple[str, str, str] | None:
-    """(COMMAND, target, note) for a command-shaped body, else None. `target` is the
-    lower-cased instance name when the user named one ("" otherwise); `note` is the
-    free text after a CONTINUE ("" for every other command)."""
-    text = body.strip()
-    m = _CMD_RE.match(text)
-    if m:
-        return _ALIASES.get(m.group(1).upper(), m.group(1).upper()), (m.group(2) or "").lower(), ""
-    m = _CONTINUE_RE.match(text)
-    if m:
-        return "CONTINUE", (m.group(2) or "").lower(), m.group(3).strip()
-    return None
 # The leading "[<instance>]" tag every codebot subject starts with (after Re:/Fwd:).
 _THREAD_TAG_RE = re.compile(r"^\s*(?:(?:re|fwd?):\s*)*\[([a-z0-9-]+)\]", re.IGNORECASE)
 

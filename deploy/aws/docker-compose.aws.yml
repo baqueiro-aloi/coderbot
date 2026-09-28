@@ -6,7 +6,8 @@
 #   /mnt/coderbot/repo/<x>    the target repo; CODEBOT_REPO_PATH points here
 #   /mnt/coderbot/claude      the bot's ~/.claude (credentials + resumable sessions)
 #   /mnt/coderbot/codebot.env the shared .env from Secrets Manager
-#   /mnt/coderbot/agent.env   per-agent overrides written at boot (instance, repo path)
+#   /mnt/coderbot/agent.env   per-agent overrides written at boot (including any
+#                            unique Slack app credentials from agent.local.env)
 # Started by the coderbot systemd unit (deploy/aws/instance/coderbot.service).
 services:
   codebot:

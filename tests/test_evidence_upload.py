@@ -89,6 +89,18 @@ class FinalizePrTests(unittest.TestCase):
         self.assertEqual(self.state["evidence_url"], LINK)
         self.assertEqual(self.state["state"], "WAIT_MERGE")
 
+    def test_slack_pr_ready_links_drive_video_in_the_task_thread(self):
+        self.state["thread_id"] = "C123:100.000001"
+        with patch.object(main.config, "COMM_CHANNEL", "slack"), \
+             patch.object(main.evidence, "record_evidence", return_value=[MP4]), \
+             patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
+             patch.object(main.gmail_client, "send", return_value="C123:100.000001") as send, \
+             patch.object(main, "trail"):
+            main.finalize_pr(self.state)
+        self.assertEqual(send.call_args.args[2], "C123:100.000001")
+        self.assertIn(f"Video: {LINK}", send.call_args.args[1])
+        self.assertEqual(send.call_args.args[3], [])
+
     def test_failed_upload_attaches_as_before(self):
         args, _ = self._finalize([MP4], None)
         self.assertIn("Attached: a Playwright video (mp4)", args[2])

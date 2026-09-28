@@ -13,6 +13,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 import config
+import ownership
 from google_auth import load_credentials
 from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
@@ -168,13 +169,14 @@ def _pending(tasks: list[dict]) -> list[dict]:
         if not _in_section(t) or t["struck"]:
             continue
         owner = claimed_by(t["text"])
-        if owner and owner != config.INSTANCE_ID:
+        mine = ownership.mine(owner, strip_claims(t["text"]).strip())
+        if owner and not mine:
             continue  # another instance is implementing it
         if held_by(t["text"]):
             continue  # paused by the user; resumed only through CONTINUE
         items.append({"id": "", "url": "",
                       "text": strip_claims(t["text"]).strip(), "detail": t["detail"],
-                      "images": t["images"], "claimed_by_me": owner is not None,
+                      "images": t["images"], "claimed_by_me": mine,
                       "priority": priority_of(t["text"])})
     return items
 
@@ -224,9 +226,11 @@ def list_pending_items() -> list[dict]:
     items = _pending(tasks)
     for item in items:
         item["images"] = _download_images(doc, item["images"])
-    foreign = [claimed_by(t["text"]) for t in tasks
+    foreign = [owner for t in tasks
                if _in_section(t) and not t["struck"]
-               and claimed_by(t["text"]) not in (None, config.INSTANCE_ID)]
+               if (owner := claimed_by(t["text"]))
+               if owner != ownership.me()
+               and not ownership.legacy_marker(owner, strip_claims(t["text"]).strip())]
     if foreign:
         log.info("%d backlog item(s) claimed by other instance(s) %s; not pickable",
                  len(foreign), sorted(set(foreign)))
@@ -308,7 +312,7 @@ def _find_task(doc: dict, item_text: str) -> dict | None:
         if task["struck"]:
             return 3
         owner = claimed_by(task["text"]) or held_by(task["text"])
-        if owner == config.INSTANCE_ID:
+        if ownership.mine(owner, strip_claims(task["text"]).strip()):
             return 0
         return 1 if owner is None else 2
 
@@ -325,7 +329,8 @@ def _find_mine(doc: dict) -> dict | None:
     claim, so a unique marker-bearing bullet IS the task; without this fallback the
     stale claim survives and do_pick's resume filter re-picks the finished task."""
     mine = [t for t in _tasks(doc)
-            if not t["struck"] and claimed_by(t["text"]) == config.INSTANCE_ID]
+            if not t["struck"] and ownership.mine(claimed_by(t["text"]),
+                                                   strip_claims(t["text"]).strip())]
     if len(mine) > 1:
         log.warning("%d unstruck tasks carry this instance's claim marker; refusing "
                     "to guess which is the current task", len(mine))
@@ -340,7 +345,7 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
     """Atomically append this instance's claim marker to the task's bullet line so no
     other instance picks it. False when another instance holds the claim (or the task
     vanished/completed) — the caller should pick something else."""
-    marker = f" [implementing: {config.INSTANCE_ID}]"
+    marker = f" [implementing: {ownership.me()}]"
     service = _docs_service()
     for _attempt in range(CAS_ATTEMPTS):
         doc = service.documents().get(documentId=config.DOC_ID).execute()
@@ -349,9 +354,19 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
             log.warning("no unstruck doc task to claim for: %r", item_text[:80])
             return False
         owner = claimed_by(task["text"])
-        if owner == config.INSTANCE_ID:
+        if owner == ownership.me():
             log.info("task already claimed by this instance: %r", item_text[:80])
             return True
+        if ownership.legacy_marker(owner, item_text):
+            ranges = _marker_ranges(doc, task, config.INSTANCE_ID)
+            if len(ranges) != 1:
+                return False
+            start, end = ranges[0]
+            if _cas_update(service, doc, [
+                    {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}},
+                    {"insertText": {"location": {"index": start}, "text": marker}}]):
+                return True
+            continue
         if owner:
             log.info("task already claimed by %r: %r", owner, item_text[:80])
             return False
@@ -377,7 +392,10 @@ def unclaim_task(item_text: str, item_id: str | None = None) -> bool:
         if task is None:
             log.warning("no doc task to unclaim for: %r", item_text[:80])
             return False
-        ranges = _marker_ranges(doc, task, config.INSTANCE_ID)
+        owner = claimed_by(task["text"])
+        if owner and not ownership.mine(owner, item_text):
+            return False
+        ranges = _marker_ranges(doc, task, owner) if owner else []
         if not ranges:
             return True  # nothing to remove
         deletes = [{"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}}
@@ -434,7 +452,7 @@ def ensure_item(item_text: str) -> bool:
 def hold_task(item_text: str, item_id: str | None = None) -> bool:
     """Replace this instance's claim marker with an [on hold: <instance>] marker so no
     instance picks the task until CONTINUE. False when the task could not be found."""
-    marker = f" [on hold: {config.INSTANCE_ID}]"
+    marker = f" [on hold: {ownership.me()}]"
     service = _docs_service()
     for _attempt in range(CAS_ATTEMPTS):
         doc = service.documents().get(documentId=config.DOC_ID).execute()
@@ -442,21 +460,23 @@ def hold_task(item_text: str, item_id: str | None = None) -> bool:
         if task is None or task["struck"]:
             log.warning("no unstruck doc task to put on hold for: %r", item_text[:80])
             return False
-        if held_by(task["text"]) == config.INSTANCE_ID:
+        if held_by(task["text"]) == ownership.me():
             return True
-        requests = [{"deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}}
-                    for s, e in sorted(_marker_ranges(doc, task, pattern=_MARKER_RE),
-                                       reverse=True)]
-        # Deletions run first (deepest-first), so the insert index must account for
-        # the removed text before it on the same line; insert before them instead by
-        # placing it at the line end computed AFTER deletions: simplest is two writes.
-        if requests and _cas_update(service, doc, requests):
-            continue  # re-read and insert on a clean line next attempt
-        if requests:
-            continue  # doc changed; retry
-        insert = {"insertText": {"location": {"index": task["ranges"][0][1] - 1},
-                                 "text": marker}}
-        if _cas_update(service, doc, [insert]):
+        owner = claimed_by(task["text"])
+        if owner and not ownership.mine(owner, item_text):
+            return False
+        if held_by(task["text"]):
+            return False
+        if not owner:
+            return False
+        ranges = _marker_ranges(doc, task, owner)
+        if len(ranges) != 1:
+            return False
+        start, end = ranges[0]
+        # One compare-and-swap batch: no unclaimed interval between claim and hold.
+        if _cas_update(service, doc, [
+                {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}},
+                {"insertText": {"location": {"index": start}, "text": marker}}]):
             log.info("put backlog task on hold for %s: %r", config.INSTANCE_ID, item_text[:80])
             return True
     log.warning("could not put task on hold after %d attempts: %r", CAS_ATTEMPTS, item_text[:80])
@@ -472,7 +492,10 @@ def unhold_task(item_text: str, item_id: str | None = None) -> bool:
         if task is None:
             log.warning("no doc task to take off hold for: %r", item_text[:80])
             return False
-        ranges = _marker_ranges(doc, task, config.INSTANCE_ID, pattern=HOLD_RE)
+        holder = held_by(task["text"])
+        if holder and not ownership.mine(holder, item_text):
+            return False
+        ranges = _marker_ranges(doc, task, holder, pattern=HOLD_RE) if holder else []
         if not ranges:
             return True
         deletes = [{"deleteContentRange": {"range": {"startIndex": s, "endIndex": e}}}
@@ -503,6 +526,9 @@ def mark_done(item_text: str, item_id: str | None = None) -> bool:
         if task["struck"]:
             log.info("item already struck through: %r", item_text[:80])
             return True
+        owner = claimed_by(task["text"]) or held_by(task["text"])
+        if owner and not ownership.mine(owner, item_text):
+            return False
         log.info("striking through %d paragraph(s) for: %r",
                  len(task["ranges"]), item_text[:80])
         # Styling never shifts text, so the strike ranges stay valid across the batch;
@@ -519,8 +545,9 @@ def mark_done(item_text: str, item_id: str | None = None) -> bool:
             for start, end in task["ranges"]
         ] + [
             {"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}}
-            for start, end in sorted(_marker_ranges(doc, task, pattern=_MARKER_RE),
-                                     reverse=True)
+            for start, end in sorted(_marker_ranges(
+                doc, task, owner, pattern=CLAIM_RE if claimed_by(task["text"]) else HOLD_RE)
+                if owner else [], reverse=True)
         ]
         if _cas_update(service, doc, requests):
             return True

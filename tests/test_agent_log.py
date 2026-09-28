@@ -23,6 +23,9 @@ class AgentLogTests(unittest.TestCase):
         patcher = patch.object(main, "TRANSCRIPT_DIR", self.dir / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
+        sender = patch.object(main.gmail_client, "send", return_value="test-thread")
+        sender.start()
+        self.addCleanup(sender.stop)
         self.state = {"slug": "add-widget", "branch": "codebot-a-add-widget",
                       "item": "Add a widget"}
 
