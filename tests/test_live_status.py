@@ -1,5 +1,6 @@
 """STATUS is answered while the main coding turn is blocked, without a second agent."""
 import json
+import logging
 import sys
 import tempfile
 import threading
@@ -18,6 +19,11 @@ import slack_client
 
 
 class AgentActivity(unittest.TestCase):
+    def test_sdk_http_body_debug_is_suppressed_without_hiding_our_logs(self):
+        self.assertGreaterEqual(logging.getLogger("slack_sdk.web.base_client").getEffectiveLevel(),
+                                logging.WARNING)
+        self.assertEqual(logging.getLogger("codebot").level, main.log.level)
+
     def test_streamed_task_is_observed_without_prompt_or_output(self):
         agent_runner._begin_turn()
         try:
@@ -88,7 +94,8 @@ class Supervisor(unittest.TestCase):
                 send = api.chat_postMessage.call_args.kwargs
                 self.assertEqual(send["thread_ts"], "100.0")
                 self.assertIn("Fase: IMPLEMENTING", send["text"])
-                self.assertIn("no puedo confirmar", send["text"])
+                self.assertIn("Tarea: Configurar PICA", send["text"])
+                self.assertNotIn("no puedo confirmar", send["text"])
                 self.assertEqual(slack_client.poll_command()[2], "ABORT")
                 self.assertFalse(main._status_supervisor_once())
                 run.assert_called_once()
@@ -147,13 +154,14 @@ class Supervisor(unittest.TestCase):
         save.assert_not_called()
         self.assertEqual(self.state["state"], "IMPLEMENTING")
 
-    def test_stale_observation_reports_uncertainty(self):
+    def test_old_observation_reports_its_age_without_guessing_progress(self):
         body = main._short_status(self.state, {"active": True, "started_at": 100.0,
                                                "last_activity": 200.0,
                                                "activity": "task: Implementar backend"}, 700.0)
         self.assertIn("hace 8 min", body)
-        self.assertIn("no puedo confirmar", body)
-        self.assertNotIn("Sin señales de bloqueo", body)
+        self.assertIn("task: Implementar backend", body)
+        self.assertNotIn("no puedo confirmar", body)
+        self.assertNotIn("bloqueo", body)
 
     def test_readable_status_includes_plan_and_two_subagents_without_reasoning(self):
         observed = {"active": True, "started_at": 200.0, "last_activity": 540.0,

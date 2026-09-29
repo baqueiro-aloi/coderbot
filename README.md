@@ -348,7 +348,11 @@ During an in-flight phase, `status?` (or `STATUS`) gets an independent, **brief*
 answer in the task thread without waiting for the coding agent to finish. In Gmail
 the supervisor checks for status mail during long turns; in Slack it reads the
 durable Socket Mode inbox and, if an event was missed, reconciles the active thread
-through Slack's API at most once a minute. It also accepts a top-level status request.
+through Slack's API at most once a minute. The first reconciliation scans the full
+thread; later scans cover only the last five minutes, so long conversations are not
+downloaded repeatedly. Slack SDK HTTP DEBUG dumps (including message bodies) are
+suppressed; its warnings and codebot's own DEBUG messages remain visible. The bot
+also accepts a top-level status request.
 Other task-changing commands remain queued for the main state machine except `KICK`,
 which can interrupt the current agent turn. The status reply names the task,
 phase and elapsed time. Codebot writes a small metadata-only turn snapshot to
@@ -358,9 +362,9 @@ and its subagents, tasks and latest event timestamps directly from OpenCode's ow
 a separate status watcher, without sharing Python memory or starting another agent.
 The message includes the active task, task counts, up to two recent subagents and
 time since the last observable event. Neither reasoning content, prompts, shell
-commands nor tool output is included. If the model has emitted no recent event,
-status reports the last known task and the gap; it cannot inspect un-emitted LLM
-thoughts or claim the model is progressing. Claude's buffered runner may provide
+commands nor tool output is included. The answer states when the last event was
+observed, without inferring whether the model is making progress from a quiet period;
+un-emitted LLM thoughts cannot be inspected. Claude's buffered runner may provide
 only turn-level signals until it completes. The supervisor never modifies task
 state; between turns regular `STATUS` still returns the full state snapshot.
 

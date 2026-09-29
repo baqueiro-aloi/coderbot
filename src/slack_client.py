@@ -22,7 +22,9 @@ _web = None
 _bot_user = None
 _wake = threading.Event()
 _last_reconcile: dict[str, float] = {}
+_last_reconciled_at: dict[str, float] = {}
 _RECONCILE_SECONDS = 60
+_RECONCILE_OVERLAP_SECONDS = 300
 
 
 @contextmanager
@@ -381,7 +383,12 @@ def _pending(thread_id: str | None = None):
 
 
 def _reconcile(thread_id: str) -> None:
-    """Backfill missed socket events at most once a minute per owned thread."""
+    """Backfill missed socket events at most once a minute per owned thread.
+
+    Scan the full thread once per process. Subsequent scans overlap the preceding
+    successful scan by five minutes, so late events are still recovered without
+    repeatedly downloading the entire (potentially huge) conversation.
+    """
     now = time.monotonic()
     if now - _last_reconcile.get(thread_id, float("-inf")) < _RECONCILE_SECONDS:
         return
@@ -392,10 +399,15 @@ def _reconcile(thread_id: str) -> None:
                           (channel, root_ts)).fetchone():
             log.warning("cannot reconcile unregistered Slack thread %s", thread_id)
             return
+    previous = _last_reconciled_at.get(thread_id)
+    oldest = (max(float(root_ts), previous - _RECONCILE_OVERLAP_SECONDS)
+              if previous is not None else float(root_ts))
+    oldest_arg = f"{oldest:.6f}" if previous is not None and oldest > float(root_ts) else root_ts
+    scan_started = time.time()
     cursor = None
     try:
         while True:
-            args = {"channel": channel, "ts": root_ts, "oldest": root_ts,
+            args = {"channel": channel, "ts": root_ts, "oldest": oldest_arg,
                     "limit": 100, "inclusive": False}
             if cursor:
                 args["cursor"] = cursor
@@ -407,6 +419,7 @@ def _reconcile(thread_id: str) -> None:
             cursor = (page.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
                 break
+        _last_reconciled_at[thread_id] = scan_started
     except Exception:
         log.exception("could not reconcile Slack replies in %s; retrying later", thread_id)
 

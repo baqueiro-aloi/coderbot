@@ -26,7 +26,8 @@ class StandaloneStatusWatch(unittest.TestCase):
             status_watch.watch(0)
         poll.assert_called_once_with("C123:1.0")
         self.assertIn("Fase: IMPLEMENTING", send.call_args.args[1])
-        self.assertIn("no puedo confirmar", send.call_args.args[1])
+        self.assertIn("Tarea: PICA", send.call_args.args[1])
+        self.assertNotIn("no puedo confirmar", send.call_args.args[1])
         consumed.assert_called_once_with("C123:2.0")
         agent.assert_not_called()
 

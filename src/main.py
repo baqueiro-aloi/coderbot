@@ -31,8 +31,9 @@ import prompts
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
                      format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# Keep the noisy Google HTTP client at WARNING so our own DEBUG stays readable.
-for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3"):
+# Suppress SDK HTTP dumps (including full Slack message bodies) while keeping
+# codebot's own DEBUG and SDK warnings visible.
+for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3", "slack_sdk"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("codebot")
 
@@ -3359,7 +3360,7 @@ def _send_status(state: dict, thread_id: str) -> None:
 
 
 def _short_status(state: dict, turn: dict, now: float) -> str:
-    """Concise, observational status; no agent turn and no claim of guaranteed health."""
+    """A factual snapshot of the task and the last observable agent event."""
     turn = activity.snapshot(state, turn, now)
     spanish = state.get("task_language", "English").casefold() == "spanish"
     phase = state.get("return_state") if state.get("state") == "WAIT_REPLY" else state.get("state", "IDLE")
@@ -3385,15 +3386,7 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
             lines.append(f"Última actividad observada: {turn.get('activity', 'agente')} "
                          f"(hace {_fmt_dur(now - last)}).")
         if turn.get("process_dead"):
-            lines.append("El proceso del agente no aparece activo; requiere revisión.")
-        elif last:
-            lines.append("Actividad reciente registrada." if now - last < 300 else
-                         "Sin actividad observable reciente; no puedo confirmar si ese paso avanza.")
-        elif turn.get("active"):
-            lines.append("El agente sigue en ejecución; sin telemetría de pasos, no puedo "
-                         "confirmar si avanza o está bloqueado.")
-        else:
-            lines.append("Fase en curso sin telemetría del agente; no puedo confirmar si avanza.")
+            lines.append("El proceso del agente no aparece activo.")
     else:
         lines = [f"Task: {title}", f"Phase: {phase} (running for {elapsed})."]
         if turn.get("current_task"):
@@ -3409,15 +3402,7 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
             lines.append(f"Last observed activity: {turn.get('activity', 'agent')} "
                          f"({_fmt_dur(now - last)} ago).")
         if turn.get("process_dead"):
-            lines.append("The agent process is no longer running; this needs attention.")
-        elif last:
-            lines.append("Recent activity recorded." if now - last < 300 else
-                         "No recent observable activity; I cannot confirm this step is progressing.")
-        elif turn.get("active"):
-            lines.append("The agent is still running; without step telemetry I cannot "
-                         "confirm whether it is progressing or stuck.")
-        else:
-            lines.append("This phase has no agent step telemetry; progress cannot be confirmed.")
+            lines.append("The agent process is no longer running.")
     return "\n".join(lines)
 
 

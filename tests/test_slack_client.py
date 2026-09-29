@@ -27,6 +27,7 @@ class SlackInbox(unittest.TestCase):
         self.web.conversations_history.return_value = {"messages": []}
         self.web.conversations_replies.return_value = {"messages": []}
         slack._last_reconcile.clear()
+        slack._last_reconciled_at.clear()
         p = patch.object(slack, "web", return_value=self.web)
         p.start()
         self.addCleanup(p.stop)
@@ -260,6 +261,30 @@ class SlackInbox(unittest.TestCase):
         slack.mark_processed("C123:101.000001")
         self.assertIsNone(slack.poll_reply(thread))
         self.web.conversations_replies.assert_called_once()  # 60-second rate limit
+
+    def test_reconciliation_scans_recent_window_after_first_full_scan(self):
+        thread = "C123:100.000001"
+        slack._reconcile(thread)
+        first = self.web.conversations_replies.call_args.kwargs
+        self.assertEqual(first["oldest"], "100.000001")
+        slack._last_reconcile.pop(thread)  # simulate the next 60-second interval
+        slack._reconcile(thread)
+        second = self.web.conversations_replies.call_args.kwargs
+        self.assertGreater(float(second["oldest"]), float(first["oldest"]))
+        self.assertLessEqual(float(second["oldest"]), slack.time.time())
+        self.assertEqual(self.web.conversations_replies.call_count, 2)
+
+    def test_failed_reconciliation_retries_from_last_successful_cursor(self):
+        thread = "C123:100.000001"
+        self.web.conversations_replies.side_effect = RuntimeError("Slack unavailable")
+        with patch.object(slack.log, "exception"):
+            slack._reconcile(thread)
+        self.assertNotIn(thread, slack._last_reconciled_at)
+        slack._last_reconcile.pop(thread)
+        self.web.conversations_replies.side_effect = None
+        slack._reconcile(thread)
+        self.assertEqual(self.web.conversations_replies.call_args.kwargs["oldest"],
+                         "100.000001")
 
     def test_socket_reply_wakes_wait_immediately_without_history_request(self):
         self.assertTrue(slack._accept_event(self.event("101.000001", "respuesta")))
