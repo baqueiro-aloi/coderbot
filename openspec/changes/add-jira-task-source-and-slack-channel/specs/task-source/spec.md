@@ -5,33 +5,45 @@ Defines a common backlog contract and Jira Cloud issue lifecycle so Coderbot can
 ## ADDED Requirements
 
 ### Requirement: Independent Jira task-source selection
-Coderbot SHALL accept `jira` as a task source in addition to `gdoc` and `github`, while selecting its communication channel independently. Jira mode SHALL require a Jira Cloud site, project key, account email, API token, and configured workflow statuses; other modes SHALL NOT require Jira credentials. Unset task source SHALL continue to select `gdoc`.
+Coderbot SHALL accept `jira` as a task source in addition to `gdoc` and `github`, while selecting its communication channel independently. Jira mode SHALL require a Jira Cloud site, project key, account email, API token, configured workflow statuses, and a nonempty opt-in label; other modes SHALL NOT require Jira credentials or the Jira label. Unset task source SHALL continue to select `gdoc`.
 
 #### Scenario: Jira with email
 - **WHEN** Jira is selected as the task source and email as the communication channel
 - **THEN** Coderbot works Jira issues and carries out the existing email conversation
+
+#### Scenario: Jira project selection after authentication
+- **WHEN** the user configures a Jira Cloud site, account email and API token in the guided setup
+- **THEN** setup lists projects accessible to that account with project names and keys, lets the user select a key, and then obtains the chosen project's workflow statuses; an unavailable project or invalid token is explained before saving
 
 #### Scenario: Existing default
 - **WHEN** neither selector is configured and the Google Doc configuration is valid
 - **THEN** Coderbot uses the Google Doc and email
 
 ### Requirement: Jira pending issue discovery
-Coderbot SHALL list issues from the configured Jira Cloud project whose workflow status is the configured eligible status, excluding issues claimed or held by another instance. An issue already claimed by this instance and not done SHALL also be recoverable when local task state is lost. Each candidate SHALL include its stable Jira issue identity, key, summary, description, browser URL, and `Codebot[n]` priority if present; issue screenshots and image attachments referenced by its description SHALL be made available to exploration when accessible. The project board's column configuration SHALL NOT change eligibility.
+Coderbot SHALL list issues from the configured Jira Cloud project only when both their workflow status is the configured eligible status and they carry the configured opt-in label, excluding issues claimed or held by another instance. A previously claimed, unfinished issue SHALL remain recoverable by its owning instance after local state loss even if the opt-in label has since been removed; this exception SHALL NOT permit claiming new unlabeled work. Each candidate SHALL include its stable Jira issue identity, key, summary, description, browser URL, and `Codebot[n]` priority if present; issue screenshots and image attachments referenced by its description SHALL be made available to exploration when accessible. The project board's column configuration SHALL NOT change eligibility.
 
 #### Scenario: Eligible issue on a grouped board
-- **WHEN** an unclaimed issue is in the configured eligible workflow status but its board column groups it with other statuses
+- **WHEN** an unclaimed issue carries the configured opt-in label and is in the configured eligible workflow status but its board column groups it with other statuses
 - **THEN** the issue is offered as a task regardless of the board's grouping
+
+#### Scenario: Eligible status without the opt-in label
+- **WHEN** an unclaimed Jira issue is in the configured eligible status but lacks the configured opt-in label
+- **THEN** Coderbot does not offer or claim it
 
 #### Scenario: Issue claimed elsewhere
 - **WHEN** an otherwise eligible issue carries another instance's claim or hold label
 - **THEN** it is not offered to this instance
 
 #### Scenario: Recovered own claim
-- **WHEN** local state is lost but an unfinished issue retains this instance's claim label
+- **WHEN** local state is lost but an unfinished issue retains this instance's claim label, even if its opt-in label was removed later
 - **THEN** Coderbot offers the issue for recovery before an unrelated task
 
 ### Requirement: Jira issue ownership and configurable lifecycle
-Coderbot SHALL use an issue label containing its readable instance name and persistent ownership fingerprint to claim a Jira task, re-read the issue after adding its label, and refuse the claim and remove only its own label if it observes another fingerprint's claim. It SHALL transition claimed issues to the configured active workflow status, PR-open issues to the configured review status, and merged or explicitly DONE issues to the configured done status. ABORT SHALL remove its claim and restore the configured eligible status; HOLD SHALL retain exclusive ownership with a similarly fingerprinted hold label until CONTINUE restores its claim. It SHALL preserve unrelated labels and SHALL NOT mark an issue done merely because a PR was opened.
+Coderbot SHALL require the configured opt-in label when newly claiming an issue, re-read the issue to verify both that label and the eligible status before advancing it, and use a separate issue label containing its readable instance name and persistent ownership fingerprint for ownership. If the opt-in label disappears during a new claim, Coderbot SHALL remove only its own claim label and refuse the issue. It SHALL refuse a claim and remove only its own label if it observes another fingerprint's claim. It SHALL transition claimed issues to the configured active workflow status, PR-open issues to the configured review status, and merged or explicitly DONE issues to the configured done status. ABORT SHALL remove its claim and restore the configured eligible status; HOLD SHALL retain exclusive ownership with a similarly fingerprinted hold label until CONTINUE restores its claim. It SHALL preserve the opt-in label and all other unrelated labels through claim, hold, completion, and abort, and SHALL NOT mark an issue done merely because a PR was opened.
+
+#### Scenario: Opt-in label removed while claiming
+- **WHEN** the opt-in label is removed from an otherwise eligible issue between listing and post-claim verification
+- **THEN** Coderbot refuses the claim, removes only its ownership label and does not transition the issue
 
 #### Scenario: Concurrent claims are observed
 - **WHEN** two instances' claim labels are visible during post-claim verification
@@ -50,7 +62,7 @@ Coderbot SHALL use an issue label containing its readable instance name and pers
 - **THEN** HOLD prevents other instances from picking it, CONTINUE restores ownership, and ABORT releases it to the configured eligible status
 
 ### Requirement: Jira issue details, seeding and activity trail
-Jira issue descriptions and notes SHALL preserve meaningful text and links when converting between Jira's rich-text format and Coderbot's task text. Coderbot SHALL post lifecycle milestones and user-facing message bodies as issue comments when the activity trail is enabled; a failed note SHALL be logged without blocking task progression. Self-healing backlog items SHALL be created as Jira issues in the configured project and eligible status only when no equivalent item already exists, including completed items.
+Jira issue descriptions and notes SHALL preserve meaningful text and links when converting between Jira's rich-text format and Coderbot's task text. Coderbot SHALL post lifecycle milestones and user-facing message bodies as issue comments when the activity trail is enabled; a failed note SHALL be logged without blocking task progression. Self-healing backlog items SHALL be created as Jira issues in the configured project with the opt-in label and eligible status only when no equivalent item already exists, including completed items.
 
 #### Scenario: Issue contains rich description
 - **WHEN** a Jira issue description contains paragraphs, lists and links
@@ -59,6 +71,10 @@ Jira issue descriptions and notes SHALL preserve meaningful text and links when 
 #### Scenario: Missing infrastructure item already exists
 - **WHEN** an equivalent Jira issue already tracks a missing test harness, regardless of status
 - **THEN** Coderbot does not create a second issue
+
+#### Scenario: Newly seeded issue is eligible
+- **WHEN** Coderbot creates a Jira self-healing issue because no equivalent exists
+- **THEN** it sets the configured eligible status and opt-in label so the task can be picked later
 
 #### Scenario: Milestone comment fails
 - **WHEN** posting a Jira activity comment fails
@@ -72,7 +88,11 @@ For a Jira-sourced task Coderbot SHALL include the Jira issue key and browser UR
 - **THEN** the PR body identifies `Closes PROJ-123` and links the issue, the issue records the PR URL, and the issue remains open in review until completion
 
 ### Requirement: Jira startup checks
-In Jira mode Coderbot SHALL validate authentication, access to the configured project, ability to read issues and the configured eligible/active/review/done statuses, and report actionable errors instead of silently starting with an empty backlog.
+In Jira mode Coderbot SHALL require a nonempty configured opt-in label and validate authentication, access to the configured project, ability to read issues and the configured eligible/active/review/done statuses, and report actionable errors instead of silently starting with an empty backlog.
+
+#### Scenario: Opt-in label is not configured
+- **WHEN** Jira is selected but `CODEBOT_JIRA_PICK_LABEL` is empty
+- **THEN** startup stops with a message naming the missing setting
 
 #### Scenario: Invalid configured status
 - **WHEN** a configured Jira workflow status is unavailable for the project

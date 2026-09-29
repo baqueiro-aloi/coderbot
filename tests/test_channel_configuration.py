@@ -18,6 +18,7 @@ class ChannelConfiguration(unittest.TestCase):
                   "JIRA_PROJECT_KEY": "TEAM" if source == "jira" else "",
                   "JIRA_EMAIL": "jira@example.com" if source == "jira" else "",
                   "JIRA_API_TOKEN": "token" if source == "jira" else "",
+                  "JIRA_PICK_LABEL": "codebot-ready" if source == "jira" else "",
                   "SLACK_CHANNEL_ID": "C12345" if channel == "slack" else "",
                   "SLACK_BOT_TOKEN": "xoxb-token" if channel == "slack" else "",
                   "SLACK_APP_TOKEN": "xapp-token" if channel == "slack" else ""}
@@ -44,6 +45,8 @@ class ChannelConfiguration(unittest.TestCase):
     def test_jira_requires_credentials_only_when_selected(self):
         with self.assertRaisesRegex(SystemExit, "CODEBOT_JIRA_API_TOKEN"):
             self.check("jira", "email", JIRA_API_TOKEN="")
+        with self.assertRaisesRegex(SystemExit, "CODEBOT_JIRA_PICK_LABEL"):
+            self.check("jira", "email", JIRA_PICK_LABEL="")
         with self.assertRaisesRegex(SystemExit, "CODEBOT_SLACK_APP_TOKEN"):
             self.check("gdoc", "slack", SLACK_APP_TOKEN="")
 

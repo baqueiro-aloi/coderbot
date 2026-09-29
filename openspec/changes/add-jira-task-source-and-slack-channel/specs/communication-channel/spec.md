@@ -27,11 +27,47 @@ When Slack is selected and the target checkout is dirty before a task can be cla
 - **THEN** Coderbot ignores it as a command
 
 ### Requirement: Complete interactive setup
-Coderbot SHALL offer an interactive terminal configuration UI usable on macOS and Linux when launched from either bash or zsh. It SHALL guide the user through the selected task source, communication channel, coding agent, credentials and dependent setup flows, showing only relevant requirements in the primary flow. It SHALL make every effective user-configurable runtime setting available in a discoverable advanced section, including settings introduced with Jira and Slack and settings that previously required manual `.env` edits. A usable text-mode setup SHALL remain available without TUI support or when the terminal is non-interactive. The UI SHALL explain and validate values before saving, including conditional requirements, and SHALL NOT require credentials for integrations that were not selected.
+Coderbot SHALL offer an interactive terminal configuration UI usable on macOS and Linux when launched from either bash or zsh. It SHALL open with a menu of independently editable sections for repository, backlog, conversation, agent, evidence and advanced settings. Each section SHALL display a masked preview of its pending changes and offer `Test` and `Save and Close`. `Test` SHALL check that section and any required previously saved dependencies, with actionable, integration-specific errors; `Save and Close` SHALL run the same test, persist the section's changes only on success, return to the menu and mark the section complete. A menu-level `Test` SHALL validate the entire configured installation. Changing a saved dependency SHALL invalidate affected completion checkmarks until those sections are tested again. `Exit` SHALL leave no unsaved edits. The UI SHALL make every effective user-configurable runtime setting available, including settings introduced with Jira and Slack and settings that previously required manual `.env` edits. A usable menu-driven text-mode setup SHALL remain available without TUI support or when the terminal is non-interactive. It SHALL NOT require credentials for integrations that were not selected.
+
+#### Scenario: Menu and section save
+- **WHEN** the user opens setup, edits the repository section and clicks `Save and Close`
+- **THEN** setup tests repository settings, writes only those changes to `.env`, returns to the main menu and marks Repository complete without requiring unfinished Jira, Slack or agent settings
+
+#### Scenario: Section test fails
+- **WHEN** a user tests a Slack configuration whose bot has not joined the selected public channel
+- **THEN** setup stays in Conversation, explains how to invite that specific bot or correct its token and does not overwrite `.env` or mark the section complete
+
+#### Scenario: Test full installation
+- **WHEN** the user selects `Test` from the main menu
+- **THEN** setup validates all selected sections and their cross-section dependencies and displays actionable problems without saving pending values
+
+#### Scenario: Leave menu without pending edits
+- **WHEN** the user has completed or skipped sections and selects `Exit` from the main menu
+- **THEN** setup exits with only the sections already saved to `.env` and no undisclosed draft changes
 
 #### Scenario: Jira and Slack first-time setup
 - **WHEN** a user chooses Jira as the task source and Slack as the communication channel
 - **THEN** setup guides them through Jira site/project/account API token and workflow statuses, separate Slack bot/app tokens and public channel, and the independently required GitHub and evidence settings without asking for a Gmail address
+
+#### Scenario: Slack token acquisition and channel selection
+- **WHEN** Slack is selected as the conversation channel
+- **THEN** setup explains where to create a bot (`xoxb-`) token and a Socket Mode app-level (`xapp-`) token for this instance, provides links that open the appropriate Slack app settings, requests both tokens before the channel ID, and lists this bot's joined public channels by name for selection while storing the chosen channel ID
+
+#### Scenario: Slack access error names the cause
+- **WHEN** Slack reports `missing_scope`, an unjoined channel, a private channel, or an invalid bot/app token
+- **THEN** setup distinguishes the cause and names the exact permission, invitation or token action needed; it SHALL NOT claim that a scope is missing when only channel membership is missing
+
+#### Scenario: Slack credentials cannot list usable channels
+- **WHEN** the bot token lacks channel access, the app token cannot open Socket Mode, or the app has joined no public channels
+- **THEN** setup shows an actionable explanation and lets the user correct the tokens, invite the bot to a public channel, and retry without writing `.env` or requiring the user to guess an ID
+
+#### Scenario: Existing channel after token change
+- **WHEN** a user changes either Slack token during reconfiguration
+- **THEN** setup reloads joined public channels from the new app before allowing a channel choice; an old channel ID that the new bot cannot access is not silently retained
+
+#### Scenario: GitHub Projects board after GitHub token
+- **WHEN** GitHub Projects is selected and a GitHub token and target repo are configured
+- **THEN** setup lists accessible Projects v2 boards for the relevant owner and offers their URLs by title, while allowing an explicitly entered URL when a different owner is required
 
 #### Scenario: Advanced settings are editable
 - **WHEN** a user wants to change any supported runtime environment setting, including GitHub Projects statuses, activity trail, fallback models, retries, evidence or heartbeat tuning

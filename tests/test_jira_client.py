@@ -93,32 +93,44 @@ class JiraHttp(unittest.TestCase):
                 "description": {"type": "doc", "content": []}, "attachment": []}}
 
         with patch.multiple(config, JIRA_PROJECT_KEY="TEST", JIRA_PICK_STATUS="Ready",
+                            JIRA_PICK_LABEL="codebot-ready",
                             JIRA_DONE_STATUS="Done", JIRA_URL="https://test.atlassian.net"), \
              patch.object(jira, "_search", side_effect=[
-                 [issue(1, "Codebot[3] fix", "Ready"),
-                  issue(2, "other", "Ready", ["codebot-claim-other-abc"]),
-                  issue(3, "different status", "Backlog")],
+                 [issue(1, "Codebot[3] fix", "Ready", ["codebot-ready"]),
+                  issue(2, "other", "Ready", ["codebot-ready", "codebot-claim-other-abc"]),
+                  issue(3, "different status", "Backlog", ["codebot-ready"]),
+                  issue(5, "unlabeled", "Ready")],
                  [issue(4, "mine", "In progress", [jira.claim_label()]),
-                  issue(1, "Codebot[3] fix", "Ready")]]):
+                  issue(1, "Codebot[3] fix", "Ready", ["codebot-ready"])]]):
             items = jira.list_pending_items()
         self.assertEqual([(i["key"], i["claimed_by_me"], i["priority"]) for i in items],
                          [("TEST-1", False, 3), ("TEST-4", True, None)])
         self.assertEqual(items[0]["url"], "https://test.atlassian.net/browse/TEST-1")
+
+    def test_ready_jql_requires_opt_in_label_but_recovery_jql_does_not(self):
+        with patch.multiple(config, JIRA_PROJECT_KEY="TEST", JIRA_PICK_STATUS="Ready",
+                            JIRA_PICK_LABEL="codebot-ready", JIRA_DONE_STATUS="Done"), \
+             patch.object(jira, "_search", side_effect=[[], []]) as search:
+            self.assertEqual(jira.list_pending_items(), [])
+        self.assertIn('labels = "codebot-ready"', search.call_args_list[0].args[0])
+        self.assertNotIn("codebot-ready", search.call_args_list[1].args[0])
 
 
 class JiraIssueActions(unittest.TestCase):
     def setUp(self):
         self.site = patch.multiple(config, JIRA_URL="https://test.atlassian.net",
                                    JIRA_PROJECT_KEY="TEST", JIRA_PICK_STATUS="Ready",
+                                   JIRA_PICK_LABEL="codebot-ready",
                                    JIRA_ACTIVE_STATUS="In progress", JIRA_REVIEW_STATUS="In review",
                                    JIRA_DONE_STATUS="Done")
         self.site.start()
         self.addCleanup(self.site.stop)
         self.issue = {"id": "101", "key": "TEST-1", "fields": {
             "summary": "fix it", "status": {"name": "Ready"},
-            "labels": ["existing"], "attachment": []}}
+            "labels": ["existing", "codebot-ready"], "attachment": []}}
         self.calls = []
         self.rival = None
+        self.remove_opt_in = False
 
         def request(method, path, payload=None):
             self.calls.append((method, path, payload))
@@ -126,6 +138,9 @@ class JiraIssueActions(unittest.TestCase):
                 for operation in payload["update"]["labels"]:
                     if "add" in operation:
                         self.issue["fields"]["labels"].append(operation["add"])
+                        if self.remove_opt_in:
+                            self.issue["fields"]["labels"].remove("codebot-ready")
+                            self.remove_opt_in = False
                         if self.rival:
                             self.issue["fields"]["labels"].append(self.rival)
                             self.rival = None
@@ -157,22 +172,41 @@ class JiraIssueActions(unittest.TestCase):
         self.assertFalse(jira.claim_task("fix it", "101"))
         self.assertFalse(any(c[0] == "PUT" for c in self.calls))
 
+    def test_direct_read_refuses_unlabeled_ready_issue(self):
+        self.issue["fields"]["labels"].remove("codebot-ready")
+        self.assertFalse(jira.claim_task("fix it", "101"))
+        self.assertFalse(any(c[0] == "PUT" for c in self.calls))
+
+    def test_removing_opt_in_label_mid_claim_releases_only_own_claim(self):
+        self.remove_opt_in = True
+        self.assertFalse(jira.claim_task("fix it", "101"))
+        self.assertEqual(self.issue["fields"]["labels"], ["existing"])
+        self.assertEqual(self.issue["fields"]["status"]["name"], "Ready")
+
+    def test_existing_claim_recovers_even_if_opt_in_label_is_removed(self):
+        self.issue["fields"]["labels"].remove("codebot-ready")
+        self.issue["fields"]["labels"].append(jira.claim_label())
+        self.issue["fields"]["status"]["name"] = "In progress"
+        self.assertTrue(jira.claim_task("fix it", "101"))
+        self.assertEqual(self.issue["fields"]["labels"], ["existing", jira.claim_label()])
+
     def test_claim_verifies_label_and_transitions_then_holds_and_completes(self):
         self.assertTrue(jira.claim_task("fix it", "101"))
         self.assertEqual(self.issue["fields"]["status"]["name"], "In progress")
         self.assertTrue(jira.hold_task("fix it", "101"))
-        self.assertEqual(set(self.issue["fields"]["labels"]), {"existing", jira.hold_label()})
+        self.assertEqual(set(self.issue["fields"]["labels"]),
+                         {"existing", "codebot-ready", jira.hold_label()})
         self.assertTrue(jira.unhold_task("fix it", "101"))
         self.assertTrue(jira.claim_task("fix it", "101"))
         self.assertTrue(jira.mark_done("fix it", "101"))
         self.assertEqual(self.issue["fields"]["status"]["name"], "Done")
-        self.assertEqual(self.issue["fields"]["labels"], ["existing"])
+        self.assertEqual(self.issue["fields"]["labels"], ["existing", "codebot-ready"])
 
     def test_losing_label_race_removes_only_own_label(self):
         self.rival = "codebot-claim-other-abcdef"
         self.assertFalse(jira.claim_task("fix it", "101"))
         self.assertEqual(set(self.issue["fields"]["labels"]),
-                         {"existing", "codebot-claim-other-abcdef"})
+                         {"existing", "codebot-ready", "codebot-claim-other-abcdef"})
         self.assertEqual(self.issue["fields"]["status"]["name"], "Ready")
 
     def test_unavailable_transition_reports_issue_and_target(self):
@@ -184,7 +218,7 @@ class JiraIssueActions(unittest.TestCase):
         self.assertTrue(jira.claim_task("fix it", "101"))
         self.assertTrue(jira.unclaim_task("fix it", "101"))
         self.assertEqual(self.issue["fields"]["status"]["name"], "Ready")
-        self.assertEqual(self.issue["fields"]["labels"], ["existing"])
+        self.assertEqual(self.issue["fields"]["labels"], ["existing", "codebot-ready"])
 
     def test_startup_checks_configured_status_names(self):
         with patch.object(jira, "_request", side_effect=[{"accountId": "bot"},
@@ -192,6 +226,13 @@ class JiraIssueActions(unittest.TestCase):
                  {"name": "In progress"}, {"name": "In review"}]}]]):
             with self.assertRaisesRegex(RuntimeError, "CODEBOT_JIRA_DONE_STATUS.*Done"):
                 jira.validate()
+
+    def test_startup_requires_opt_in_label_before_jira_requests(self):
+        with patch.object(config, "JIRA_PICK_LABEL", ""), \
+             patch.object(jira, "_request") as request:
+            with self.assertRaisesRegex(RuntimeError, "CODEBOT_JIRA_PICK_LABEL"):
+                jira.validate()
+            request.assert_not_called()
 
     def test_pr_moves_to_review_and_posts_link_as_adf_comment(self):
         self.assertTrue(jira.claim_task("fix it", "101"))
@@ -216,6 +257,7 @@ class JiraIssueActions(unittest.TestCase):
             self.assertTrue(jira.ensure_item("new task"))
         self.assertEqual(send.call_args.args[:2], ("POST", "/issue"))
         self.assertEqual(send.call_args.args[2]["fields"]["summary"], "new task")
+        self.assertEqual(send.call_args.args[2]["fields"]["labels"], ["codebot-ready"])
         transition.assert_called_once()
 
 

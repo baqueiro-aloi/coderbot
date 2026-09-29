@@ -4,6 +4,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from scripts.setup_catalog import BY_KEY, validate
 
@@ -65,10 +66,11 @@ class EnvFile:
                 lines.append(new_line)
         return "".join(lines)
 
-    def save(self, changes: dict[str, str]) -> Path | None:
+    def save(self, changes: dict[str, str],
+             validator: Callable[[dict[str, str]], list[str]] | None = None) -> Path | None:
         if any(key not in BY_KEY for key in changes):
             raise ValueError("setup can only edit cataloged keys")
-        errors = validate(self.with_changes(changes))
+        errors = (validator or validate)(self.with_changes(changes))
         if errors:
             raise ValueError("\n".join(errors))
         data = self._updated_text(changes)

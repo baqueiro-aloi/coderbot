@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+JIRA_API_TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
+JIRA_STATUS_KEYS = ("CODEBOT_JIRA_PICK_STATUS", "CODEBOT_JIRA_ACTIVE_STATUS",
+                    "CODEBOT_JIRA_REVIEW_STATUS", "CODEBOT_JIRA_DONE_STATUS")
+SLACK_APP_SETTINGS_URL = "https://api.slack.com/apps"
+GITHUB_TOKEN_URL = "https://github.com/settings/tokens"
+
 
 @dataclass(frozen=True)
 class Setting:
@@ -31,11 +37,11 @@ SETTINGS = (
     field("CODEBOT_INSTANCE", "Repository", "Optional instance name; blank generates a stable adjective-animal name."),
     field("GIT_AUTHOR_NAME", "Repository", "Name used for Git commits.", "codebot"),
     field("GIT_AUTHOR_EMAIL", "Repository", "Email used for Git commits.", "codebot@localhost", "email"),
-    field("GH_TOKEN", "Repository", "GitHub token for PRs, git push and project issues.", secret=True),
+    field("GH_TOKEN", "Repository", f"GitHub token for PRs, git push and project issues. Create one at {GITHUB_TOKEN_URL}; Projects v2 also needs project write permission.", secret=True),
     field("CODEBOT_TASK_SOURCE", "Backlog", "Select the backlog provider.", "gdoc", "choice", choices=("gdoc", "github", "jira")),
     field("CODEBOT_DOC_ID", "GDoc", "Google Doc backlog ID (or paste the document URL)."),
     field("CODEBOT_DOC_SECTION", "GDoc", "Only use bullets under this heading."),
-    field("CODEBOT_GH_PROJECT_URL", "GitHub", "GitHub Projects v2 board URL."),
+    field("CODEBOT_GH_PROJECT_URL", "GitHub", "Choose an accessible GitHub Projects v2 board by title; setup stores its URL. Choose Manual URL when the board belongs to another owner."),
     field("CODEBOT_GH_PROJECT_OWNER", "GitHub", "Board owner when URL is not supplied.", advanced=True),
     field("CODEBOT_GH_PROJECT_NUMBER", "GitHub", "Board number when URL is not supplied.", kind="positive", advanced=True),
     field("CODEBOT_GH_PROJECT_PICK_STATUSES", "GitHub", "Comma-separated selectable Status names.", "Ready", advanced=True),
@@ -45,9 +51,10 @@ SETTINGS = (
     field("CODEBOT_GH_LABEL_PREFIX", "GitHub", "Prefix for instance ownership labels.", "codebot", advanced=True),
     field("CODEBOT_GH_ISSUE_REPO", "GitHub", "Optional owner/repo for issues; defaults to origin.", advanced=True),
     field("CODEBOT_JIRA_URL", "Jira", "Jira Cloud site URL, https://site.atlassian.net."),
-    field("CODEBOT_JIRA_PROJECT_KEY", "Jira", "Project key holding backlog issues."),
     field("CODEBOT_JIRA_EMAIL", "Jira", "Account email associated with the Jira API token.", kind="email"),
-    field("CODEBOT_JIRA_API_TOKEN", "Jira", "Atlassian account API token.", secret=True),
+    field("CODEBOT_JIRA_API_TOKEN", "Jira", f"Create an API token for the Jira account above at {JIRA_API_TOKEN_URL} (Security > API tokens).", secret=True),
+    field("CODEBOT_JIRA_PROJECT_KEY", "Jira", "Choose an accessible Jira project by name; setup stores its short key, e.g. ENG in ENG-42 (not the name or UUID)."),
+    field("CODEBOT_JIRA_PICK_LABEL", "Jira", "Required opt-in label on issues Coderbot may pick, e.g. codebot-ready. Only issues with this label AND the eligible status are new tasks."),
     field("CODEBOT_JIRA_PICK_STATUS", "Jira", "Eligible issue workflow status (not board column).", "Ready"),
     field("CODEBOT_JIRA_ACTIVE_STATUS", "Jira", "Workflow status when claimed.", "In progress"),
     field("CODEBOT_JIRA_REVIEW_STATUS", "Jira", "Workflow status after PR creation.", "In review"),
@@ -55,9 +62,9 @@ SETTINGS = (
     field("CODEBOT_JIRA_ISSUE_TYPE", "Jira", "Type for self-healing issues.", "Task", advanced=True),
     field("CODEBOT_COMM_CHANNEL", "Conversation", "Select email or Slack independently of backlog.", "email", "choice", choices=("email", "slack")),
     field("CODEBOT_USER_EMAIL", "Email", "First address receives email; comma-separated addresses may reply.", kind="email_list"),
-    field("CODEBOT_SLACK_CHANNEL_ID", "Slack", "Public channel ID (starts with C)."),
-    field("CODEBOT_SLACK_BOT_TOKEN", "Slack", "Dedicated bot token, xoxb-...", secret=True),
-    field("CODEBOT_SLACK_APP_TOKEN", "Slack", "Socket Mode app token, xapp-...", secret=True),
+    field("CODEBOT_SLACK_BOT_TOKEN", "Slack", f"Create a dedicated Slack app at {SLACK_APP_SETTINGS_URL}; in OAuth & Permissions add chat:write, channels:read, channels:history and files:write, install/reinstall it, then copy Bot User OAuth Token (xoxb-...).", secret=True),
+    field("CODEBOT_SLACK_APP_TOKEN", "Slack", f"In the same app at {SLACK_APP_SETTINGS_URL}, enable Socket Mode, then Basic Information > App-Level Tokens > Generate Token and Scopes (connections:write); copy its xapp-... token.", secret=True),
+    field("CODEBOT_SLACK_CHANNEL_ID", "Slack", "Select a public channel this bot has joined; setup fetches its name and stores the C... ID."),
     field("CODEBOT_AGENT", "Agent", "Coding agent CLI.", "claude", "choice", choices=("claude", "opencode")),
     field("CLAUDE_CODE_OAUTH_TOKEN", "Claude", "Headless Claude Code authentication token.", secret=True),
     field("CLAUDE_MODEL", "Claude", "Primary Claude model.", "claude-fable-5"),
@@ -151,6 +158,9 @@ def validate_value(setting: Setting, value: str) -> str | None:
             return "enter one or more comma-separated email addresses"
     if setting.key == "CODEBOT_DOC_ID" and value and not re.fullmatch(r"[a-zA-Z0-9_-]+", normalize_value(setting, value)):
         return "enter a Doc ID or a docs.google.com/document/d/... URL"
+    if setting.key == "CODEBOT_GH_PROJECT_URL" and value and not re.fullmatch(
+            r"https://github\.com/(?:orgs|users)/[^/\s]+/projects/\d+/?", value):
+        return "enter a GitHub Projects v2 URL, e.g. https://github.com/orgs/team/projects/2"
     if setting.kind == "switch" and value.lower() not in ("on", "off", "true", "false", "1", "0", "yes", "no"):
         return "enter on or off"
     if setting.kind == "schedule" and value.lower() not in ("off", "none", "0", "false"):
@@ -160,8 +170,14 @@ def validate_value(setting: Setting, value: str) -> str | None:
         return "select an absolute Git checkout (with .git)"
     if setting.key == "CODEBOT_JIRA_URL" and value and not re.fullmatch(r"https://[^/\s]+\.atlassian\.net/?", value):
         return "enter https://<site>.atlassian.net"
+    if setting.key == "CODEBOT_JIRA_PICK_LABEL" and value and not re.fullmatch(r"[^\s]+", value):
+        return "enter a single Jira label without spaces"
     if setting.key == "CODEBOT_SLACK_CHANNEL_ID" and value and not re.fullmatch(r"C[A-Z0-9]+", value):
         return "enter a public channel ID beginning with C"
+    if setting.key == "CODEBOT_SLACK_BOT_TOKEN" and value and not value.startswith("xoxb-"):
+        return "enter a Bot User OAuth Token beginning with xoxb-"
+    if setting.key == "CODEBOT_SLACK_APP_TOKEN" and value and not value.startswith("xapp-"):
+        return "enter a Socket Mode app-level token beginning with xapp-"
     return None
 
 
@@ -182,7 +198,7 @@ def validate(values: dict[str, str]) -> list[str]:
         required.extend(("CODEBOT_GH_PROJECT_OWNER", "CODEBOT_GH_PROJECT_NUMBER"))
     elif source == "jira":
         required.extend(("CODEBOT_JIRA_URL", "CODEBOT_JIRA_PROJECT_KEY", "CODEBOT_JIRA_EMAIL",
-                         "CODEBOT_JIRA_API_TOKEN"))
+                         "CODEBOT_JIRA_API_TOKEN", "CODEBOT_JIRA_PICK_LABEL"))
     if channel == "email":
         required.append("CODEBOT_USER_EMAIL")
     else:

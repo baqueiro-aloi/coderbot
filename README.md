@@ -126,10 +126,26 @@ issues and placed in the pick column. The labels are created on first start;
 ### Jira Cloud (`CODEBOT_TASK_SOURCE=jira`)
 
 Configure `CODEBOT_JIRA_URL=https://<site>.atlassian.net`, `CODEBOT_JIRA_PROJECT_KEY`,
-`CODEBOT_JIRA_EMAIL` and an account `CODEBOT_JIRA_API_TOKEN`. Set the **issue workflow**
+`CODEBOT_JIRA_EMAIL` and an account `CODEBOT_JIRA_API_TOKEN` (create one at
+[Atlassian account security](https://id.atlassian.com/manage-profile/security/api-tokens)). Set the **issue workflow**
 status names (`CODEBOT_JIRA_PICK_STATUS`, `CODEBOT_JIRA_ACTIVE_STATUS`,
 `CODEBOT_JIRA_REVIEW_STATUS`, `CODEBOT_JIRA_DONE_STATUS`) to statuses that exist in
 your project; these are not board columns. Only issues in the pick status are offered.
+Set `CODEBOT_JIRA_PICK_LABEL` to a Jira label such as `codebot-ready` and add
+that label to each issue Coderbot may take. **Both** the eligible status and the
+label are required for a new task. A task this instance already claimed remains
+recoverable if someone removes the opt-in label later; the ownership label is
+separate. The opt-in label is retained on hold, abort and completion. Self-healing
+issues created by Coderbot receive it automatically.
+After you enter the Jira site, project key, account email and API token,
+`scripts/setup.sh` queries that project's workflow statuses and lets you map
+all four using dropdowns (numbered choices in `--text` mode). If access fails,
+the wizard asks you to correct the connection instead of guessing status names.
+Individual issue workflows can still restrict transitions; Coderbot checks
+each transition when it acts on an issue.
+The project key is the short prefix in issue IDs: `ENG` in `ENG-42`, visible in
+the issue URL (`.../browse/ENG-42`) or Jira's Project settings. It is not the
+full project name or a UUID, and it need not be exactly three or four letters.
 The issue summary is the task; rich descriptions and attached images are delivered
 to the coding agent. `Codebot[n]` in the summary takes priority.
 
@@ -370,24 +386,40 @@ PR content are set aside and the "PR ready" email says so.
 
 **Recommended**: run the guided terminal setup on a macOS or Linux host.
 `scripts/setup.sh` works from bash or zsh, bootstraps a pinned Textual UI into
-`.venv/`, and falls back to a line-oriented flow if that UI or an interactive
-terminal is unavailable. Main pages cover repo, backlog, conversation, agent
-and evidence; **Advanced** searches every runtime setting, including inactive
-integrations and timeouts. The preview masks secrets. On repeat runs it
-preserves unknown keys, comments, untouched credentials and inactive settings
-in `.env`, backs up the original and writes confirmed changes atomically:
+`.venv/`, and falls back to a menu-driven text mode if that UI is unavailable.
+The first screen lists Repository, Backlog, Conversation, Agent, Evidence and
+Advanced. Open sections in any order; `Test` checks only the current section
+and its saved prerequisites, while `Save and Close` repeats that test and
+immediately saves that section to `.env` on success. Failures leave the section
+open with its draft intact and explain what to fix. A checkmark appears beside
+saved sections; changing a dependency clears affected checkmarks. The menu's
+`Test full setup` checks the whole saved configuration; `Exit` needs no final
+save. Text mode offers the same menu with `t`/`s`/`e`/`d` in each section.
+The preview masks secrets; Advanced searches every runtime setting, including
+inactive integrations and timeouts. On repeat runs setup preserves unknown
+keys, comments, untouched credentials and inactive settings in `.env`, backs
+up the original, and writes successful sections atomically:
 
 ```bash
 scripts/setup.sh
 scripts/setup.sh --text    # also works: bash scripts/setup.sh / zsh scripts/setup.sh
 ```
 
-Setup checks Jira project statuses and Slack bot/app/channel access for selected
-integrations before replacing `.env`. It guides Google consent and OpenCode
-provider login after confirmation, and only asks for Google APIs needed by the
-selected backlog, channel and Drive upload setting. All editable keys/defaults
-are in [`.env.example`](.env.example); a coverage test catches newly added runtime
-options missing from setup.
+Slack: create the bot `xoxb-` token under [OAuth & Permissions](https://api.slack.com/apps)
+with `channels:read`, `channels:history`, `chat:write` and `files:write`; install
+or reinstall the app after changing scopes. Enable Socket Mode and create the
+`xapp-` app-level token with `connections:write` under Basic Information. Invite
+**that app's bot** to an active public channel using its Add people/apps menu.
+Conversation lists only public channels joined by that bot; `Test` checks both
+tokens, membership **and** `channels:history` read access. If it reports a
+missing scope, add the named bot scope and reinstall the app; if it reports
+non-membership, invite the bot and reload channels. Neither error saves `.env`.
+Backlog lists accessible Jira projects and workflow statuses or GitHub Projects
+boards after their credentials are available. Setup offers Google consent and
+OpenCode provider login actions in relevant sections, and requests only the
+Google APIs needed by the selected backlog, channel and Drive upload setting.
+All editable keys/defaults are in [`.env.example`](.env.example); a coverage
+test catches newly added runtime options missing from setup.
 
 <details>
 <summary>Manual setup (what <code>scripts/setup.sh</code> automates)</summary>
@@ -418,9 +450,11 @@ options missing from setup.
    CODEBOT_GH_PROJECT_URL=https://github.com/orgs/<owner>/projects/<n>
    # Required for Jira: site, project, account and API token; map real statuses
    CODEBOT_JIRA_URL=https://<site>.atlassian.net
-   CODEBOT_JIRA_PROJECT_KEY=<PROJECT>
+    # Example: ENG is the project key in issue ENG-42
+    CODEBOT_JIRA_PROJECT_KEY=ENG
    CODEBOT_JIRA_EMAIL=<account@example.com>
-   CODEBOT_JIRA_API_TOKEN=<Atlassian API token>
+    CODEBOT_JIRA_API_TOKEN=<Atlassian API token>
+    CODEBOT_JIRA_PICK_LABEL=codebot-ready
    CODEBOT_JIRA_PICK_STATUS=Ready
    CODEBOT_JIRA_ACTIVE_STATUS=In progress
    CODEBOT_JIRA_REVIEW_STATUS=In review
@@ -603,7 +637,9 @@ python3 -m unittest discover -s tests -t .
    value, and verify the old `.env` backup still has every untouched line,
    secret and comment. Verify GDoc+Slack and Jira+email selections separately.
 2. In the selected Jira project create a disposable issue in the configured pick
-   **status**. Start Coderbot and confirm one fingerprinted claim label and one
+   **status** with `CODEBOT_JIRA_PICK_LABEL`, and another issue in the same status
+   without that label. Start Coderbot; the unlabeled issue must stay untouched.
+   Confirm one fingerprinted claim label on the labeled issue and one
    root Slack message bearing the issue link and instance name. With a second
    bot app in the same public channel, check that only the owning app responds
    to replies in that thread. Reply `STATUS`, then `HOLD`; the issue should be

@@ -173,7 +173,8 @@ def _pending(issues: list[dict]) -> list[dict]:
         if hold_label() in labels or labels - {claim_label()}:
             continue
         mine = claim_label() in labels
-        if not mine and status.casefold() != config.JIRA_PICK_STATUS.casefold():
+        if not mine and (status.casefold() != config.JIRA_PICK_STATUS.casefold()
+                         or config.JIRA_PICK_LABEL not in (fields.get("labels") or [])):
             continue
         if mine and status.casefold() == config.JIRA_DONE_STATUS.casefold():
             continue
@@ -188,7 +189,8 @@ def _pending(issues: list[dict]) -> list[dict]:
 
 def list_pending_items() -> list[dict]:
     project = _jql_quote(config.JIRA_PROJECT_KEY)
-    ready = _search(f"project = {project} AND status = {_jql_quote(config.JIRA_PICK_STATUS)}")
+    ready = _search(f"project = {project} AND status = {_jql_quote(config.JIRA_PICK_STATUS)} "
+                    f"AND labels = {_jql_quote(config.JIRA_PICK_LABEL)}")
     owned = _search(f"project = {project} AND labels = {_jql_quote(claim_label())} "
                     f"AND status != {_jql_quote(config.JIRA_DONE_STATUS)}")
     return _pending(ready + owned)
@@ -241,6 +243,8 @@ def _transition(issue: dict, target: str) -> None:
 
 
 def validate() -> None:
+    if not config.JIRA_PICK_LABEL:
+        raise RuntimeError("CODEBOT_JIRA_PICK_LABEL must name the opt-in label for Jira tasks")
     _request("GET", "/myself")
     project = urllib.parse.quote(config.JIRA_PROJECT_KEY, safe="")
     _request("GET", f"/project/{project}")
@@ -273,17 +277,24 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
     if _foreign_owners(issue) or hold_label() in labels:
         return False
     status = (issue.get("fields", {}).get("status") or {}).get("name", "")
-    if claim_label() not in labels and status.casefold() != config.JIRA_PICK_STATUS.casefold():
+    already_claimed = claim_label() in labels
+    if not already_claimed and (status.casefold() != config.JIRA_PICK_STATUS.casefold()
+                                or config.JIRA_PICK_LABEL not in (issue["fields"].get("labels") or [])):
         return False
     if status.casefold() == config.JIRA_DONE_STATUS.casefold():
         return False
-    if claim_label() not in labels:
+    if not already_claimed:
         _label(issue, "add", claim_label())
         issue = _issue(issue["id"])
         if _foreign_owners(issue):
             _label(issue, "remove", claim_label())
             return False
         if claim_label() not in _owner_labels(issue):
+            return False
+        if (config.JIRA_PICK_LABEL not in (issue["fields"].get("labels") or []) or
+                (issue["fields"].get("status") or {}).get("name", "").casefold()
+                != config.JIRA_PICK_STATUS.casefold()):
+            _label(issue, "remove", claim_label())
             return False
     _transition(issue, config.JIRA_ACTIVE_STATUS)
     return True
@@ -380,6 +391,7 @@ def ensure_item(item_text: str) -> bool:
         "project": {"key": config.JIRA_PROJECT_KEY},
         "issuetype": {"name": config.JIRA_ISSUE_TYPE},
         "summary": title,
+        "labels": [config.JIRA_PICK_LABEL],
         "description": _adf(detail) if detail else None}})
     if not isinstance(response, dict) or "id" not in response:
         raise RuntimeError("Jira did not return the created issue's ID")

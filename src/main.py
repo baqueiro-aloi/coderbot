@@ -3438,7 +3438,8 @@ def main() -> None:
         for setting, value in (("CODEBOT_JIRA_URL", config.JIRA_URL),
                                ("CODEBOT_JIRA_PROJECT_KEY", config.JIRA_PROJECT_KEY),
                                ("CODEBOT_JIRA_EMAIL", config.JIRA_EMAIL),
-                               ("CODEBOT_JIRA_API_TOKEN", config.JIRA_API_TOKEN)):
+                               ("CODEBOT_JIRA_API_TOKEN", config.JIRA_API_TOKEN),
+                               ("CODEBOT_JIRA_PICK_LABEL", config.JIRA_PICK_LABEL)):
             if not value:
                 raise SystemExit(f"{setting} must be set when CODEBOT_TASK_SOURCE=jira")
         if not re.fullmatch(r"https://[^/\s]+\.atlassian\.net", config.JIRA_URL):

@@ -45,3 +45,26 @@
 - [x] 6.1 Update `.env.example`, README and deployment instructions for the new guided setup, all supported advanced settings and independent Jira/Slack selectors; document Textual bootstrap/text fallback and required auth for each combination.
 - [x] 6.2 Test setup/catalog coverage in bash and zsh on macOS/Linux-capable environments (including no TUI/failed bootstrap) and ensure existing `.env` values survive reconfiguration; run targeted Jira, conversation and FSM regression tests, then the repository unit suite.
 - [x] 6.3 Validate this OpenSpec change strictly, and document manual smoke procedures for Jira issue claim→hold→review→done, Slack message→reply/command→restart across two bot apps in one channel, and first-time/repeated setup in both UI modes.
+
+## 7. Jira project configuration and opt-in queue
+
+- [x] 7.1 Fetch Jira project workflow statuses after entering URL, project key, account email and token; use them for the four TUI dropdowns and numbered text-mode choices, and allow credential correction/retry on API errors.
+- [x] 7.2 Add a required `CODEBOT_JIRA_PICK_LABEL` to runtime and guided setup; document that Jira issues need both the configured status and this opt-in label, without changing other task sources.
+- [x] 7.3 Filter newly pickable Jira issues by status and opt-in label in JQL, local results and direct claim verification; preserve fingerprinted recovery of own issues even if their opt-in label was removed later.
+- [x] 7.4 Seed Jira self-healing issues with the opt-in label, preserve it through claim/hold/abort/done, add regression tests and validate the full change.
+
+## 8. Credential-driven setup choices
+
+- [x] 8.1 Guide users to create per-instance Slack bot and app tokens with direct app-setting links, scopes and masked fields before presenting channel selection.
+- [x] 8.2 Validate both Slack tokens, paginate joined public channels, and select by channel name in Textual/text mode; refresh choices after token changes and report missing access without saving.
+- [x] 8.3 List accessible Jira projects after site/account/token entry, select project key before status mapping, and retry account/project discovery on failure in both UIs.
+- [x] 8.4 List GitHub Projects v2 boards after GH_TOKEN and target repo are known, select URL by title with an explicit manual URL path for alternate owners; test pagination and permission errors.
+- [x] 8.5 Update setup documentation and regression tests for token→discovery→selection ordering and validate the complete change.
+
+## 9. Section-based setup and actionable tests
+
+- [x] 9.1 Replace Textual wizard navigation with a main menu of configuration sections, a menu-level full Test, Exit, and per-section masked draft, Test, Save and Close, and Discard.
+- [x] 9.2 Validate only the current section and its saved prerequisites before saving, persist its changes immediately without erasing other `.env` entries, mark successful sections complete and invalidate dependent marks after changes.
+- [x] 9.3 Give text-mode setup the same menu and per-section save/test/discard behavior, including dependent Jira/Slack/GitHub discovery within each section.
+- [x] 9.4 Distinguish Slack missing scopes, invalid tokens, non-member/private/archived channels in Test and Save and Close with actionable instructions and no secrets in errors.
+- [x] 9.5 Cover first-time section-by-section setup, failed tests without writes, reopening settings, global Test and Exit with real Textual/test-mode and text-mode regression tests; update docs and strictly validate the change.
