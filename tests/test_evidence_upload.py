@@ -64,6 +64,12 @@ class OffloadHelperTests(unittest.TestCase):
 
 class FinalizePrTests(unittest.TestCase):
     def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.mp4 = Path(self.scratch.name) / "evidence.mp4"
+        self.mp4.write_bytes(b"recording")
+        self.report = Path(self.scratch.name) / "report.html"
+        self.report.write_text("report")
         self.state = {"state": "ADDRESS_REVIEW", "slug": "api-version",
                       "branch": "codebot-api-version", "item": "Support another API version",
                       "pr_url": "https://github.com/acme/repo/pull/7", "pr_summary": "summary",
@@ -102,14 +108,14 @@ class FinalizePrTests(unittest.TestCase):
         self.assertEqual(send.call_args.args[3], [])
 
     def test_failed_upload_attaches_as_before(self):
-        args, _ = self._finalize([MP4], None)
+        args, _ = self._finalize([self.mp4], None)
         self.assertIn("Attached: a Playwright video (mp4)", args[2])
         self.assertNotIn("Video:", args[2])
-        self.assertEqual(args[3], [MP4])
+        self.assertEqual(args[3], [self.mp4])
 
     def test_newman_report_is_not_uploaded(self):
         self.state["e2e_kind"] = "newman"
-        report = Path("/tmp/report.html")
+        report = self.report
         args, upload = self._finalize([report], LINK)
         upload.assert_not_called()
         self.assertIn("Attached: a Newman run report (html)", args[2])

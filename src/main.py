@@ -16,9 +16,13 @@ from datetime import date
 from pathlib import Path
 
 import agent_runner
+import architecture_report
 import config
 import drive_client
 import evidence
+import handoffs
+import milestones
+import proposal_package
 import task_source
 import conversation as gmail_client
 import prompts
@@ -110,8 +114,13 @@ def _contact_name() -> str:
 
 
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
-          new_thread: bool = False) -> None:
+          new_thread: bool = False, *, milestone: str | None = None) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
+    fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
+    if fresh_stage:
+        body = f"Stage: {milestones.label(fresh_stage)}\n\n{body}"
+    if card := handoffs.decision_card(state, phase):
+        body = f"{card}\n\n{body}"
     # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
     # The one-shot localizer never resumes or changes the task's coding session.
     if state.get("task_language"):
@@ -120,7 +129,13 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     subj = subject(state, phase)
     log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
-    state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
+    if fresh_stage:
+        state["thread_id"] = gmail_client.send(
+            subj, body, thread_id, attachments, progress=milestones.image(fresh_stage))
+        milestones.mark(state, fresh_stage)
+        save_state(state)
+    else:
+        state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
     # is therefore waiting on) if the original email was lost or unclear.
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
@@ -131,6 +146,12 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         trail(state, phase, activity, localized=not names)
     else:
         trail(state, phase, activity)
+
+
+def announce_milestone(state: dict, stage: str, body: str) -> None:
+    """A one-time stand-alone announcement where no existing handoff can carry it."""
+    if not milestones.announced(state, stage):
+        email(state, milestones.label(stage), body, milestone=stage)
 
 
 def trail(state: dict, headline: str, body: str = "", *, localized: bool = False) -> None:
@@ -714,6 +735,7 @@ def do_pick(state: dict) -> None:
         save_state(state)
     log.info("picked %r -> %s", choice["item"], branch)
     trail(state, f"Picked this item; working on branch {branch}", choice.get("reason", ""))
+    announce_milestone(state, "exploring", f"Task: {state['item']}\nI'm exploring the codebase.")
 
 
 def prioritize_items(items: list[dict]) -> list[dict]:
@@ -764,6 +786,7 @@ def do_explore(state: dict) -> None:
         return
     _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
+    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
 
 
 def _undo_premature_work(state: dict, phase: str) -> str:
@@ -851,10 +874,41 @@ def do_propose(state: dict) -> None:
     if handle_result(state, result, "PROPOSING"):
         return
     note = _undo_premature_work(state, "PROPOSING")
-    email(state, "proposal for review",
-          f"Task: {state['item']}\n\n{result.output}\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or requested changes.")
+    _send_proposal_review(state, result.output, note)
+
+
+def _send_proposal_review(state: dict, output: str, note: str = "", *,
+                          revised: bool = False, feedback: str = "") -> None:
+    """One review handoff for normal, revised, and question-continuation paths."""
+    try:
+        bundle, files = proposal_package.prepare(
+            config.DATA_DIR, config.REPO_PATH, _validated_slug(state["slug"]),
+            state.get("branch") or state["slug"],
+            max(0, config.MAX_ATTACHMENT_BYTES - 65536))
+        snapshot = proposal_package.previous(state.get("proposal_snapshot")) if revised else None
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        _enter_stuck(state, "PROPOSING", f"The complete OpenSpec review package is unavailable: "
+                     f"{error}. I cannot ask you to approve a partial proposal.")
+        return
+    key = proposal_package.fingerprint(files)
+    feedback_key = f"{revised}:{feedback}:{key}"
+    if state.get("proposal_sent_key") == feedback_key:
+        state["state"] = "WAIT_APPROVAL"
+        return
+    summary = output.strip()[:1800]
+    digest = f"What changed since your last review:\n{proposal_package.changes(snapshot, files)}\n\n" if revised else ""
+    body = ("Decision needed: approve this proposal to begin implementation, or reply "
+            "with the changes you want. The complete OpenSpec change is attached.\n\n"
+            f"Task: {state['item']}\n\n{digest}{summary}\n\n"
+            + (f"{note}\n\n" if note else "")
+            + "Reply with your approval or requested changes.")
+    email(state, "revised proposal" if revised else "proposal for review", body, [bundle],
+          milestone="approval")
+    state["proposal_snapshot"] = str(proposal_package.save_snapshot(
+        config.DATA_DIR, state.get("branch") or state["slug"], files))
+    state["proposal_sent_key"] = feedback_key
     state["state"] = "WAIT_APPROVAL"
+    save_state(state)
 
 
 def do_approval_reply(state: dict, reply: str) -> None:
@@ -882,6 +936,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
     if action == "approve":
         trail(state, "Proposal approved by the user", reply)
         state["state"] = "IMPLEMENTING"
+        announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
     # changes: revise the proposal in the working session and go back to waiting.
     result = agent_runner.resume(
@@ -890,9 +945,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
     if handle_result(state, result, "PROPOSING"):
         return
     note = _undo_premature_work(state, "PROPOSING")
-    email(state, "revised proposal", result.output + "\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or further changes.")
-    state["state"] = "WAIT_APPROVAL"
+    _send_proposal_review(state, result.output, note, revised=True,
+                          feedback=verdict.get("feedback", ""))
 
 
 def do_implement(state: dict) -> None:
@@ -904,6 +958,8 @@ def do_implement(state: dict) -> None:
         return
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
+    state["implementation_summary"] = "\n".join(
+        line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
     state["e2e_specs"] = evidence.reported_specs(result.output)
     log.info("implementation reported %d e2e spec(s): %s",
              len(state["e2e_specs"]), state["e2e_specs"])
@@ -911,8 +967,10 @@ def do_implement(state: dict) -> None:
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
     state["e2e_round"] = 0
     state["verify_round"] = 0
+    state.pop("e2e_passed", None)
     state["state"] = "VERIFYING"
     trail(state, "Implementation complete; verifying")
+    announce_milestone(state, "verifying", "Implementation is complete; I'm running checks and review.")
 
 
 GATE_REPORT_MAX_CHARS = 3000
@@ -1040,6 +1098,7 @@ def _complete_verify(state: dict, result) -> None:
         return
     state.pop("verify_round", None)
     state.pop("verify_round_feedback", None)
+    state["quality_report"] = parsed
     state["review_gate_round"] = 0
     state["state"] = "INTERNAL_REVIEW"
     trail(state, "Verification passed; running internal review")
@@ -1060,9 +1119,12 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
+    state["internal_review_report"] = parsed
     state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
+    if state["state"] == "ARCHIVING":
+        announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
 
 
 def do_internal_review(state: dict) -> None:
@@ -1080,6 +1142,7 @@ def _finish_e2e_repair(state: dict) -> None:
     if _tracked_snapshot() != before:
         state["verify_round"] = 0
         state["state"] = "VERIFYING"
+        state.pop("e2e_passed", None)
     else:
         state["state"] = "E2E"
 
@@ -1092,6 +1155,7 @@ def do_e2e(state: dict) -> None:
     if not state.get("has_e2e_harness"):
         log.info("no e2e harness detected for this task; skipping the e2e gate")
         state["state"] = "ARCHIVING"
+        announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
         return
     log.info("running e2e suite (e2e/run.sh)")
     passed, output = evidence.run_suite()
@@ -1123,8 +1187,10 @@ def do_e2e(state: dict) -> None:
         return  # loop re-enters E2E and re-runs the suite
     log.info("e2e suite PASSED")
     state["e2e_round"] = 0
+    state["e2e_passed"] = True
     state["state"] = "ARCHIVING"
     trail(state, "e2e suite passed; archiving the change")
+    announce_milestone(state, "archiving", "The e2e suite passed; I'm archiving the OpenSpec change.")
 
 
 def _run_checked(command: list[str]) -> str:
@@ -1455,6 +1521,7 @@ def do_open_pr(state: dict) -> None:
         task_source.note_pr(state["item"], state.get("item_id"), state["pr_url"])
     except Exception:  # noqa: BLE001
         log.exception("could not link the PR on the backlog item")
+    _notify_architecture(state)
     if not state.get("has_code_review"):
         log.info("no Code Review workflow detected for this task; finalizing without a review wait")
         finalize_pr(state)
@@ -1465,6 +1532,39 @@ def do_open_pr(state: dict) -> None:
     state["review_run_link"] = None            # link of the last Code Review run we processed
     state["review_comment_watermark"] = ""     # only comments created after this are "new"
     _enter_review_wait(state)
+
+
+def _notify_architecture(state: dict, *, update: bool = False) -> None:
+    """Report actual high-impact decisions; never gate automated review or merging."""
+    if not state.get("base_sha") or not state.get("archive_path"):
+        log.warning("architecture report unavailable: task base/archive missing")
+        return
+    try:
+        context = architecture_report.collect(config.REPO_PATH, state["base_sha"],
+                                              state["archive_path"])
+        previous = state.get("architecture_report")
+        if isinstance(previous, dict) and previous.get("head") == context["head"]:
+            return
+        reply = agent_runner.run(prompts.render(
+            prompts.ARCHITECTURE_REPORT, paths="\n".join(context["paths"]),
+            plan=context["planned"], patch=context["diff"],
+            complete=str(context["complete"]).lower()), contract=False)
+        decisions = architecture_report.parse(reply.output, context["paths"])
+        delta = architecture_report.changed(previous.get("decisions") if isinstance(previous, dict)
+                                            else None, decisions)
+        if update and previous and not delta:
+            state["architecture_report"] = {"head": context["head"], "decisions": decisions}
+            save_state(state)
+            return
+        body = architecture_report.format_report(state["pr_url"], context["head"],
+                                                  delta if update and previous else decisions,
+                                                  update=update and bool(previous),
+                                                  complete=context["complete"])
+        email(state, "architectural decisions", body)
+        state["architecture_report"] = {"head": context["head"], "decisions": decisions}
+        save_state(state)
+    except Exception:  # noqa: BLE001 — informational notice cannot stop PR flow
+        log.exception("could not prepare or send informational architecture report")
 
 
 # ---------------------------------------------------------------- automated review
@@ -1569,7 +1669,26 @@ def finalize_pr(state: dict, note: str = "") -> None:
     evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
     evidence_files, video_url = _offload_evidence_video(state, evidence_files)
-    body = f"Task: {state['item']}\nPR: {state['pr_url']}\n\n{state.get('pr_summary', '')}\n\n"
+    # Match Gmail's attachment cap before indexing evidence as available. The sender
+    # can still explain an omitted file, but the cover must not claim it was attached.
+    deliverable, omitted, size = [], [], 0
+    for path in evidence_files:
+        if not path.is_file() or (config.COMM_CHANNEL == "email" and
+                                  size + path.stat().st_size > config.MAX_ATTACHMENT_BYTES):
+            omitted.append(path)
+            continue
+        deliverable.append(path)
+        size += path.stat().st_size
+    evidence_files = deliverable
+    body = (f"Review cover: {state.get('pr_title') or state['item'][:140]}\n"
+            f"Task: {state['item']}\nPR: {state['pr_url']}\n"
+            + (f"Source: {state['item_url']}\n" if state.get("item_url") else "")
+            + f"\n{handoffs.verification(state)}\n\n"
+            + f"{handoffs.evidence_index(evidence_files, video_url)}\n\n"
+            + f"What changed: {state.get('implementation_summary') or state.get('pr_summary', '')}\n\n")
+    if omitted:
+        body += "Evidence unavailable (missing or over attachment limit): " + ", ".join(
+            path.name for path in omitted) + "\n\n"
     if note:
         body += note + "\n\n"
     if video_url:
@@ -1616,7 +1735,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
                      "were set aside — please re-send your instruction against the updated "
                      "PR.\n\n")
     body += "Reply with change requests, or tell me to merge."
-    email(state, "PR ready for review", body, evidence_files)
+    email(state, "PR ready for review", body, evidence_files, milestone="pr_review")
     # pr_summary is kept (until the task ends) so a later re-finalize — e.g. after a
     # conflict resolution — doesn't email an empty summary.
     for key in ("review_since", "review_round", "review_run_link", "review_threads",
@@ -1791,7 +1910,8 @@ def check_pr_status(state: dict) -> bool:
         log.info("PR %s was merged on GitHub outside codebot; finishing the task",
                  state["pr_url"])
         trail(state, f"PR merged on GitHub: {state['pr_url']}")
-        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False)
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False,
+                     merged=True)
         return True
     if pr_state == "CLOSED":
         log.warning("PR %s was closed without merging; asking the user", state["pr_url"])
@@ -2126,6 +2246,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                                 f"slate.\n\nPR: {pr_url}")
         return
     if action == "changes":
+        state["pending_feedback"] = verdict.get("feedback", "")
         r = agent_runner.resume(
             state["session_id"],
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
@@ -2136,7 +2257,8 @@ def do_merge_reply(state: dict, reply: str) -> None:
             return
         attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
         attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
-        _queue_push(state, "feedback", r.output, attachments)
+        _queue_push(state, "feedback", r.output, attachments,
+                    feedback=state.get("pending_feedback", ""))
         return
     # merge
     pr_state, mergeable = _pr_merge_state(state["pr_url"])
@@ -2207,7 +2329,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                   "the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
         trail(state, f"PR merged: {state['pr_url']}")
-    _finish_task(state, "PR merged.", reset_repo=False)
+    _finish_task(state, "PR merged.", reset_repo=False, merged=True)
 
 
 def _finish_address_pr_threads(state: dict) -> None:
@@ -2241,11 +2363,12 @@ def do_address_pr_threads(state: dict) -> None:
 
 
 def _queue_push(state: dict, continuation: str, output: str = "",
-                attachments: list[Path] | None = None) -> None:
+                attachments: list[Path] | None = None, *, feedback: str = "") -> None:
     state["push_context"] = {
         "continuation": continuation,
         "output": str(output),
         "attachments": [str(path) for path in attachments or []],
+        "feedback": feedback,
     }
     state["state"] = "PUSHING"
     save_state(state)
@@ -2260,6 +2383,7 @@ def do_push(state: dict) -> None:
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
     git("push", "origin", state["branch"])
+    _notify_architecture(state, update=True)
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
         # handled, then wait for the re-review the push triggers.
@@ -2272,10 +2396,17 @@ def do_push(state: dict) -> None:
     elif continuation == "feedback":
         attachments = [Path(path) for path in context.get("attachments", [])]
         attachments, video_url = _offload_evidence_video(state, attachments)
-        body = f"Applied your feedback.\nPR: {state['pr_url']}\n\n{context.get('output', '')}"
+        body = (f"PR updated: {state['pr_url']}\n\n"
+                f"Requested: {context.get('feedback') or '(see earlier message)'}\n\n"
+                f"Changed (implementation report): {context.get('output', '')}\n\n"
+                + handoffs.evidence_index(attachments, video_url))
+        body += ("\n\nVerification: new evidence was recorded after these changes."
+                 if attachments or video_url else
+                 "\n\nVerification: no new evidence artifact was available; see the PR checks.")
         if video_url:
             body += f"\n\nVideo: {video_url}"
         email(state, "PR updated", body, attachments)
+        state.pop("pending_feedback", None)
         state["state"] = "WAIT_MERGE"
     else:
         _finish_address_pr_threads(state)
@@ -2660,10 +2791,12 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
               "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url")
+              "evidence_url", "milestones_announced", "proposal_snapshot", "proposal_sent_key",
+              "quality_report", "internal_review_report", "e2e_passed",
+              "implementation_summary", "pending_feedback", "architecture_report")
 
 
-def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
+def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
     """End the task successfully: mark the item done in the backlog, optionally reset the
     checkout to a clean base branch (needed when finishing before a merge — the tree may
     hold proposal artifacts or a stale branch), email confirmation, and land in IDLE."""
@@ -2692,7 +2825,10 @@ def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
             body += ("\n\nThe repo reset finished with issues (I'll re-check before the "
                      "next task):\n- " + "\n- ".join(problems))
     body += "\n\nI'll pick up the next pending item from the backlog."
-    email(state, subj, body)
+    if merged:
+        email(state, subj, body, milestone="merged")
+    else:
+        email(state, subj, body)
     if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
         state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
@@ -3215,19 +3351,19 @@ def _send_status(state: dict, thread_id: str) -> None:
 def _continue_exploring(state: dict, result) -> None:
     _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
+    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
 
 
 def _continue_proposing(state: dict, result) -> None:
     note = _undo_premature_work(state, "PROPOSING")
-    email(state, "proposal for review",
-          f"{result.output}\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or requested changes.")
-    state["state"] = "WAIT_APPROVAL"
+    _send_proposal_review(state, result.output, note)
 
 
 def _continue_implementing(state: dict, result) -> None:
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
+    state["implementation_summary"] = "\n".join(
+        line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
     # The direct path parses the spec list from the final output; an answer that
     # completes the phase carries the same contract, so parse it here too.
     specs = evidence.reported_specs(result.output)
@@ -3236,8 +3372,10 @@ def _continue_implementing(state: dict, result) -> None:
         log.info("implementation (via reply) reported %d e2e spec(s): %s", len(specs), specs)
     state["e2e_round"] = 0
     state["verify_round"] = 0
+    state.pop("e2e_passed", None)
     state["state"] = "VERIFYING"
     trail(state, "Implementation complete; verifying")
+    announce_milestone(state, "verifying", "Implementation is complete; I'm running checks and review.")
 
 
 def _continue_verifying(state: dict, result) -> None:
@@ -3290,7 +3428,8 @@ def _continue_apply_pr_feedback(state: dict, result) -> None:
         result, state.get("e2e_specs", []), state.get("e2e_kind"))
     existing = {path.resolve() for path in attachments}
     attachments += [path for path in extra_attachments if path.resolve() not in existing]
-    _queue_push(state, "feedback", result.output, attachments)
+    _queue_push(state, "feedback", result.output, attachments,
+                feedback=state.get("pending_feedback", ""))
 
 
 CONTINUATIONS = {

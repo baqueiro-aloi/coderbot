@@ -21,7 +21,9 @@ def open_thread(state: dict) -> str | None:
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
-         attachments: list[Path] | None = None) -> str:
+         attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
+    if progress is not None:
+        return _backend().send(subject, body, thread_id, attachments, progress=progress)
     return _backend().send(subject, body, thread_id, attachments)
 
 

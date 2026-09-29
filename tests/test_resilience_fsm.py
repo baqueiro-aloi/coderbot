@@ -175,6 +175,11 @@ class StuckReply(unittest.TestCase):
 
 
 class QuestionReply(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(main, "announce_milestone")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def base(self, phase):
         return {"state": "WAIT_REPLY", "return_state": phase, "pending_question": "q?",
                 "item": "task", "slug": "s", "branch": "b", "session_id": "sid"}
@@ -309,6 +314,8 @@ class ActivityTrail(unittest.TestCase):
              patch.object(main, "trail") as trail:
             main.email(state, "proposal for review", "body", [pathlib.Path("/x/video.webm")])
         trail.assert_called_once_with(state, "proposal for review",
+                                      "Your decision: approve the attached proposal to start "
+                                      "implementation, or reply with requested changes.\n\n"
                                       "body\n\nAttachments (emailed): video.webm")
 
 

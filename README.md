@@ -222,6 +222,42 @@ the validated spec, active-change, and archive paths. If archive recovery needs 
 guidance, the existing agent session may repair and commit only OpenSpec planning/spec
 files before coderbot retries archival.
 
+### Review-friendly task messages
+
+Each task thread gets a brief, illustrated announcement at most once for each reached
+milestone: **exploration → proposal → awaiting approval → implementation → verification
+→ archival → PR ready for human review → confirmed merge**. Review and optional e2e
+checks live within verification. Retries, questions, status replies and silence check-ins
+do not repeat the diagram. The assets are pre-rendered SVG/PNG pairs under
+`src/assets/milestones/`; outgoing mail includes an inline PNG with a plain-text stage
+label, and Slack uploads the PNG to the task thread. Completing or aborting a task
+without a confirmed GitHub merge never announces the merge milestone.
+
+Proposal-review messages attach one **offline, self-contained HTML file** containing
+the actual change's `proposal.md`, `design.md`, `tasks.md` and all nested
+`specs/**/spec.md` files. Its left index links to files and headings and can be
+filtered; it uses no hosted assets. Each revision regenerates this package and
+summarizes changed sections against the last version sent. Generated files and
+snapshots are stored under git-ignored `data/review_packages/`, rather than in the
+target repo. If required artifacts are missing or the full attachment exceeds the
+configured mail limit, codebot asks for help instead of requesting approval of an
+incomplete package. Approval and merge still require the same explicit replies.
+
+Messages awaiting input start with the decision or question. Before asking for PR
+review, codebot presents recorded verification outcomes (including skipped checks),
+what changed, the PR and task links, and an index of evidence that was actually
+available. After feedback is pushed, it relates the request to the changes and
+new evidence. Upload failures are called out rather than passing for delivered files.
+
+**At PR creation**, before waiting for an optional automated Code Review run, codebot
+also sends a separate, informational architecture report. It compares the archived
+OpenSpec plan with the committed PR diff, calls out high-impact implemented decisions
+and unverified assumptions (for example, a separate managed database or elevated
+container permissions), and links each item to a changed PR file. If review or later
+feedback materially changes one of these decisions, only the delta is sent. An
+unavailable analysis does not claim that no decisions exist. This report never asks
+for another approval or delays automated review, the PR-ready handoff or merge.
+
 Every tick starts by checking the mailbox for commands (ABORT / STATUS / DONE / HOLD /
 CONTINUE, see below). Any state that keeps failing detours through WAIT_STUCK (see
 "Failure handling"), and HOLD parks a task from any state.

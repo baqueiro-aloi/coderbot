@@ -142,6 +142,12 @@ class GateParserTests(unittest.TestCase):
 
 
 class LifecycleGateTests(unittest.TestCase):
+    def setUp(self):
+        # Gate tests exercise transition logic; milestone sends have their own coverage.
+        patcher = patch.object(main, "announce_milestone")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def base_state(self, **updates):
         state = {
             "state": "IMPLEMENTING",

@@ -243,7 +243,7 @@ class SlackInbox(unittest.TestCase):
         self.web.files_upload_v2.assert_called_once_with(
             channel="C123", thread_ts="100.000001", file=str(path), filename="report.html")
         self.assertIn("Evidence file unavailable: report.html",
-                      [call.kwargs["text"] for call in self.web.chat_postMessage.call_args_list])
+                      "\n".join(call.kwargs["text"] for call in self.web.chat_postMessage.call_args_list))
 
     def test_unhandled_stale_replies_are_drained_before_new_merge_decision(self):
         self.assertTrue(slack._accept_event(self.event("101.000001", "merge")))

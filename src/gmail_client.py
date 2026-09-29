@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import re
+from html import escape
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
@@ -72,7 +73,7 @@ def _extract_body(payload: dict) -> str:
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
-         attachments: list[Path] | None = None) -> str:
+         attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
     """Send an email to the user; returns the Gmail thread id."""
     service = _gmail()
     msg = EmailMessage()
@@ -119,8 +120,19 @@ def send(subject: str, body: str, thread_id: str | None = None,
     # Attach an HTML alternative so Gmail renders Markdown instead of showing raw
     # '#', '*', '`' etc. Must be added before any attachment (multipart ordering).
     html = _markdown_to_html(body)
+    if progress is not None:
+        html = (html or f"<div>{escape(body).replace(chr(10), '<br>')}</div>")
+        html += ('<p><img src="cid:codebot-progress" alt="'
+                 + escape(progress.stem.replace('_', ' ').title(), quote=True)
+                 + ' progress diagram" style="max-width:100%;height:auto"></p>')
     if html:
         msg.add_alternative(html, subtype="html")
+        if progress is not None:
+            html_part = msg.get_body(preferencelist=("html",))
+            assert html_part is not None
+            html_part.add_related(progress.read_bytes(), maintype="image",
+                                  subtype="png", cid="<codebot-progress>",
+                                  filename=progress.name)
     for path in files:
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         maintype, subtype = ctype.split("/", 1)

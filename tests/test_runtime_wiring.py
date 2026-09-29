@@ -148,7 +148,8 @@ class RuntimeValidationTests(unittest.TestCase):
 
     def test_main_loop_does_not_count_transient_network_errors_as_state_failures(self):
         import ssl
-        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1",
+                 "task_language": "English"}
         patches = self._main_env(DOC_ID="doc") + [
             patch.object(main.task_source, "validate"),
             patch.object(main.task_source, "describe", return_value="doc"),

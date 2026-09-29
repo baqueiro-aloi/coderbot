@@ -312,14 +312,26 @@ def _chunks(body: str, limit: int = 3800):
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
-         attachments: list[Path] | None = None) -> str:
+         attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
     if not thread_id:
         raise RuntimeError("Slack task messages require an owned task thread")
     channel, root_ts = _split_thread(thread_id)
+    # Upload evidence first so the message's index describes only files Slack accepted.
+    failed = []
+    for path in attachments or []:
+        try:
+            web().files_upload_v2(channel=channel, thread_ts=root_ts,
+                                  file=str(path), filename=path.name)
+        except Exception:
+            log.exception("could not share %s in Slack thread", path.name)
+            failed.append(path)
+            body = body.replace(f": attached {path.name}", f": unavailable ({path.name})")
+    if failed:
+        body += "\n\nEvidence file unavailable: " + ", ".join(path.name for path in failed)
     for part in _chunks(_to_mrkdwn(body)):
         web().chat_postMessage(channel=channel, thread_ts=root_ts, text=part,
-                               mrkdwn=True, unfurl_links=False)
-    for path in attachments or []:
+                                mrkdwn=True, unfurl_links=False)
+    for path in [progress] if progress else []:
         try:
             web().files_upload_v2(channel=channel, thread_ts=root_ts,
                                   file=str(path), filename=path.name)
