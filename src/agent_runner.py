@@ -8,6 +8,7 @@ import time
 from contextvars import ContextVar
 
 import claude_runner
+import activity
 import config
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ SENTINEL = claude_runner.SENTINEL
 OUTBOX_DIR = claude_runner.OUTBOX_DIR
 EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 _task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
+_task_context: ContextVar[dict | None] = ContextVar("task_context", default=None)
 _turn_lock = threading.Lock()
 _turn: dict = {"active": False}
 
@@ -33,27 +35,58 @@ def turn_snapshot() -> dict:
         return dict(_turn)
 
 
-def _begin_turn() -> None:
+def set_task_context(state: dict | None) -> None:
+    """Tag progress with the task being worked; never store its prompt or output."""
+    _task_context.set(state)
+
+
+def _persist(action, *args, **kwargs) -> None:
+    try:
+        action(*args, **kwargs)
+    except (OSError, ValueError) as error:
+        log.warning("could not persist agent progress: %s", error)
+    except Exception:  # noqa: BLE001 — telemetry must never fail the coding turn
+        log.exception("could not persist agent progress")
+
+
+def _begin_turn(session_id: str = "") -> None:
     with _turn_lock:
         _turn.clear()
         _turn.update(active=True, started_at=time.time(), last_activity=None,
-                     activity="coding agent running")
+                     activity="coding agent running", session_id=session_id,
+                     persisted_at=0.0)
+    context = _task_context.get()
+    if context:
+        _persist(activity.begin, context, session_id)
 
 
 def _end_turn() -> None:
     with _turn_lock:
         _turn["active"] = False
+        last = _turn.get("last_activity")
+        label = _turn.get("activity")
+        session_id = _turn.get("session_id")
+    context = _task_context.get()
+    if context:
+        if last:
+            _persist(activity.observe, context, now=last, activity=label,
+                     session_id=session_id or None)
+        _persist(activity.finish, context)
 
 
 def _observe(event: dict) -> None:
     kind = event.get("type")
-    if kind not in ("tool_use", "step_finish", "text"):
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    is_tool = kind == "tool_use" or part.get("type") == "tool"
+    if kind not in ("tool_use", "step_finish", "step_start", "text", "reasoning") and not is_tool:
         return
+    observed = time.time()
     with _turn_lock:
         if _turn.get("active"):
-            _turn["last_activity"] = time.time()
-            if kind == "tool_use":
-                part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            _turn["last_activity"] = observed
+            if isinstance(event.get("sessionID"), str):
+                _turn["session_id"] = event["sessionID"]
+            if is_tool:
                 tool = str(part.get("tool") or "tool")[:35]
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 inputs = state.get("input") if isinstance(state.get("input"), dict) else {}
@@ -62,6 +95,16 @@ def _observe(event: dict) -> None:
                 _turn["activity"] = ("task: " + " ".join(description.split())[:100]
                                      if isinstance(description, str) and description.strip()
                                      else f"tool: {tool}")
+            label = _turn["activity"] if is_tool else None
+            session_id = _turn.get("session_id") or None
+            persist = is_tool or observed - _turn["persisted_at"] >= 2
+            if persist:
+                _turn["persisted_at"] = observed
+        else:
+            return
+    context = _task_context.get()
+    if context and persist:
+        _persist(activity.observe, context, activity=label, session_id=session_id, now=observed)
 
 
 def set_task_language(language: str | None) -> None:
@@ -311,7 +354,7 @@ def run(prompt: str, contract: bool = True):
 
 
 def resume(session_id: str, prompt: str):
-    _begin_turn()
+    _begin_turn(session_id)
     try:
         prompt = _language_prompt(prompt)
         if config.AGENT == "claude":

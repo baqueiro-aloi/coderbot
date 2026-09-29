@@ -349,21 +349,26 @@ the supervisor checks for status mail during long turns; in Slack it reads the
 durable Socket Mode inbox and, if an event was missed, reconciles the active thread
 through Slack's API at most once a minute. It also accepts a top-level status request.
 Other commands remain queued for the main state machine. The reply names the task,
-phase, elapsed time and the last observed OpenCode tool activity, when available.
-Recent activity is a sign of progress; after five minutes without observable activity, it explicitly
-says progress cannot be confirmed. Claude or non-agent phases may not expose step
-telemetry, so the reply does not claim they are healthy or stuck without evidence.
-No second coding-agent session is started and no task state is modified by the
-supervisor. Between turns, the regular `STATUS` command still returns the full
-state snapshot.
+phase and elapsed time. Codebot writes a small metadata-only turn snapshot to
+`data/agent_activity.sqlite`; when using OpenCode it also reads the running session
+and its subagents, tasks and latest event timestamps directly from OpenCode's own
+`opencode.db` in read-only mode (including its WAL). This works from the main bot or
+a separate status watcher, without sharing Python memory or starting another agent.
+The message includes the active task, task counts, up to two recent subagents and
+time since the last observable event. Neither reasoning content, prompts, shell
+commands nor tool output is included. If the model has emitted no recent event,
+status reports the last known task and the gap; it cannot inspect un-emitted LLM
+thoughts or claim the model is progressing. Claude's buffered runner may provide
+only turn-level signals until it completes. The supervisor never modifies task
+state; between turns regular `STATUS` still returns the full state snapshot.
 
 If a bot was already executing an agent turn when updated code was copied to its
 bind-mounted `/app`, restarting that container would interrupt the turn. For a
 Slack task, `python3 /app/scripts/status_watch.py` may instead run as a separate
 container process until the task changes phase. It uses the same bounded Slack
-history reconciliation, answers only `STATUS`, and never starts another agent or
-writes the bot's task state. The built-in supervisor takes over at the next normal
-container restart.
+history reconciliation and read-only OpenCode progress reader, answers only
+`STATUS`, and never starts another agent or writes the bot's task state. The
+built-in supervisor takes over at the next normal container restart.
 
 ## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
 

@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 
 import agent_runner
+import activity
 import architecture_report
 import config
 import drive_client
@@ -3347,19 +3348,34 @@ def _send_status(state: dict, thread_id: str) -> None:
 
 def _short_status(state: dict, turn: dict, now: float) -> str:
     """Concise, observational status; no agent turn and no claim of guaranteed health."""
+    turn = activity.snapshot(state, turn, now)
     spanish = state.get("task_language", "English").casefold() == "spanish"
     phase = state.get("return_state") if state.get("state") == "WAIT_REPLY" else state.get("state", "IDLE")
     title = str(state.get("item") or ("Sin tarea activa" if spanish else "No active task"))[:140]
     started = (turn.get("started_at") if turn.get("active") else
                state.get("last_transition") or _liveness.get("tick_started"))
     elapsed = _fmt_dur(now - started) if isinstance(started, (float, int)) else "?"
-    last = turn.get("last_activity") if turn.get("active") else None
+    last = turn.get("last_activity")
+    counts = turn.get("todos") or {}
+    children = turn.get("children") or []
     if spanish:
         lines = [f"Tarea: {title}", f"Fase: {phase} ({elapsed} en curso)."]
+        if turn.get("current_task"):
+            lines.append(f"Ahora: {turn['current_task']}.")
+        if counts:
+            lines.append(f"Plan: {counts.get('in_progress', 0)} en curso, "
+                         f"{counts.get('pending', 0)} pendientes, {counts.get('completed', 0)} terminadas.")
+        if children:
+            lines.append("Subagentes: " + "; ".join(
+                f"{child['title']} (último evento hace {_fmt_dur(now - child['at'])})"
+                for child in children) + ".")
         if last:
             lines.append(f"Última actividad observada: {turn.get('activity', 'agente')} "
                          f"(hace {_fmt_dur(now - last)}).")
-            lines.append("Sin señales de bloqueo recientes." if now - last < 300 else
+        if turn.get("process_dead"):
+            lines.append("El proceso del agente no aparece activo; requiere revisión.")
+        elif last:
+            lines.append("Actividad reciente registrada." if now - last < 300 else
                          "Sin actividad observable reciente; no puedo confirmar si ese paso avanza.")
         elif turn.get("active"):
             lines.append("El agente sigue en ejecución; sin telemetría de pasos, no puedo "
@@ -3368,10 +3384,22 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
             lines.append("Fase en curso sin telemetría del agente; no puedo confirmar si avanza.")
     else:
         lines = [f"Task: {title}", f"Phase: {phase} (running for {elapsed})."]
+        if turn.get("current_task"):
+            lines.append(f"Now: {turn['current_task']}.")
+        if counts:
+            lines.append(f"Plan: {counts.get('in_progress', 0)} in progress, "
+                         f"{counts.get('pending', 0)} pending, {counts.get('completed', 0)} done.")
+        if children:
+            lines.append("Subagents: " + "; ".join(
+                f"{child['title']} (last event {_fmt_dur(now - child['at'])} ago)"
+                for child in children) + ".")
         if last:
             lines.append(f"Last observed activity: {turn.get('activity', 'agent')} "
                          f"({_fmt_dur(now - last)} ago).")
-            lines.append("No recent sign of a stall." if now - last < 300 else
+        if turn.get("process_dead"):
+            lines.append("The agent process is no longer running; this needs attention.")
+        elif last:
+            lines.append("Recent activity recorded." if now - last < 300 else
                          "No recent observable activity; I cannot confirm this step is progressing.")
         elif turn.get("active"):
             lines.append("The agent is still running; without step telemetry I cannot "
@@ -3801,7 +3829,10 @@ def _run_loop() -> None:
         _current_state = state
         try:
             if state.get("item") and state["state"] != "IDLE":
+                agent_runner.set_task_context(state)
                 _ensure_task_language(state)
+            else:
+                agent_runner.set_task_context(None)
             agent_runner.set_task_language(state.get("task_language"))
             if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
                 gmail_client.close_thread(state["retire_thread_id"])

@@ -135,3 +135,17 @@ class Supervisor(unittest.TestCase):
         self.assertIn("hace 8 min", body)
         self.assertIn("no puedo confirmar", body)
         self.assertNotIn("Sin señales de bloqueo", body)
+
+    def test_readable_status_includes_plan_and_two_subagents_without_reasoning(self):
+        observed = {"active": True, "started_at": 200.0, "last_activity": 540.0,
+                    "activity": "subagent: Cerrar proveedor PICA2", "current_task": "Completar PICA2",
+                    "todos": {"in_progress": 1, "pending": 4},
+                    "children": [{"title": "Cerrar proveedor PICA2", "at": 540.0},
+                                 {"title": "Finalizar Playwright", "at": 420.0}]}
+        with patch.object(main.activity, "snapshot", return_value=observed):
+            body = main._short_status(self.state, observed, 600.0)
+        self.assertIn("Ahora: Completar PICA2", body)
+        self.assertIn("1 en curso, 4 pendientes", body)
+        self.assertIn("Subagentes: Cerrar proveedor PICA2", body)
+        self.assertIn("Finalizar Playwright", body)
+        self.assertNotIn("reasoning", body)
