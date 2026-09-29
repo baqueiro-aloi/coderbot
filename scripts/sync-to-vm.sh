@@ -2,13 +2,15 @@
 # One-time copy. Stop the bot on both machines; its state and checkout must be stable.
 set -euo pipefail
 
-usage='Usage: bash scripts/sync-to-vm.sh user@host'
+usage='Usage: bash scripts/sync-to-vm.sh user@host [--code-only]'
 if [[ $# -eq 1 && $1 == --help ]]; then
   echo "$usage"
   echo 'Copies Coderbot to ~/codebot/app and CODEBOT_REPO_PATH to ~/codebot/target.'
+  echo '--code-only updates app code without copying VM data, environment or target repo.'
   exit 0
 fi
-if [[ $# -ne 1 || ! $1 =~ ^[[:alnum:]_.-]+@[[:alnum:].-]+$ ]]; then
+if [[ ( $# -ne 1 && ( $# -ne 2 || $2 != --code-only ) ) ||
+      ! $1 =~ ^[[:alnum:]_.-]+@[[:alnum:].-]+$ ]]; then
   echo "$usage" >&2
   exit 2
 fi
@@ -17,12 +19,23 @@ remote=$1
 for tool in rsync ssh python3 git; do
   command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 1; }
 done
+root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+excludes=(--exclude='node_modules/' --exclude='.venv/' --exclude='venv/'
+          --exclude='ms-playwright/')
+if [[ ${2:-} == --code-only ]]; then
+  # The running VM owns data/ (uid 501) and its own .env. Never copy local
+  # state, credentials or target checkout during a code update.
+  rsync -az "${excludes[@]}" --exclude='/data/' --exclude='/.env' \
+    --exclude='/.env.*' -- "$root/" "$remote:~/codebot/app/"
+  echo "Updated Coderbot code on $remote; VM data, .env and target checkout preserved."
+  exit 0
+fi
+
 if [[ ! -f $HOME/.npmrc ]]; then
   echo "Missing $HOME/.npmrc; the Docker Compose override requires this registry configuration" >&2
   exit 1
 fi
 
-root=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 if [[ ! -f $root/.env ]]; then
   echo "Missing $root/.env; configure the target repo with scripts/setup.sh first" >&2
   exit 1
@@ -67,9 +80,10 @@ ssh -o BatchMode=yes "$remote" 'mkdir -p "$HOME/codebot/app" "$HOME/codebot/targ
 # Source and credentials come across; native dependencies and browser downloads
 # from macOS/arm64 must be installed again on Linux/amd64. Do not delete any VM
 # dependencies that may already have been installed there.
-excludes=(--exclude='node_modules/' --exclude='.venv/' --exclude='venv/'
-          --exclude='ms-playwright/')
-rsync -az "${excludes[@]}" --exclude='/data/heartbeat' -- "$root/" "$remote:~/codebot/app/"
+# OpenCode's XDG cache contains platform-specific executables (e.g. rg); copy
+# durable sessions/credentials but let the Linux VM rebuild its own cache.
+rsync -az "${excludes[@]}" --exclude='/data/heartbeat' \
+  --exclude='/data/opencode/cache/' -- "$root/" "$remote:~/codebot/app/"
 rsync -az "${excludes[@]}" -- "$target/" "$remote:~/codebot/target/"
 
 # Keep the original Mac settings beside the VM-adjusted file. If a local

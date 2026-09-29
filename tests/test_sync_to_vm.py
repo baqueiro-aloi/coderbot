@@ -61,6 +61,10 @@ class VmCopy(unittest.TestCase):
             (app / "data").mkdir()
             (app / "data" / "token.json").write_text("token")
             (app / "data" / "heartbeat").write_text("old Mac heartbeat")
+            (app / "data/opencode/cache/opencode/bin").mkdir(parents=True)
+            (app / "data/opencode/cache/opencode/bin/rg").write_text("arm64 executable")
+            (app / "data/opencode/data/opencode").mkdir(parents=True)
+            (app / "data/opencode/data/opencode/session.json").write_text("durable session")
             (target / "node_modules").mkdir()
             (target / "node_modules" / "index.js").write_text("module")
             (target / ".cache/ms-playwright").mkdir(parents=True)
@@ -100,9 +104,17 @@ source = pathlib.Path(sys.argv[-2])
 dest = sys.argv[-1].split(':', 1)[1].replace('~', os.environ['FAKE_VM_HOME'], 1)
 target = pathlib.Path(dest)
 if source.is_dir():
+    ignored = ['node_modules', '.venv', 'venv', 'ms-playwright', 'heartbeat']
+    if '--exclude=/data/' in sys.argv:
+        ignored += ['data', '.env', '.env.*']
+    def ignore(directory, names):
+        skipped = shutil.ignore_patterns(*ignored)(directory, names)
+        if ('--exclude=/data/opencode/cache/' in sys.argv and
+                pathlib.Path(directory) == source / 'data/opencode'):
+            skipped.add('cache')
+        return skipped
     shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns('node_modules', '.venv', 'venv',
-                                                  'ms-playwright', 'heartbeat'))
+                    ignore=ignore)
 else:
     shutil.copy2(source, target)
 """)
@@ -125,6 +137,9 @@ else:
             self.assertFalse((copied / ".venv").exists())
             self.assertTrue((copied / "data/token.json").exists())
             self.assertFalse((copied / "data/heartbeat").exists())
+            self.assertFalse((copied / "data/opencode/cache/opencode/bin/rg").exists())
+            self.assertEqual((copied / "data/opencode/data/opencode/session.json").read_text(),
+                             "durable session")
             ownership = (home / "ownership-command").read_text()
             self.assertIn('501:501 "$HOME/codebot/app/data" "$HOME/codebot/target"', ownership)
             self.assertNotIn('"$HOME/codebot/app" ', ownership)
@@ -142,6 +157,25 @@ else:
                                                      "FAKE_VM_HOME": str(home)})
             self.assertNotEqual(again.returncode, 0)  # protect the first .env.local backup
             self.assertEqual((copied / ".env.local").read_text(), original)
+            (copied / "data/state.json").write_text('{"state":"WAIT_REPLY"}')
+            (app / "data/state.json").write_text('{"state":"IDLE"}')
+            (app / "data/token.json").write_text("different-local-token")
+            (app / ".env").write_text("GH_TOKEN=changed-local-value\n")
+            (app / "src").mkdir()
+            (app / "src/marker.py").write_text("updated code\n")
+            update = subprocess.run(["bash", str(app / "scripts/sync-to-vm.sh"),
+                                     "azureuser@74.235.122.91", "--code-only"], cwd=app,
+                                    text=True, capture_output=True, timeout=30,
+                                    env=os.environ | {"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                                                      "HOME": str(local_home),
+                                                      "FAKE_VM_HOME": str(home)})
+            self.assertEqual(update.returncode, 0, update.stderr)
+            self.assertEqual((copied / "src/marker.py").read_text(), "updated code\n")
+            self.assertEqual((copied / "data/state.json").read_text(), '{"state":"WAIT_REPLY"}')
+            self.assertEqual((copied / "data/token.json").read_text(), "token")
+            self.assertEqual((copied / ".env.local").read_text(), original)
+            self.assertIn(f"CODEBOT_REPO_PATH={home}/codebot/target\n", (copied / ".env").read_text())
+            self.assertTrue((home / "codebot/target/.git").exists())
 
 
 if __name__ == "__main__":
