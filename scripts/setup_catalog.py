@@ -63,7 +63,7 @@ SETTINGS = (
     field("CODEBOT_COMM_CHANNEL", "Conversation", "Select email or Slack independently of backlog.", "email", "choice", choices=("email", "slack")),
     field("CODEBOT_USER_EMAIL", "Email", "First address receives email; comma-separated addresses may reply.", kind="email_list"),
     field("CODEBOT_SLACK_BOT_TOKEN", "Slack", f"Create a dedicated Slack app at {SLACK_APP_SETTINGS_URL}; in OAuth & Permissions add chat:write, channels:read, channels:history and files:write, install/reinstall it, then copy Bot User OAuth Token (xoxb-...).", secret=True),
-    field("CODEBOT_SLACK_APP_TOKEN", "Slack", f"In the same app at {SLACK_APP_SETTINGS_URL}, enable Socket Mode, then Basic Information > App-Level Tokens > Generate Token and Scopes (connections:write); copy its xapp-... token.", secret=True),
+    field("CODEBOT_SLACK_APP_TOKEN", "Slack", f"In the same app at {SLACK_APP_SETTINGS_URL}, enable Socket Mode and Event Subscriptions > Subscribe to bot events > message.channels; then Basic Information > App-Level Tokens > Generate Token and Scopes (connections:write); copy its xapp-... token.", secret=True),
     field("CODEBOT_SLACK_CHANNEL_ID", "Slack", "Select a public channel this bot has joined; setup fetches its name and stores the C... ID."),
     field("CODEBOT_AGENT", "Agent", "Coding agent CLI.", "claude", "choice", choices=("claude", "opencode")),
     field("CLAUDE_CODE_OAUTH_TOKEN", "Claude", "Headless Claude Code authentication token.", secret=True),

@@ -25,6 +25,8 @@ class SlackInbox(unittest.TestCase):
         self.web = MagicMock()
         self.web.chat_postMessage.return_value = {"ts": "100.000001"}
         self.web.conversations_history.return_value = {"messages": []}
+        self.web.conversations_replies.return_value = {"messages": []}
+        slack._last_reconcile.clear()
         p = patch.object(slack, "web", return_value=self.web)
         p.start()
         self.addCleanup(p.stop)
@@ -77,6 +79,37 @@ class SlackInbox(unittest.TestCase):
         slack.close_thread("C123:100.000001")
         self.assertFalse(slack._accept_event(self.event("103.000001", "later")))
 
+    def test_send_renders_markdown_as_slack_mrkdwn(self):
+        body = ("Task: Seleccionar modelo\nPhase: EXPLORING\n\n"
+                "## Conclusión\n"
+                "**Negrita** y *cursiva* con `LLM_PROVIDER` y 2 < 3 & más.\n\n"
+                "- Primera opción\n- Segunda opción\n\n"
+                "[Ver PR](https://example.com/pull/1?a=1&b=2)")
+        slack.send("ignored", body, "C123:100.000001")
+        sent = self.web.chat_postMessage.call_args.kwargs
+        self.assertEqual(sent["text"],
+                         "Task: Seleccionar modelo\nPhase: EXPLORING\n\n"
+                         "*Conclusión*\n\n"
+                         "*Negrita* y _cursiva_ con `LLM_PROVIDER` y 2 &lt; 3 &amp; más.\n\n"
+                         "• Primera opción\n• Segunda opción\n\n"
+                         "<https://example.com/pull/1?a=1&amp;b=2|Ver PR>")
+        self.assertTrue(sent["mrkdwn"])
+
+    def test_code_blocks_remain_literal_and_fenced_when_split(self):
+        body = "**Inicio**\n\n```python\n" + "print('**literal**')\n" * 250 + "```\n\n**Fin**"
+        slack.send("ignored", body, "C123:100.000001")
+        parts = [call.kwargs["text"] for call in self.web.chat_postMessage.call_args_list]
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 3800 for part in parts))
+        self.assertTrue(all(part.count("```") % 2 == 0 for part in parts))
+        self.assertIn("print('**literal**')", "".join(parts))
+        self.assertTrue(parts[0].startswith("*Inicio*\n\n```\n"))
+        self.assertTrue(parts[-1].endswith("*Fin*"))
+
+    def test_horizontal_rule_separates_question_from_summary(self):
+        self.assertEqual(slack._to_mrkdwn("Resumen\n\n---\n\n¿Aprobado?"),
+                         "Resumen\n\n———\n\n¿Aprobado?")
+
     def test_uncertain_root_post_is_reconciled_from_channel_history(self):
         with slack._database() as db:
             db.execute("DELETE FROM roots")
@@ -101,6 +134,14 @@ class SlackInbox(unittest.TestCase):
         self.assertIn("[codebot-task:new-nonce]", text)
         self.assertEqual(slack.open_thread({"thread_nonce": "new-nonce"}), thread)
         self.web.chat_postMessage.assert_called_once()
+
+    def test_new_root_uses_localized_intro_when_provided(self):
+        with slack._database() as db:
+            db.execute("DELETE FROM roots")
+        slack.open_thread({"item": "Una tarea", "thread_nonce": "spanish-task",
+                           "thread_intro": "*bot* eligió: Una tarea"})
+        self.assertEqual(self.web.chat_postMessage.call_args.kwargs["text"],
+                         "*bot* eligió: Una tarea\n[codebot-task:spanish-task]")
 
     def test_actual_socket_sdk_exposes_receiver_contract(self):
         try:
@@ -153,6 +194,28 @@ class SlackInbox(unittest.TestCase):
         finally:
             release_agent.set()
             worker.join(timeout=2)
+
+    def test_missed_socket_reply_is_recovered_without_waiting_for_two_minute_poll(self):
+        reply = {"ts": "101.000001", "user": "Uhuman", "text": "Use the defaults"}
+        self.web.conversations_replies.return_value = {"messages": [
+            {"ts": "100.000001", "user": "Ubot", "text": "question"}, reply]}
+        thread = "C123:100.000001"
+        self.assertEqual(slack.poll_reply(thread), ("C123:101.000001", "Use the defaults"))
+        self.web.conversations_replies.assert_called_once_with(
+            channel="C123", ts="100.000001", oldest="100.000001", limit=100,
+            inclusive=False)
+        slack.mark_processed("C123:101.000001")
+        self.assertIsNone(slack.poll_reply(thread))
+        self.web.conversations_replies.assert_called_once()  # 60-second rate limit
+
+    def test_socket_reply_wakes_wait_immediately_without_history_request(self):
+        self.assertTrue(slack._accept_event(self.event("101.000001", "respuesta")))
+        with patch.object(slack._wake, "wait", wraps=slack._wake.wait) as waited:
+            slack.wait(120)
+        waited.assert_called_once_with(60)
+        self.assertEqual(slack.poll_reply("C123:100.000001"),
+                         ("C123:101.000001", "respuesta"))
+        self.web.conversations_replies.assert_not_called()
 
     def test_validate_requires_public_member_channel(self):
         self.web.auth_test.return_value = {"user_id": "Ubot"}

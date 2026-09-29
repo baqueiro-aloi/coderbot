@@ -6,8 +6,12 @@ them between agent turns. SQLite is also the persistent owned-thread registry.
 import logging
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
+
+import markdown
 
 import config
 from command_text import parse_command
@@ -17,6 +21,8 @@ _socket = None
 _web = None
 _bot_user = None
 _wake = threading.Event()
+_last_reconcile: dict[str, float] = {}
+_RECONCILE_SECONDS = 60
 
 
 @contextmanager
@@ -86,11 +92,15 @@ def _accept_event(payload: dict) -> bool:
     with _database() as db:
         if not db.execute("SELECT 1 FROM roots WHERE channel=? AND root_ts=?",
                           (channel, root)).fetchone():
+            log.warning("ignoring Slack reply in unregistered thread %s", _thread_id(channel, root))
             return False
-        db.execute("INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text) VALUES(?,?,?,?,?)",
-                   (_thread_id(channel, event["ts"]), channel, root, event["ts"],
-                    event.get("text") or ""))
-    _wake.set()
+        inserted = db.execute(
+            "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text) VALUES(?,?,?,?,?)",
+            (_thread_id(channel, event["ts"]), channel, root, event["ts"],
+             event.get("text") or "")).rowcount
+    if inserted:
+        log.info("Slack reply received in thread %s", _thread_id(channel, root))
+        _wake.set()
     return True
 
 
@@ -120,7 +130,9 @@ def start() -> None:
 
 
 def wait(seconds: float) -> None:
-    _wake.wait(seconds)
+    # Socket events wake immediately. A bounded timeout also reconciles events
+    # missed during a disconnect or due to an incomplete Slack app subscription.
+    _wake.wait(min(seconds, _RECONCILE_SECONDS))
     _wake.clear()
 
 
@@ -163,7 +175,8 @@ def open_thread(state: dict) -> str:
     if not root_ts:
         title = state.get("item", "(unnamed task)")
         link = state.get("item_url")
-        text = f"*{config.INSTANCE_ID}* picked: {title}" + (f"\nSource: {link}" if link else "")
+        text = state.get("thread_intro") or (f"*{config.INSTANCE_ID}* picked: {title}" +
+                                             (f"\nSource: {link}" if link else ""))
         root_ts = web().chat_postMessage(channel=channel, text=f"{text}\n{marker}",
                                           unfurl_links=False)["ts"]
     with _database() as db:
@@ -180,17 +193,122 @@ def close_thread(thread_id: str | None) -> None:
         db.execute("DELETE FROM roots WHERE channel=? AND root_ts=?", (channel, root_ts))
 
 
+def _escape_slack(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+class _SlackMarkdown(HTMLParser):
+    """Translate rendered Markdown into Slack's smaller mrkdwn vocabulary."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.lists: list[int | None] = []
+        self.pre = False
+        self.after_br = False
+        self.link: tuple[int, str] | None = None
+
+    def _break(self, count: int = 1) -> None:
+        text = "".join(self.parts)
+        if text:
+            existing = len(text) - len(text.rstrip("\n"))
+            self.parts = [text + "\n" * max(0, count - existing)]
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "pre"):
+            self._break(2)
+        if tag in ("strong", "b", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self.parts.append("*")
+        elif tag in ("em", "i"):
+            self.parts.append("_")
+        elif tag in ("del", "s", "strike"):
+            self.parts.append("~")
+        elif tag == "code" and not self.pre:
+            self.parts.append("`")
+        elif tag == "pre":
+            self.pre = True
+            self.parts.append("```\n")
+        elif tag == "br":
+            self.parts.append("\n")
+            self.after_br = True
+        elif tag == "hr":
+            self._break(2)
+            self.parts.append("———")
+            self._break(2)
+        elif tag in ("ul", "ol"):
+            self._break()
+            self.lists.append(1 if tag == "ol" else None)
+        elif tag == "li":
+            self._break()
+            number = self.lists[-1]
+            self.parts.append("  " * (len(self.lists) - 1) +
+                              (f"{number}. " if number is not None else "• "))
+            if number is not None:
+                self.lists[-1] = number + 1
+        elif tag == "a":
+            self.link = (len(self.parts), dict(attrs).get("href") or "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("strong", "b", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self.parts.append("*")
+        elif tag in ("em", "i"):
+            self.parts.append("_")
+        elif tag in ("del", "s", "strike"):
+            self.parts.append("~")
+        elif tag == "code" and not self.pre:
+            self.parts.append("`")
+        elif tag == "pre":
+            self._break()
+            self.parts.append("```")
+            self.pre = False
+        elif tag == "a" and self.link:
+            start, url = self.link
+            label = "".join(self.parts[start:])
+            if url.startswith(("https://", "http://", "mailto:")):
+                self.parts[start:] = [f"<{_escape_slack(url).replace('|', '%7C')}|{label}>"]
+            self.link = None
+        if tag in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "pre"):
+            self._break(2)
+        elif tag == "li":
+            self._break()
+        elif tag in ("ul", "ol"):
+            self.lists.pop()
+            self._break(2)
+
+    def handle_data(self, data: str) -> None:
+        if self.after_br:
+            data = data.removeprefix("\n")
+            self.after_br = False
+        if not self.pre and not data.strip() and "\n" in data:
+            return  # HTML source whitespace after <br> / between block tags
+        self.parts.append(_escape_slack(data))
+
+
+def _to_mrkdwn(body: str) -> str:
+    html = markdown.markdown(body, extensions=["fenced_code", "sane_lists", "nl2br"])
+    parser = _SlackMarkdown()
+    parser.feed(html)
+    return "".join(parser.parts).strip("\n")
+
+
 def _chunks(body: str, limit: int = 3800):
-    while len(body) > limit:
-        index = body.rfind("\n", 0, limit)
-        if index < limit // 2:
-            index = limit
+    fence_open = False
+    prefix = ""
+    while len(body) + len(prefix) > limit:
+        # Leave room for closing/reopening a code fence across messages.
+        room = limit - len(prefix) - 4
+        index = body.rfind("\n", 0, room)
+        if index < room // 2:
+            index = room
         else:
             index += 1  # keep the boundary newline in the outgoing text
-        yield body[:index]
+        part = body[:index]
         body = body[index:]
+        fence_open ^= sum(line.strip() == "```" for line in part.splitlines()) % 2 == 1
+        yield prefix + part + ("\n```" if fence_open else "")
+        prefix = "```\n" if fence_open else ""
     if body:
-        yield body
+        yield prefix + body
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
@@ -198,9 +316,9 @@ def send(subject: str, body: str, thread_id: str | None = None,
     if not thread_id:
         raise RuntimeError("Slack task messages require an owned task thread")
     channel, root_ts = _split_thread(thread_id)
-    for part in _chunks(body):
+    for part in _chunks(_to_mrkdwn(body)):
         web().chat_postMessage(channel=channel, thread_ts=root_ts, text=part,
-                               unfurl_links=False)
+                               mrkdwn=True, unfurl_links=False)
     for path in attachments or []:
         try:
             web().files_upload_v2(channel=channel, thread_ts=root_ts,
@@ -225,6 +343,37 @@ def _pending(thread_id: str | None = None):
             "WHERE m.handled=0" + clause + " ORDER BY CAST(m.ts AS REAL),m.ts", args).fetchall()
 
 
+def _reconcile(thread_id: str) -> None:
+    """Backfill missed socket events at most once a minute per owned thread."""
+    now = time.monotonic()
+    if now - _last_reconcile.get(thread_id, float("-inf")) < _RECONCILE_SECONDS:
+        return
+    _last_reconcile[thread_id] = now
+    channel, root_ts = _split_thread(thread_id)
+    with _database() as db:
+        if not db.execute("SELECT 1 FROM roots WHERE channel=? AND root_ts=?",
+                          (channel, root_ts)).fetchone():
+            log.warning("cannot reconcile unregistered Slack thread %s", thread_id)
+            return
+    cursor = None
+    try:
+        while True:
+            args = {"channel": channel, "ts": root_ts, "oldest": root_ts,
+                    "limit": 100, "inclusive": False}
+            if cursor:
+                args["cursor"] = cursor
+            page = web().conversations_replies(**args)
+            for message in page.get("messages", []):
+                if message.get("ts") != root_ts:
+                    _accept_event({"event": {**message, "type": "message",
+                                              "thread_ts": root_ts, "channel": channel}})
+            cursor = (page.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception:
+        log.exception("could not reconcile Slack replies in %s; retrying later", thread_id)
+
+
 def poll_command():
     for msg_id, text, channel, root_ts in _pending():
         parsed = parse_command(text)
@@ -239,7 +388,11 @@ def poll_command():
 
 
 def poll_reply(thread_id: str):
-    for msg_id, text, _channel, _root in _pending(thread_id):
+    pending = _pending(thread_id)
+    if not pending:
+        _reconcile(thread_id)
+        pending = _pending(thread_id)
+    for msg_id, text, _channel, _root in pending:
         if text.strip():
             return msg_id, text.strip()
         mark_processed(msg_id)
