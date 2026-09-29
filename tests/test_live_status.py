@@ -61,12 +61,14 @@ class Supervisor(unittest.TestCase):
             started.set()
             self.assertTrue(release.wait(5))
             return Mock(output="done")
+        api = MagicMock()
+        api.conversations_replies.return_value = {"messages": []}
         with patch.object(config, "COMM_CHANNEL", "slack"), \
              patch.object(config, "SLACK_CHANNEL_ID", "C123"), \
              patch.object(config, "DATA_DIR", Path(self.temp.name)), \
              patch.object(config, "AGENT", "claude"), \
              patch.object(slack_client, "_bot_user", "Ubot"), \
-             patch.object(slack_client, "web", return_value=MagicMock()) as web, \
+             patch.object(slack_client, "web", return_value=api), \
              patch.object(agent_runner.claude_runner, "run", side_effect=blocked_agent) as run:
             with slack_client._database() as db:
                 db.execute("INSERT INTO roots(channel,root_ts,nonce) VALUES(?,?,?)",
@@ -83,7 +85,7 @@ class Supervisor(unittest.TestCase):
                                                    "user": "Uhuman", "text": text}})
                 self.assertTrue(main._status_supervisor_once())
                 self.assertTrue(worker.is_alive())
-                send = web.return_value.chat_postMessage.call_args.kwargs
+                send = api.chat_postMessage.call_args.kwargs
                 self.assertEqual(send["thread_ts"], "100.0")
                 self.assertIn("Fase: IMPLEMENTING", send["text"])
                 self.assertIn("no puedo confirmar", send["text"])

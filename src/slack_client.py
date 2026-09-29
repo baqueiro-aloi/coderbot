@@ -417,7 +417,13 @@ def poll_command():
 
 
 def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
-    """Fetch only STATUS, leaving other queued replies untouched for the FSM."""
+    """Fetch STATUS; recover missed Socket Mode events during long agent turns.
+
+    poll_reply already reconciles while waiting for a user. During implementation
+    the main loop never calls it, so without this reconciliation the independent
+    status supervisor sees an empty SQLite inbox even when Slack has replies.
+    _reconcile throttles the Web API call to at most once per minute per thread.
+    """
     with _database() as db:
         rows = db.execute("SELECT id,channel,ts FROM status_requests WHERE handled=0 "
                           "ORDER BY CAST(ts AS REAL),ts").fetchall()
@@ -425,6 +431,7 @@ def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
         msg_id, channel, ts = rows[0]
         return msg_id, _thread_id(channel, ts)
     if thread_id:
+        _reconcile(thread_id)
         for msg_id, text, channel, root_ts in _pending(thread_id):
             parsed = parse_command(text)
             if parsed and parsed[0] == "STATUS" and (not parsed[1] or parsed[1] == config.INSTANCE_ID):

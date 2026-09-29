@@ -73,6 +73,20 @@ class SlackInbox(unittest.TestCase):
         slack.mark_processed("C123:103.0")
         self.assertEqual(slack.poll_command()[2], "ABORT")
 
+    def test_status_reconciles_missed_socket_events_while_agent_is_busy(self):
+        self.web.conversations_replies.return_value = {"messages": [
+            {"type": "message", "ts": "100.000001", "user": "Ubot", "text": "task"},
+            {"type": "message", "ts": "101.0", "user": "Uhuman", "text": "ABORT"},
+            {"type": "message", "ts": "102.0", "user": "Uhuman", "text": "status?"},
+        ]}
+        thread = "C123:100.000001"
+        self.assertEqual(slack.poll_status(thread), ("C123:102.0", thread))
+        self.web.conversations_replies.assert_called_once()
+        slack.mark_processed("C123:102.0")
+        self.assertIsNone(slack.poll_status(thread))  # throttled, no repeated Web API fetch
+        self.web.conversations_replies.assert_called_once()
+        self.assertEqual(slack.poll_command()[2], "ABORT")
+
     def test_socket_ack_after_persistence_and_retry_on_database_failure(self):
         socket = MagicMock()
         request = SimpleNamespace(type="events_api", envelope_id="E1",

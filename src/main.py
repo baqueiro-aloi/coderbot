@@ -3350,7 +3350,8 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
     spanish = state.get("task_language", "English").casefold() == "spanish"
     phase = state.get("return_state") if state.get("state") == "WAIT_REPLY" else state.get("state", "IDLE")
     title = str(state.get("item") or ("Sin tarea activa" if spanish else "No active task"))[:140]
-    started = turn.get("started_at") if turn.get("active") else _liveness.get("tick_started")
+    started = (turn.get("started_at") if turn.get("active") else
+               state.get("last_transition") or _liveness.get("tick_started"))
     elapsed = _fmt_dur(now - started) if isinstance(started, (float, int)) else "?"
     last = turn.get("last_activity") if turn.get("active") else None
     if spanish:

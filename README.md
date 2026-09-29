@@ -346,15 +346,24 @@ STATUS reports the last real email on the thread and how many check-ins followed
 During an in-flight phase, `status?` (or `STATUS`) gets an independent, **brief**
 answer in the task thread without waiting for the coding agent to finish. In Gmail
 the supervisor checks for status mail during long turns; in Slack it reads the
-durable Socket Mode inbox and also accepts a top-level status request. Other commands
-remain queued for the main state machine. The reply names the task and phase, elapsed
-time and the last observed OpenCode tool activity, when available. Recent activity
-is a sign of progress; after five minutes without observable activity, it explicitly
+durable Socket Mode inbox and, if an event was missed, reconciles the active thread
+through Slack's API at most once a minute. It also accepts a top-level status request.
+Other commands remain queued for the main state machine. The reply names the task,
+phase, elapsed time and the last observed OpenCode tool activity, when available.
+Recent activity is a sign of progress; after five minutes without observable activity, it explicitly
 says progress cannot be confirmed. Claude or non-agent phases may not expose step
 telemetry, so the reply does not claim they are healthy or stuck without evidence.
 No second coding-agent session is started and no task state is modified by the
 supervisor. Between turns, the regular `STATUS` command still returns the full
 state snapshot.
+
+If a bot was already executing an agent turn when updated code was copied to its
+bind-mounted `/app`, restarting that container would interrupt the turn. For a
+Slack task, `python3 /app/scripts/status_watch.py` may instead run as a separate
+container process until the task changes phase. It uses the same bounded Slack
+history reconciliation, answers only `STATUS`, and never starts another agent or
+writes the bot's task state. The built-in supervisor takes over at the next normal
+container restart.
 
 ## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
 
