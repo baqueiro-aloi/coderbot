@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import threading
+from contextvars import ContextVar
 
 import claude_runner
 import config
@@ -20,6 +21,31 @@ STREAM_DETAIL_MAX_CHARS = 300
 SENTINEL = claude_runner.SENTINEL
 OUTBOX_DIR = claude_runner.OUTBOX_DIR
 EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
+_task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
+
+
+def set_task_language(language: str | None) -> None:
+    """The FSM sets this once per tick; classifiers remain outside the working session."""
+    _task_language.set(language)
+
+
+def _language_prompt(prompt: str) -> str:
+    language = _task_language.get()
+    if not language:
+        return prompt
+    return (f"The backlog task's language is {language}. Use {language} for ALL human-readable "
+            "text you write for this task: exploration and progress reports, questions and "
+            "answers to the user, PR title/body, commit messages, and all OpenSpec artifacts "
+            "(proposal.md, design.md, specs including requirement/scenario text, tasks.md). "
+            "Give subagents the same language instruction. Follow the language of the "
+            "backlog task even when a later chat reply or review comment is in another "
+            "language; reply to a human reviewer in that reviewer's language when required. "
+            "Keep machine-readable contracts and markers (NEED_USER_INPUT:, QUALITY_GATE:, "
+            "INTERNAL_REVIEW:, RESOLVE:, ATTACH:, E2E_SPEC:), JSON keys/enum values, "
+            "commands, code identifiers, file paths and proper names unchanged. In OpenSpec "
+            "preserve parser-required headings/keywords (such as `## ADDED Requirements`, "
+            "`### Requirement:`, `#### Scenario:`, SHALL, WHEN, THEN) and task checkboxes; "
+            "translate the human-readable text following them.\n\n" + prompt)
 
 _SESSION_RECOVERY_CONTEXT = """
 The previous OpenCode session is unavailable. Continue this task autonomously from
@@ -215,6 +241,8 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""
+    if contract:
+        prompt = _language_prompt(prompt)
     if config.AGENT == "claude":
         return claude_runner.run(prompt, contract=contract)
     if config.AGENT == "opencode":
@@ -224,6 +252,7 @@ def run(prompt: str, contract: bool = True):
 
 
 def resume(session_id: str, prompt: str):
+    prompt = _language_prompt(prompt)
     if config.AGENT == "claude":
         return claude_runner.resume(session_id, prompt)
     if config.AGENT == "opencode":

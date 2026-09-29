@@ -185,11 +185,19 @@ Invite each app to the public channel. Coderbot posts one root message when it
 claims a task. Approvals, questions, PR review, STATUS/ABORT/DONE/HOLD/CONTINUE and
 check-ins stay in that task's replies; any human member of the channel can act.
 Top-level user messages and replies to other bots' threads are ignored. Socket
-Mode records incoming replies immediately, but an in-flight coding-agent turn
-finishes before Coderbot acts on them. A dirty checkout before a task starts is
+Mode records incoming replies immediately; if an event is missed, the waiting
+thread is reconciled from Slack history at most once a minute. If replies only
+arrive through reconciliation, check that Event Subscriptions is enabled and
+`message.channels` is subscribed for this app. An in-flight coding-agent turn
+finishes before Coderbot acts on replies. A dirty checkout before a task starts is
 announced once in the channel and automatically rechecked; replies to that
 operational notice are ignored. Small screenshots and reports are shared in
 the task thread; large evidence videos are linked from Google Drive.
+For each task, the language of its title and details in Jira, GitHub Projects or
+Google Docs is recorded in task state and used for agent output, OpenSpec
+artifacts and outgoing task messages. A later reply in another language does
+not change that task language; code, identifiers and control commands retain
+their original spelling.
 
 ## Lifecycle
 
@@ -444,6 +452,12 @@ the script stops before copying if it cannot translate them. Check VM-specific
 mounts in the copied
 `docker-compose.override.yml` and the host's `~/.claude.json`/`~/.claude` as
 needed before starting Compose on the VM.
+OpenCode's `data/opencode/cache/` is excluded from the initial copy: the VM
+rebuilds its own platform-specific tools (including `rg`), while its credentials,
+sessions and state in `data/opencode/data/` remain part of the migration.
+For later code updates, use `bash scripts/sync-to-vm.sh azureuser@74.235.122.91 --code-only`.
+This leaves the VM's `data/`, `.env`, `.env.local`, `~/.npmrc` and target checkout
+untouched; restart the VM's bot container to load the new Python code.
 The script uses passwordless `sudo` on the VM to give uid/gid `501` ownership
 of `~/codebot/app/data` and `~/codebot/target`: the container's non-root bot
 must be able to write its instance fingerprint, state and Git working tree.

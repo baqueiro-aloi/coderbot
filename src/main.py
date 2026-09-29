@@ -45,6 +45,21 @@ def save_state(state: dict) -> None:
     tmp.replace(config.STATE_PATH)
 
 
+def _ensure_task_language(state: dict) -> None:
+    """Classify once from the source ticket, not from the conversation or agent output."""
+    if not state.get("item") or state.get("task_language"):
+        return
+    result = agent_runner.run(prompts.render(
+        prompts.TASK_LANGUAGE, item=state["item"], detail=state.get("item_detail", "")),
+        contract=False)
+    language = parse_json_reply(result.output).get("language")
+    if not isinstance(language, str) or not re.fullmatch(r"[A-Za-z][A-Za-z -]{1,48}", language):
+        raise ValueError(f"invalid task language: {language!r}")
+    state["task_language"] = language.strip()
+    save_state(state)
+    log.info("task language from backlog item: %s", language)
+
+
 # ---------------------------------------------------------------- helpers
 
 def git(*args: str) -> str:
@@ -62,6 +77,29 @@ def subject(state: dict, phase: str) -> str:
     return f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — {phase}"
 
 
+def _localized(state: dict, message: str) -> str:
+    language = state.get("task_language", "English")
+    if language.casefold() == "english" or not message.strip():
+        return message
+    result = agent_runner.run(prompts.render(
+        prompts.LOCALIZE_MESSAGE, language=language, message=message), contract=False)
+    text = result.output.strip()
+    if not text:
+        raise ValueError("empty localized message")
+    return text
+
+
+def _send_localized(state: dict, subj: str, body: str, thread_id: str) -> None:
+    gmail_client.send(_localized(state, subj), _localized(state, body), thread_id)
+
+
+def _language_state_for_thread(state: dict, thread_id: str | None) -> dict:
+    if thread_id == state.get("thread_id"):
+        return state
+    return next((h.get("saved") or {} for h in _load_holds()
+                 if h.get("thread_id") == thread_id), state)
+
+
 def _reply_here() -> str:
     return ("Reply in this Slack thread to continue." if config.COMM_CHANNEL == "slack"
             else "Reply to this email to continue.")
@@ -74,6 +112,11 @@ def _contact_name() -> str:
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
           new_thread: bool = False) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
+    # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
+    # The one-shot localizer never resumes or changes the task's coding session.
+    if state.get("task_language"):
+        phase = _localized(state, phase)
+        body = _localized(state, body)
     subj = subject(state, phase)
     log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
@@ -83,10 +126,14 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
     _note_contact(state)
     names = [Path(a).name for a in (attachments or [])]
-    trail(state, phase, body + (f"\n\nAttachments ({'emailed' if config.COMM_CHANNEL == 'email' else 'shared'}): {', '.join(names)}" if names else ""))
+    activity = body + (f"\n\nAttachments ({'emailed' if config.COMM_CHANNEL == 'email' else 'shared'}): {', '.join(names)}" if names else "")
+    if state.get("task_language"):
+        trail(state, phase, activity, localized=not names)
+    else:
+        trail(state, phase, activity)
 
 
-def trail(state: dict, headline: str, body: str = "") -> None:
+def trail(state: dict, headline: str, body: str = "", *, localized: bool = False) -> None:
     """Append a note to the task's activity trail on the backlog item (issue comment,
     doc comment thread...). Every user-facing email and every silent phase transition
     is noted, so the item doubles as the task's log. Best-effort by design: a tracker
@@ -97,6 +144,8 @@ def trail(state: dict, headline: str, body: str = "") -> None:
     if body:
         message += f"\n\n{body}"
     try:
+        if state.get("task_language") and not localized:
+            message = _localized(state, message)
         ref = task_source.note_activity(state["item"], state.get("item_id"), message,
                                         state.get("trail_ref"))
         if isinstance(ref, str) and ref:
@@ -649,10 +698,17 @@ def do_pick(state: dict) -> None:
     # The branch's starting point: later phases measure overreach against it.
     state["base_sha"] = git("rev-parse", "HEAD")
     state["state"] = "EXPLORING"
+    _ensure_task_language(state)
+    agent_runner.set_task_language(state["task_language"])
     if config.COMM_CHANNEL == "slack":
         # Checkpoint the correlation nonce before the network call; retry can
         # reconcile a root Slack accepted just before a process crash.
         state["thread_nonce"] = secrets.token_hex(12)
+        if state["task_language"].casefold() != "english":
+            intro = f"*{config.INSTANCE_ID}* picked: {state['item']}"
+            if state.get("item_url"):
+                intro += f"\nSource: {state['item_url']}"
+            state["thread_intro"] = _localized(state, intro)
         save_state(state)
         state["thread_id"] = gmail_client.open_thread(state)
         save_state(state)
@@ -2429,7 +2485,7 @@ def _maybe_ping(state: dict) -> None:
             return
         count = state.get("ping_count", 0) + 1
         body = _ping_body(state, now, count)
-        gmail_client.send(subject(state, "check-in"), body, state["thread_id"])
+        _send_localized(state, subject(state, "check-in"), body, state["thread_id"])
         state["ping_count"] = count
         state["last_ping_at"] = now
         log.info("sent silence check-in #%d in %s (thread quiet for %s)", count, state["state"],
@@ -2593,7 +2649,7 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
               "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
               "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
@@ -2895,6 +2951,9 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         git("checkout", branch)
     state.update(saved)
     state["state"] = resume_state
+    # New holds carry their persisted language. A legacy hold is classified on
+    # the next FSM tick, rather than starting another classifier mid-resume.
+    agent_runner.set_task_language(state.get("task_language"))
     _save_holds([h for h in _load_holds() if h.get("thread_id") != hold.get("thread_id")])
     if note and state["state"] in WAITS and state["state"] != "WAIT_REVIEW":
         # The note answers whatever the task was waiting on (approval, question, merge).
@@ -2969,15 +3028,17 @@ def check_commands(state: dict) -> bool:
                 log.debug("CONTINUE-shaped reply on the active thread; deferring")
                 return False
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing on hold here",
-                              "CONTINUE received, but no task is on hold on this thread.",
-                              thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing on hold here",
+                            "CONTINUE received, but no task is on hold on this thread.",
+                            thread_id)
             return False
         if config.COMM_CHANNEL == "email":
             gmail_client.mark_processed(msg_id)
-        gmail_client.send(f"{config.SUBJECT_PREFIX} general — will continue",
-                          "Got it — this task is next: I'll resume it as soon as my current "
-                          "work is done (right away if I'm idle).", thread_id)
+        _send_localized(_language_state_for_thread(state, thread_id),
+                        f"{config.SUBJECT_PREFIX} general — will continue",
+                        "Got it — this task is next: I'll resume it as soon as my current "
+                        "work is done (right away if I'm idle).", thread_id)
         if config.COMM_CHANNEL == "slack":
             state["slack_last_handled_id"] = msg_id
             save_state(state)
@@ -2988,8 +3049,9 @@ def check_commands(state: dict) -> bool:
         if not state.get("item"):
             log.warning("HOLD command received but no task is in progress; ignoring")
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to hold",
-                              "HOLD received, but no task is in progress.", thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing to hold",
+                            "HOLD received, but no task is in progress.", thread_id)
             return False
         # Consume only AFTER handling (multi-step side effects, like DONE).
         _hold_task(state, thread_id)
@@ -3010,8 +3072,9 @@ def check_commands(state: dict) -> bool:
         if not state.get("item"):
             log.warning("DONE command received but no task is in progress; ignoring")
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to complete",
-                              "DONE received, but no task is in progress.", thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing to complete",
+                            "DONE received, but no task is in progress.", thread_id)
             return False
         # Consume only AFTER handling: _finish_task has multi-step network side effects
         # (docs strike-through, repo reset, email); a failure mid-way must leave the
@@ -3074,7 +3137,8 @@ def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -
         response = f"Marked held task done: {item}"
     else:
         return False
-    gmail_client.send(f"{config.SUBJECT_PREFIX} held task — {command}", response, thread_id)
+    _send_localized(hold.get("saved") or {},
+                    f"{config.SUBJECT_PREFIX} held task — {command}", response, thread_id)
     gmail_client.mark_processed(msg_id)
     if command in ("ABORT", "DONE"):
         gmail_client.close_thread(thread_id)
@@ -3141,7 +3205,7 @@ def _send_status(state: dict, thread_id: str) -> None:
         body += (f"\n\n--- Last {'email' if config.COMM_CHANNEL == 'email' else 'Slack message'} sent ({_fmt_ts(last['sent_at'])}) ---\n"
                  f"Subject: {last['subject']}\n\n{last['body']}")
     subj = f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — status"
-    gmail_client.send(subj, body, thread_id)
+    _send_localized(state, subj, body, thread_id)
     log.info("sent STATUS report (state=%s)", state.get("state"))
 
 
@@ -3504,6 +3568,9 @@ def _run_loop() -> None:
             continue
         prev = state["state"]
         try:
+            if state.get("item") and state["state"] != "IDLE":
+                _ensure_task_language(state)
+            agent_runner.set_task_language(state.get("task_language"))
             if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
                 gmail_client.close_thread(state["retire_thread_id"])
                 state.pop("retire_thread_id")
