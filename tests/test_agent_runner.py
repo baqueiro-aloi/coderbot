@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agent_runner
+import claude_runner
 
 
 class StreamingTests(unittest.TestCase):
@@ -77,6 +78,19 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "sessionID": session_id,
                 "part": {"text": "done"},
             }), "")
+
+    def test_working_prompts_name_the_active_conversation_channel(self):
+        with patch.object(agent_runner.config, "COMM_CHANNEL", "slack"):
+            prompt = agent_runner._language_prompt("Continue exploring.")
+            self.assertIn("this task's Slack thread", prompt)
+            self.assertIn("Do not say you will email the user", prompt)
+            self.assertIn("secure runtime configuration", prompt)
+            self.assertNotIn("by email", claude_runner.SENTINEL_CONTRACT)
+            self.assertNotIn("relevant email", claude_runner.EVIDENCE_CONTRACT)
+        with patch.object(agent_runner.config, "COMM_CHANNEL", "email"):
+            prompt = agent_runner._language_prompt("Continue exploring.")
+            self.assertIn("task's email thread", prompt)
+            self.assertIn("do not describe this conversation as Slack", prompt)
 
     def assert_managed_config(self, call):
         self.assertIn("env", call.kwargs, "OpenCode subprocess is missing managed environment")

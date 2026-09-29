@@ -262,8 +262,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
         _enter_stuck(state, RESUMABLE_STATE.get(phase, phase), detail)
         return True
     attachments = [Path(p) for p in result.attachments if Path(p).exists()]
-    log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
-             phase, len(attachments))
+    log.info("[%s] coding agent asked a question (%d validated attachment(s)); sending via %s",
+             phase, len(attachments), config.COMM_CHANNEL)
     # The agent often puts the substance (a design to approve, options it weighed) ABOVE
     # the sentinel line and only the ask after it; the user needs both to answer.
     preamble = getattr(result, "preamble", "") or ""
@@ -275,7 +275,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
-    _transcript_note(state, f"emailed this question to the user "
+    _transcript_note(state, f"sent this question to the user via {config.COMM_CHANNEL} "
                             f"({len(attachments)} attachment(s)); waiting for a reply")
     state["pending_question"] = question[:2000]
     state["return_state"] = phase
@@ -3354,10 +3354,27 @@ def do_question_reply(state: dict, reply: str) -> None:
                      f"{phase!r} and cannot resume it. 'retry' restarts from the backlog; "
                      "'abort' resets me.")
         return
+    pending_question = state.get("pending_question")
+    question_rounds = state.get("question_rounds")
     trail(state, f"Answer received (resuming {phase})", reply)
     result = agent_runner.resume(state["session_id"], _reply_prompt(state, phase, reply))
     if handle_result(state, result, phase):
         return  # re-questioned (or question cap hit); return_state already updated
+    if phase == "EXPLORING" and result.output.strip():
+        # Exploration normally has no completion email. A WAIT_REPLY detour is
+        # different: this turn answers a person who may have asked for an
+        # explanation. Deliver it before proceeding to the proposal phase.
+        try:
+            email(state, "exploration reply", result.output.strip(),
+                  [Path(p) for p in result.attachments if Path(p).exists()])
+        except Exception:
+            # handle_result cleared these on success; retain the original
+            # question if delivery fails and the FSM retries this reply.
+            if pending_question is not None:
+                state["pending_question"] = pending_question
+            if question_rounds is not None:
+                state["question_rounds"] = question_rounds
+            raise
     CONTINUATIONS[phase](state, result)
     if state["state"] != "WAIT_REPLY":  # a continuation may itself have re-questioned
         state.pop("return_state", None)

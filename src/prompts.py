@@ -525,5 +525,10 @@ ANSWER_REPLY = """The user replied to your question. Their reply is between the 
 $reply
 ----- END USER REPLY -----
 
+If the user asks you to explain or clarify your earlier question, answer them
+directly in your final response even if no further user input is needed. Do not
+silently move on or assume they saw your internal work. If you still need a
+decision, use NEED_USER_INPUT: for the new, clearer question.
+
 Continue the work taking this answer into account. $rules
 """

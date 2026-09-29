@@ -30,10 +30,24 @@ def set_task_language(language: str | None) -> None:
 
 
 def _language_prompt(prompt: str) -> str:
+    # Reassert the transport on every turn: a resumed agent retains older turns
+    # and generic skill wording that may refer to email even in Slack mode.
+    if config.COMM_CHANNEL == "slack":
+        channel = ("You communicate with the user in this task's Slack thread. Coderbot "
+                   "posts your questions, explanations and attachments there. Do not say "
+                   "you will email the user or ask them to reply by email. If access to "
+                   "secrets is needed, ask for secure runtime configuration, never for "
+                   "secrets in Slack or by email. Refer to email only if the task itself "
+                   "is about email.")
+    else:
+        channel = ("You communicate with the user through the task's email thread. "
+                   "Coderbot sends your questions, explanations and attachments there; "
+                   "do not describe this conversation as Slack.")
     language = _task_language.get()
     if not language:
-        return prompt
-    return (f"The backlog task's language is {language}. Use {language} for ALL human-readable "
+        return channel + "\n\n" + prompt
+    return (channel + "\n\n" +
+            f"The backlog task's language is {language}. Use {language} for ALL human-readable "
             "text you write for this task: exploration and progress reports, questions and "
             "answers to the user, PR title/body, commit messages, and all OpenSpec artifacts "
             "(proposal.md, design.md, specs including requirement/scenario text, tasks.md). "

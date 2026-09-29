@@ -226,16 +226,18 @@ Every tick starts by checking the mailbox for commands (ABORT / STATUS / DONE / 
 CONTINUE, see below). Any state that keeps failing detours through WAIT_STUCK (see
 "Failure handling"), and HOLD parks a task from any state.
 Any phase can detour through WAIT_REPLY: if the coding agent needs the user, it ends its
-output with `NEED_USER_INPUT: <question>`; codebot emails the question (optionally
-with `ATTACH: <path>` screenshots/videos) and resumes the same session with the reply.
+output with `NEED_USER_INPUT: <question>`; codebot sends the question in the task's
+configured email or Slack thread (optionally with `ATTACH: <path>` screenshots/videos)
+and resumes the same session with the reply. When an exploration reply completes the
+phase without another question, its explanation is sent to that thread before proposing.
 
-Evidence (screenshots, recordings, reports) is always routed to email via that same
+Evidence (screenshots, recordings, reports) is always routed to the task thread via that same
 `ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
 committed to the target repo. Every resumed turn restates this rule. As a safety
 net, designated handoffs after implementation and review or feedback repairs scan
 the branch diff for evidence-looking files (video extensions, or paths naming
 "evidence"/"recording") and have the coding agent remove and re-route them via
-email if any are found.
+the configured channel if any are found.
 
 ## Phase discipline (planning never implements)
 

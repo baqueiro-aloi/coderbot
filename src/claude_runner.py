@@ -25,7 +25,7 @@ be committed to the git repo, added to a branch, or pushed as part of a PR — t
 is for application and test code only, never for recorded proof. Whenever you produce
 evidence, or the user asks you to "attach" evidence, save the file(s) under
 {OUTBOX_DIR}/ and list each one's ABSOLUTE path on its own line starting with
-`ATTACH: ` in your response; codebot attaches them to the relevant email itself. This
+`ATTACH: ` in your response; codebot shares them in the task's conversation thread. This
 applies in every phase (implementing, addressing review feedback, answering a
 question) — not only when you use the NEED_USER_INPUT mechanism below.
 """
@@ -34,7 +34,8 @@ SENTINEL_CONTRACT = f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`
-followed by the full question and all context needed to answer it by email,
+followed by the full question and all context needed to answer it through the
+configured conversation channel,
 then stop working. Otherwise finish the work and summarize what you did.
 {EVIDENCE_CONTRACT}
 Each of your turns is a brand-new, one-shot headless process: nothing monitors
