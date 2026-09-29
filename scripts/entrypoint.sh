@@ -4,6 +4,13 @@ set -euo pipefail
 : "${CODEBOT_REPO_PATH:?CODEBOT_REPO_PATH must be set in .env (absolute path of the target repo)}"
 : "${GH_TOKEN:?GH_TOKEN must be set in .env (git/gh use it for HTTPS auth)}"
 
+# The heartbeat is liveness for this process, not durable state. A copied/stale
+# heartbeat would make healthcheck.sh SIGTERM the new container before the bot
+# can initialize. Reset it on each start and let the bot's thread keep it fresh.
+data_dir="${CODEBOT_DATA_DIR:-/app/data}"
+mkdir -p "$data_dir"
+install -m 0600 -o bot -g bot /dev/null "$data_dir/heartbeat"
+
 # Keep OpenCode credentials and resumable sessions in Codebot's bind-mounted data
 # directory rather than sharing the host user's global OpenCode configuration.
 export XDG_DATA_HOME=/app/data/opencode/data
@@ -41,6 +48,17 @@ if [ ! -s "$local_cfg" ] || ! valid_json "$local_cfg"; then
   fi
 fi
 chown bot:bot "$local_cfg"
+
+# The host's private .npmrc may be mode 0600 and owned by a different VM uid.
+# Copy from the read-only seed while still root, then give only bot access.
+if [ -f /seed/.npmrc ]; then
+  install -m 0600 -o bot -g bot /seed/.npmrc /home/bot/.npmrc
+elif [ -f /home/bot/.npmrc ]; then
+  # Older local overrides mounted the host file directly at this read-only
+  # path. Copy it to bot-owned storage instead of trying to chown a bind mount.
+  install -m 0600 -o bot -g bot /home/bot/.npmrc /app/data/.npmrc
+  export NPM_CONFIG_USERCONFIG=/app/data/.npmrc
+fi
 
 if [ "${CODEBOT_AGENT:-claude}" = "opencode" ]; then
   : "${OPENCODE_MODEL:?OPENCODE_MODEL must be provider/model when CODEBOT_AGENT=opencode}"

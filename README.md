@@ -405,6 +405,73 @@ scripts/setup.sh
 scripts/setup.sh --text    # also works: bash scripts/setup.sh / zsh scripts/setup.sh
 ```
 
+### One-time copy to an SSH VM
+
+After configuring `.env`, stop any running bot on both machines and run:
+
+```bash
+bash scripts/sync-to-vm.sh azureuser@74.235.122.91
+```
+
+This uses `rsync` over SSH to copy this checkout to `~/codebot/app/`
+and the local checkout named by `CODEBOT_REPO_PATH` to `~/codebot/target/`.
+It includes `.git`, durable files in `data/`, `.env`, source and lockfiles, but excludes
+`node_modules/`, `.venv/`, `venv/` and `ms-playwright/`: binaries installed
+on an M1 Mac cannot run on an amd64 Linux VM. The target repo must install its
+dependencies and Chromium for Linux/amd64 in the environment where its tests
+run (the Coderbot image already installs Chromium's Linux system libraries;
+the target's `e2e/run.sh` installs its pinned browser at runtime). If you
+previously copied Mac-built dependencies to the VM, remove those stale copies
+before installing Linux versions; rsync deliberately does not delete VM files.
+The transient `data/heartbeat` is not copied; the container resets its
+heartbeat at each start so an old timestamp cannot trigger a restart loop.
+The script also copies your local `~/.npmrc` to the VM user's home with mode
+`0600` so `docker-compose.override.yml` can mount it. At container startup,
+the root entrypoint copies it from a read-only seed into the bot user's home
+with mode `0600`. Short-lived registry tokens will need refreshing on the VM;
+restart the container afterward so it picks up the replacement.
+The copy does not delete files already on the VM, but does replace files
+with the same names. Do not run both copies as separate bots against the same
+backlog: the copied `data/` includes this installation's ownership identity.
+On the VM, `~/codebot/app/.env.local` preserves the original local `.env`,
+and `.env` gets
+VM-specific paths (`CODEBOT_REPO_PATH` points to the target on that VM;
+absolute paths into the app become container paths under `/app`). The local
+`.env` is untouched. The script refuses to overwrite an existing `.env.local`;
+move that backup aside before running a new one-time copy. Other configured
+absolute paths outside these two checkouts must be configured separately;
+the script stops before copying if it cannot translate them. Check VM-specific
+mounts in the copied
+`docker-compose.override.yml` and the host's `~/.claude.json`/`~/.claude` as
+needed before starting Compose on the VM.
+The script uses passwordless `sudo` on the VM to give uid/gid `501` ownership
+of `~/codebot/app/data` and `~/codebot/target`: the container's non-root bot
+must be able to write its instance fingerprint, state and Git working tree.
+If sudo is unavailable during the copy, run this on the VM before starting
+the container:
+
+```bash
+sudo chown -R 501:501 ~/codebot/app/data ~/codebot/target
+```
+
+### Start with no previous task
+
+If the copied `data/state.json` refers to an earlier backlog or email thread,
+stop the bot and reset **only** its task/conversation state on the VM:
+
+```bash
+cd ~/codebot/app
+docker compose stop codebot
+sudo python3 -m scripts.reset_bot_state
+docker compose up -d codebot
+```
+
+The script moves the old active task, holds, Slack inbox and heartbeat into a
+private timestamped directory under `data/`. It retains the installation's
+identity, OpenCode/Google credentials and email deduplication markers, and does
+not modify the target repo or the original backlog item. You can inspect the
+backup path printed by the command if the old task needs manual reconciliation.
+
 Slack: create the bot `xoxb-` token under [OAuth & Permissions](https://api.slack.com/apps)
 with `channels:read`, `channels:history`, `chat:write` and `files:write`; install
 or reinstall the app after changing scopes. Enable Socket Mode and create the
