@@ -1,4 +1,5 @@
 """Exercise the menu and section saves through Textual's actual event loop."""
+from contextlib import nullcontext
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,13 +10,71 @@ from scripts.setup_env import EnvFile
 try:
     import scripts.setup_ui as setup_ui
     from scripts.setup_ui import SetupApp
-    from textual.widgets import Button, Input, Select, Static
+    from textual.widgets import Button, Checkbox, Input, Select, Static
 except ImportError:
     SetupApp = None
 
 
 @unittest.skipIf(SetupApp is None, "host Textual dependency not installed")
 class SetupMenu(unittest.IsolatedAsyncioTestCase):
+    async def test_main_menu_syncs_existing_vm_and_checks_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("GH_TOKEN=keep\n")
+            app = SetupApp(EnvFile(path))
+            with patch.object(setup_ui, "sync_to_vm", return_value="VM copy completed and healthy") as sync, \
+                 patch.object(app, "suspend", return_value=nullcontext()):
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.pause()
+                    self.assertIsNone(app.page)
+                    app.query_one("#vm-host", Input).value = "azureuser@74.235.122.91"
+                    app.query_one("#vm-restart", Checkbox).value = True
+                    await pilot.click("#sync-vm")
+                    await pilot.pause()
+                    self.assertIn("healthy", str(app.query_one("#message", Static).render()))
+            sync.assert_called_once_with("azureuser@74.235.122.91", code_only=True,
+                                         restart=True)
+            self.assertEqual(path.read_text(), "GH_TOKEN=keep\n")
+
+    async def test_initial_vm_copy_requires_explicit_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = SetupApp(EnvFile(Path(tmp) / ".env"))
+            with patch.object(setup_ui, "sync_to_vm", return_value="VM copy completed") as sync, \
+                 patch.object(app, "suspend", return_value=nullcontext()):
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.pause()
+                    app.query_one("#vm-host", Input).value = "azureuser@74.235.122.91"
+                    app.query_one("#vm-mode", Select).value = "initial"
+                    await pilot.pause()
+                    self.assertTrue(app.query_one("#vm-confirm-initial", Checkbox).display)
+                    await pilot.click("#sync-vm")
+                    self.assertIn("Confirm", str(app.query_one("#message", Static).render()))
+                    sync.assert_not_called()
+                    app.query_one("#vm-confirm-initial", Checkbox).value = True
+                    await pilot.pause()
+                    self.assertTrue(app.query_one("#vm-confirm-initial", Checkbox).value)
+                    app.query_one("#sync-vm", Button).press()
+                    await pilot.pause()
+                    self.assertIn("VM copy completed", str(app.query_one("#message", Static).render()))
+            sync.assert_called_once_with("azureuser@74.235.122.91", code_only=False,
+                                         restart=False)
+
+    async def test_vm_failure_is_reported_without_saving_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("GH_TOKEN=keep\n")
+            app = SetupApp(EnvFile(path))
+            with patch.object(setup_ui, "sync_to_vm", side_effect=RuntimeError("VM copy failed")), \
+                 patch.object(app, "suspend", return_value=nullcontext()):
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.pause()
+                    app.query_one("#vm-host", Input).value = "azureuser@74.235.122.91"
+                    await pilot.click("#sync-vm")
+                    await pilot.pause()
+                    self.assertIn("VM copy failed", str(app.query_one("#message", Static).render()))
+                    self.assertFalse(app.query_one("#sync-vm", Button).disabled)
+            self.assertEqual(path.read_text(), "GH_TOKEN=keep\n")
+
     async def test_first_screen_and_independent_save_then_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"

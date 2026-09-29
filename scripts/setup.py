@@ -20,6 +20,61 @@ from scripts.setup_env import EnvFile
 
 ROOT = Path(__file__).resolve().parent.parent
 PRIMARY_PAGES = ("Repository", "Backlog", "Conversation", "Agent", "Evidence")
+VM_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*\Z")
+
+# Sent to `ssh ... sh -eu` on stdin, never interpolated with user input. Recreate
+# rather than merely restarting so an initial copy's VM-adjusted .env takes effect.
+_VM_RESTART_AND_CHECK = """app="$HOME/codebot/app"
+set -- -f "$app/docker-compose.yml"
+if [ -f "$app/docker-compose.override.yml" ]; then
+    set -- "$@" -f "$app/docker-compose.override.yml"
+fi
+docker compose --project-directory "$app" "$@" up -d --force-recreate codebot
+container=$(docker compose --project-directory "$app" "$@" ps -q codebot)
+if [ -z "$container" ]; then
+    echo 'Docker Compose did not start codebot' >&2
+    exit 1
+fi
+attempt=0
+while [ "$attempt" -lt 90 ]; do
+    health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container")
+    if [ "$health" = healthy ]; then
+        echo 'Coderbot is healthy on the VM.'
+        exit 0
+    fi
+    if [ "$health" = unhealthy ] || [ "$health" = exited ] || [ "$health" = dead ]; then
+        echo "Coderbot did not become healthy (status: $health)" >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 3
+done
+echo 'Coderbot did not become healthy within 270 seconds' >&2
+exit 1
+"""
+
+
+def sync_to_vm(host: str, *, code_only: bool, restart: bool) -> str:
+    """Run the existing copier; optionally recreate and check the remote bot."""
+    host = host.strip()
+    if not VM_HOST_RE.fullmatch(host):
+        raise ValueError("Enter an SSH host as user@host (for example azureuser@74.235.122.91)")
+    command = ["bash", str(ROOT / "scripts/sync-to-vm.sh"), host]
+    if code_only:
+        command.append("--code-only")
+    try:
+        subprocess.run(command, cwd=ROOT, check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(f"VM copy failed: {error}") from error
+    if restart:
+        try:
+            subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                            host, "sh -eu"], input=_VM_RESTART_AND_CHECK, text=True,
+                           cwd=ROOT, check=True, timeout=330)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"Files copied, but VM restart/health check failed: {error}") from error
+    return ("VM copy completed and Coderbot is healthy." if restart else
+            "VM copy completed. Restart the remote bot to load the new code.")
 
 # Universal, version-pinned PyPI wheels. Direct wheels avoid slow/broken simple-
 # index metadata lookups on hosts with stale private pip index credentials.
@@ -1002,7 +1057,7 @@ def text_setup(env: EnvFile) -> bool:
         for number, page in enumerate(pages, 1):
             print(f"  {number}. [{'x' if page in completed else ' '}] {page}")
         try:
-            selection = input("Select a section, [t] Test full setup, [q] Exit: ").strip().lower()
+            selection = input("Select a section, [t] Test full setup, [v] Sync to VM, [q] Exit: ").strip().lower()
         except EOFError:
             return True  # no draft exists on the main menu
         if selection in ("q", "exit"):
@@ -1012,8 +1067,30 @@ def text_setup(env: EnvFile) -> bool:
             print("Full test failed:\n- " + "\n- ".join(errors) if errors else
                   "Full test passed: the saved configuration is ready.")
             continue
+        if selection in ("v", "vm"):
+            try:
+                host = input("SSH host (user@host): ").strip()
+                mode = input("[u] Update code (default), [i] Initial copy: ").strip().lower()
+                if mode not in ("", "u", "i"):
+                    print("Choose u or i; nothing copied.")
+                    continue
+                if mode == "i" and not _confirm(
+                        "Bots stopped on both machines? Initial copy includes configuration, "
+                        "state and the target checkout. Continue?"):
+                    print("Canceled; nothing copied.")
+                    continue
+                restart = _confirm("Recreate the VM container and check its health after copying?")
+            except EOFError:
+                print("Canceled; nothing copied.")
+                continue
+            try:
+                print("Synchronizing with the VM; output follows...")
+                print(sync_to_vm(host, code_only=mode != "i", restart=restart))
+            except (ValueError, RuntimeError) as error:
+                print(error)
+            continue
         if not selection.isdecimal() or not 1 <= int(selection) <= len(pages):
-            print("Choose a section number, t or q.")
+            print("Choose a section number, t, v or q.")
             continue
         section = pages[int(selection) - 1]
         updated = _text_section(env, section)

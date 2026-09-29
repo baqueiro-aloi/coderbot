@@ -7,9 +7,8 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, Select, Static
 
 from scripts.setup import (PRIMARY_PAGES, authorize_google, authenticate_opencode,
-                           fetch_jira_projects,
-                           fetch_jira_statuses, fetch_github_projects, fields_for, fetch_slack_channels,
-                           test_all, test_section)
+                           fetch_jira_projects, fetch_jira_statuses, fetch_github_projects,
+                           fields_for, fetch_slack_channels, sync_to_vm, test_all, test_section)
 from scripts.setup_catalog import (BY_KEY, GITHUB_TOKEN_URL, JIRA_API_TOKEN_URL, JIRA_STATUS_KEYS,
                                    SLACK_APP_SETTINGS_URL, effective, normalize_value,
                                     validate_value)
@@ -102,6 +101,7 @@ class SetupApp(App[bool]):
             yield Button("Save and Close", variant="success", id="save")
             yield Button("Discard", id="discard")
             yield Button("Test full setup", variant="primary", id="test-all")
+            yield Button("Sync to VM", variant="primary", id="sync-vm")
             yield Button("Exit", id="exit")
         yield Footer()
 
@@ -173,12 +173,13 @@ class SetupApp(App[bool]):
             self.query_one("#title", Static).update("Coderbot · Configure by section")
             self.query_one("#description", Static).update(
                 "Open any section. Test and Save and Close there; each successful section is checked. "
-                "Test full setup checks the entire installation. Exit leaves no pending edits.")
+                "Test full setup checks the entire installation. Sync to VM uses the saved "
+                "configuration; Exit leaves no pending edits.")
             self.query_one("#search", Input).display = False
             self.query_one("#preview", Static).display = False
             for button in ("test-section", "save", "discard"):
                 self.query_one(f"#{button}", Button).display = False
-            for button in ("test-all", "exit"):
+            for button in ("test-all", "sync-vm", "exit"):
                 self.query_one(f"#{button}", Button).display = True
             self.query_one("#message", Static).update("")
             form = self.query_one("#fields", VerticalScroll)
@@ -186,7 +187,16 @@ class SetupApp(App[bool]):
             await form.mount(*(Horizontal(
                 Checkbox(value=name in self.completed, disabled=True, id=f"checked-{name}"),
                 Button(name, id=f"section-{name}"), classes="menu-row")
-                for name in PAGES))
+                for name in PAGES),
+                Label("Sync to SSH VM (uses saved configuration)"),
+                Input(placeholder="user@host, e.g. azureuser@74.235.122.91", id="vm-host"),
+                Select([("Update code on existing VM", "code-only"),
+                        ("Initial copy of app, state and target", "initial")],
+                       value="code-only", id="vm-mode"),
+                Checkbox("Bots stopped: confirm initial copy of configuration and state",
+                         id="vm-confirm-initial"),
+                Checkbox("Recreate container and check health after sync", id="vm-restart"))
+            self.query_one("#vm-confirm-initial", Checkbox).display = False
             return
         page = PAGES[self.page]
         self.query_one("#title", Static).update(f"{self.page + 1} / {len(PAGES)}    {page}")
@@ -194,7 +204,7 @@ class SetupApp(App[bool]):
         self.query_one("#preview", Static).display = True
         for button in ("test-section", "save", "discard"):
             self.query_one(f"#{button}", Button).display = True
-        for button in ("test-all", "exit"):
+        for button in ("test-all", "sync-vm", "exit"):
             self.query_one(f"#{button}", Button).display = False
         self.query_one("#message", Static).update("")
         description = ("All configuration keys are searchable, including settings for inactive integrations."
@@ -392,6 +402,11 @@ class SetupApp(App[bool]):
             f"Loaded {len(boards)} Projects v2 boards. Choose one or use a manual URL.")
 
     async def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "vm-mode" and self.page is None:
+            confirm = self.query("#vm-confirm-initial")
+            if confirm:
+                confirm.first().display = event.value == "initial"
+            return
         if not event.select.id or not event.select.id.startswith("setting-"):
             return
         key = event.select.id.removeprefix("setting-")
@@ -496,6 +511,31 @@ class SetupApp(App[bool]):
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         action = event.button.id
+        if action == "sync-vm" and self.page is None:
+            if self.changes:
+                self.query_one("#message", Static).update("Save or discard pending edits before syncing.")
+                return
+            host = self.query_one("#vm-host", Input).value
+            code_only = self.query_one("#vm-mode", Select).value == "code-only"
+            if not code_only and not self.query_one("#vm-confirm-initial", Checkbox).value:
+                self.query_one("#message", Static).update(
+                    "Confirm the initial copy of configuration and state before syncing.")
+                return
+            restart = self.query_one("#vm-restart", Checkbox).value
+            button = self.query_one("#sync-vm", Button)
+            button.disabled = True
+            self.query_one("#message", Static).update("Syncing with the VM; output will appear in the terminal...")
+            try:
+                with self.suspend():
+                    result = await asyncio.to_thread(sync_to_vm, host, code_only=code_only,
+                                                     restart=restart)
+            except (ValueError, RuntimeError) as error:
+                self.query_one("#message", Static).update(str(error))
+            else:
+                self.query_one("#message", Static).update(result)
+            finally:
+                button.disabled = False
+            return
         if action and action.startswith("section-"):
             self.values = dict(self.env.values)
             self.changes = {}

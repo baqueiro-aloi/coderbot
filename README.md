@@ -403,6 +403,10 @@ open with its draft intact and explain what to fix. A checkmark appears beside
 saved sections; changing a dependency clears affected checkmarks. The menu's
 `Test full setup` checks the whole saved configuration; `Exit` needs no final
 save. Text mode offers the same menu with `t`/`s`/`e`/`d` in each section.
+The main menu also has **Sync to VM** (`v` in text mode): enter `user@host`,
+choose code-only (default) or confirm an initial copy, and optionally recreate
+the remote bot container and wait for its health check. This runs against the
+saved configuration; the SSH host is not stored in `.env`.
 The preview masks secrets; Advanced searches every runtime setting, including
 inactive integrations and timeouts. On repeat runs setup preserves unknown
 keys, comments, untouched credentials and inactive settings in `.env`, backs
