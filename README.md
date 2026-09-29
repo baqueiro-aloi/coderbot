@@ -184,13 +184,16 @@ an app-level token with `connections:write`; grant the bot `chat:write`,
 Invite each app to the public channel. Coderbot posts one root message when it
 claims a task. Approvals, questions, PR review, STATUS/ABORT/DONE/HOLD/CONTINUE and
 check-ins stay in that task's replies; any human member of the channel can act.
-Top-level user messages and replies to other bots' threads are ignored. Socket
+Top-level messages are ignored except `status?`/`STATUS`, which receives a short
+answer in a reply thread under that message (a bare request is visible to every
+codebot app in the channel). Replies to other bots' task threads are ignored. Socket
 Mode records incoming replies immediately; if an event is missed, the waiting
 thread is reconciled from Slack history at most once a minute. If replies only
 arrive through reconciliation, check that Event Subscriptions is enabled and
 `message.channels` is subscribed for this app. An in-flight coding-agent turn
-finishes before Coderbot acts on replies. A dirty checkout before a task starts is
-announced once in the channel and automatically rechecked; replies to that
+finishes before Coderbot acts on task-changing replies; brief `STATUS` replies are
+served independently without interrupting that turn. A dirty checkout before a
+task starts is announced once in the channel and automatically rechecked; replies to that
 operational notice are ignored. Small screenshots and reports are shared in
 the task thread; large evidence videos are linked from Google Drive.
 For each task, the language of its title and details in Jira, GitHub Projects or
@@ -339,6 +342,19 @@ Every check-in says whose move it is, and is self-contained:
 Check-ins go out from the tick loop, so one can lag while a single long agent call is
 running (bounded by `CODEBOT_AGENT_TIMEOUT`); it is sent as soon as that call returns.
 STATUS reports the last real email on the thread and how many check-ins followed it.
+
+During an in-flight phase, `status?` (or `STATUS`) gets an independent, **brief**
+answer in the task thread without waiting for the coding agent to finish. In Gmail
+the supervisor checks for status mail during long turns; in Slack it reads the
+durable Socket Mode inbox and also accepts a top-level status request. Other commands
+remain queued for the main state machine. The reply names the task and phase, elapsed
+time and the last observed OpenCode tool activity, when available. Recent activity
+is a sign of progress; after five minutes without observable activity, it explicitly
+says progress cannot be confirmed. Claude or non-agent phases may not expose step
+telemetry, so the reply does not claim they are healthy or stuck without evidence.
+No second coding-agent session is started and no task state is modified by the
+supervisor. Between turns, the regular `STATUS` command still returns the full
+state snapshot.
 
 ## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
 

@@ -3345,6 +3345,41 @@ def _send_status(state: dict, thread_id: str) -> None:
     log.info("sent STATUS report (state=%s)", state.get("state"))
 
 
+def _short_status(state: dict, turn: dict, now: float) -> str:
+    """Concise, observational status; no agent turn and no claim of guaranteed health."""
+    spanish = state.get("task_language", "English").casefold() == "spanish"
+    phase = state.get("return_state") if state.get("state") == "WAIT_REPLY" else state.get("state", "IDLE")
+    title = str(state.get("item") or ("Sin tarea activa" if spanish else "No active task"))[:140]
+    started = turn.get("started_at") if turn.get("active") else _liveness.get("tick_started")
+    elapsed = _fmt_dur(now - started) if isinstance(started, (float, int)) else "?"
+    last = turn.get("last_activity") if turn.get("active") else None
+    if spanish:
+        lines = [f"Tarea: {title}", f"Fase: {phase} ({elapsed} en curso)."]
+        if last:
+            lines.append(f"Última actividad observada: {turn.get('activity', 'agente')} "
+                         f"(hace {_fmt_dur(now - last)}).")
+            lines.append("Sin señales de bloqueo recientes." if now - last < 300 else
+                         "Sin actividad observable reciente; no puedo confirmar si ese paso avanza.")
+        elif turn.get("active"):
+            lines.append("El agente sigue en ejecución; sin telemetría de pasos, no puedo "
+                         "confirmar si avanza o está bloqueado.")
+        else:
+            lines.append("Fase en curso sin telemetría del agente; no puedo confirmar si avanza.")
+    else:
+        lines = [f"Task: {title}", f"Phase: {phase} (running for {elapsed})."]
+        if last:
+            lines.append(f"Last observed activity: {turn.get('activity', 'agent')} "
+                         f"({_fmt_dur(now - last)} ago).")
+            lines.append("No recent sign of a stall." if now - last < 300 else
+                         "No recent observable activity; I cannot confirm this step is progressing.")
+        elif turn.get("active"):
+            lines.append("The agent is still running; without step telemetry I cannot "
+                         "confirm whether it is progressing or stuck.")
+        else:
+            lines.append("This phase has no agent step telemetry; progress cannot be confirmed.")
+    return "\n".join(lines)
+
+
 # What "this phase finished via a WAIT_REPLY answer" means, per phase. Mirrors each
 # do_* function's own success tail so a phase completed through a question detour ends
 # up in exactly the same place as one completed directly.
@@ -3538,7 +3573,44 @@ def _handle_reply(state: dict, reply: str) -> None:
 # plausible duration, so a legit multi-hour agent call stays healthy but a wedged loop
 # eventually lets the heartbeat go stale (see config.HEARTBEAT_MAX_TICK_SECONDS).
 _liveness = {"tick_started": time.time()}
+_work_active = threading.Event()
+_status_command_lock = threading.Lock()
+_current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
+
+
+def _status_supervisor_once() -> bool:
+    """Serve one inquiry without touching the FSM or starting another agent turn."""
+    state = dict(_current_state) if _current_state is not None else load_state()
+    working = _work_active.is_set() and state.get("state") in PHASES
+    if config.COMM_CHANNEL == "email" and not working:
+        return False  # normal mailbox polling owns STATUS between turns
+    thread = state.get("thread_id") if working else None
+    with _status_command_lock:
+        request = gmail_client.poll_status(thread)
+        if not request:
+            return False
+        if config.COMM_CHANNEL == "email" and not _work_active.is_set():
+            return False  # let the normal command loop consume it
+        msg_id, reply_thread = request
+        snapshot = dict(_current_state) if _current_state is not None else state
+        turn = agent_runner.turn_snapshot()
+        body = _short_status(snapshot, turn, time.time())
+        subj = subject(snapshot, "brief status")
+        gmail_client.send(subj, body, reply_thread)
+        gmail_client.mark_processed(msg_id)
+        log.info("served brief STATUS in %s without interrupting %s",
+                 reply_thread, snapshot.get("state"))
+        return True
+
+
+def _status_supervisor_loop() -> None:
+    while True:
+        try:
+            _status_supervisor_once()
+        except Exception:  # noqa: BLE001 — supervisory polling never crashes codebot
+            log.exception("brief status supervisor failed; will retry")
+        time.sleep(3 if config.COMM_CHANNEL == "slack" else 15)
 
 
 def _heartbeat_loop() -> None:
@@ -3681,6 +3753,7 @@ def main() -> None:
     _acquire_single_instance_lock()
     gmail_client.start()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    threading.Thread(target=_status_supervisor_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.TASK_SOURCE,
              task_source.describe())
@@ -3710,6 +3783,7 @@ def main() -> None:
 
 
 def _run_loop() -> None:
+    global _current_state
     backoff = config.POLL_INTERVAL_SECONDS
     while True:
         _liveness["tick_started"] = time.time()
@@ -3723,6 +3797,7 @@ def _run_loop() -> None:
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
         prev = state["state"]
+        _current_state = state
         try:
             if state.get("item") and state["state"] != "IDLE":
                 _ensure_task_language(state)
@@ -3736,29 +3811,29 @@ def _run_loop() -> None:
                 state["thread_id"] = gmail_client.open_thread(state)
                 save_state(state)
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
-            if check_commands(state):
+            with _status_command_lock:
+                handled_command = check_commands(state)
+            if handled_command:
                 pass  # reset to IDLE; skip normal dispatch this tick
-            elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
-                pass  # the PR was merged/closed on GitHub, or the base branch moved
-                # and conflicted it; rerouted (IDLE / WAIT_STUCK / RESOLVE_CONFLICTS)
-                # and dispatched next tick
-            elif state["state"] == "WAIT_REVIEW":
-                handle_review_wait(state)
-            elif state["state"] == "WAIT_MERGE":
-                # A pending reply speaks to the CURRENT PR and is consumed first —
-                # do_merge_reply handles MERGED and CONFLICTING itself. Only a
-                # reply-less tick watches the PR, so a reply is never silently carried
-                # across a conflict detour. Someone merging the PR on GitHub finishes
-                # the task here instead of leaving it waiting for a 'merge' forever.
-                handle_merge_wait(state)
-                if state["state"] == "WAIT_MERGE":
-                    check_pr_status(state)
-            elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
-                check_clean_checkout(state)
-            elif state["state"] in WAITS:
-                handle_wait(state)
             else:
-                PHASES[state["state"]](state)
+                _work_active.set()
+                try:
+                    if state["state"] == "WAIT_REVIEW" and check_pr_status(state):
+                        pass  # PR merged/closed or conflicts; dispatch next tick
+                    elif state["state"] == "WAIT_REVIEW":
+                        handle_review_wait(state)
+                    elif state["state"] == "WAIT_MERGE":
+                        handle_merge_wait(state)
+                        if state["state"] == "WAIT_MERGE":
+                            check_pr_status(state)
+                    elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
+                        check_clean_checkout(state)
+                    elif state["state"] in WAITS:
+                        handle_wait(state)
+                    else:
+                        PHASES[state["state"]](state)
+                finally:
+                    _work_active.clear()
             # Success: clear this state's consecutive-failure counter.
             if state.get("failures", {}).get(prev):
                 state["failures"][prev] = 0

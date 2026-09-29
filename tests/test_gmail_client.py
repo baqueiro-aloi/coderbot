@@ -135,6 +135,21 @@ class CommandScoping(unittest.TestCase):
         self.assertIsNone(gmail_client.foreign_command("ABORT"))
         self.assertIsNone(gmail_client.foreign_command("please abort that"))
 
+    def test_poll_status_skips_other_commands_without_marking_them_processed(self):
+        service = MagicMock()
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "abort"}, {"id": "status"}]}
+        abort, status = _msg("abort", "u@x.com", "ABORT"), _msg("status", "u@x.com", "status?")
+        abort["threadId"], status["threadId"] = "t", "t"
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = [abort, status]
+        with patch.object(gmail_client, "_gmail", return_value=service), \
+             patch.object(gmail_client, "_load_processed", return_value=[]), \
+             patch.object(gmail_client, "mark_processed") as processed, \
+             patch.object(config, "USER_EMAIL", "u@x.com"):
+            self.assertEqual(gmail_client.poll_status(), ("status", "t"))
+        processed.assert_not_called()
+        self.assertIn("STATUS", service.users.return_value.messages.return_value.list.call_args.kwargs["q"])
+
 
 if __name__ == "__main__":
     unittest.main()

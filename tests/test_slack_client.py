@@ -53,6 +53,26 @@ class SlackInbox(unittest.TestCase):
         self.assertEqual(slack.drain_thread("C123:100.000001"), 1)
         self.assertIsNone(slack.poll_reply("C123:100.000001"))
 
+    def test_top_level_status_is_durable_but_other_top_level_commands_are_ignored(self):
+        self.assertFalse(slack._accept_event({"event": {"type": "message", "ts": "200.0",
+                                               "channel": "C123", "user": "Uhuman", "text": "ABORT"}}))
+        request = {"event": {"type": "message", "ts": "201.0", "channel": "C123",
+                             "user": "Uhuman", "text": "status?"}}
+        self.assertTrue(slack._accept_event(request))
+        self.assertTrue(slack._accept_event(request))  # Socket Mode redelivery
+        self.assertEqual(slack.poll_status(), ("C123:201.0", "C123:201.0"))
+        self.assertIsNone(slack.poll_command())  # top-level STATUS does not mutate the FSM
+        slack.mark_processed("C123:201.0")
+        self.assertIsNone(slack.poll_status())
+
+    def test_status_filter_does_not_consume_an_earlier_mutating_command(self):
+        self.assertTrue(slack._accept_event(self.event("102.0", "ABORT")))
+        self.assertTrue(slack._accept_event(self.event("103.0", "status?")))
+        self.assertEqual(slack.poll_status("C123:100.000001"),
+                         ("C123:103.0", "C123:100.000001"))
+        slack.mark_processed("C123:103.0")
+        self.assertEqual(slack.poll_command()[2], "ABORT")
+
     def test_socket_ack_after_persistence_and_retry_on_database_failure(self):
         socket = MagicMock()
         request = SimpleNamespace(type="events_api", envelope_id="E1",

@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from contextvars import ContextVar
 
 import claude_runner
@@ -22,6 +23,45 @@ SENTINEL = claude_runner.SENTINEL
 OUTBOX_DIR = claude_runner.OUTBOX_DIR
 EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 _task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
+_turn_lock = threading.Lock()
+_turn: dict = {"active": False}
+
+
+def turn_snapshot() -> dict:
+    """Observable activity, never the agent's prompt or its untrusted tool output."""
+    with _turn_lock:
+        return dict(_turn)
+
+
+def _begin_turn() -> None:
+    with _turn_lock:
+        _turn.clear()
+        _turn.update(active=True, started_at=time.time(), last_activity=None,
+                     activity="coding agent running")
+
+
+def _end_turn() -> None:
+    with _turn_lock:
+        _turn["active"] = False
+
+
+def _observe(event: dict) -> None:
+    kind = event.get("type")
+    if kind not in ("tool_use", "step_finish", "text"):
+        return
+    with _turn_lock:
+        if _turn.get("active"):
+            _turn["last_activity"] = time.time()
+            if kind == "tool_use":
+                part = event.get("part") if isinstance(event.get("part"), dict) else {}
+                tool = str(part.get("tool") or "tool")[:35]
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                inputs = state.get("input") if isinstance(state.get("input"), dict) else {}
+                # Display short task descriptions, never commands, prompts or tool output.
+                description = inputs.get("description") if tool == "task" else None
+                _turn["activity"] = ("task: " + " ".join(description.split())[:100]
+                                     if isinstance(description, str) and description.strip()
+                                     else f"tool: {tool}")
 
 
 def set_task_language(language: str | None) -> None:
@@ -168,6 +208,7 @@ def _stream_line(line: str) -> None:
         return  # the final parse in _opencode reports malformed events
     if not isinstance(event, dict):
         return
+    _observe(event)
     summary = summarize_event(event)
     if summary is None:
         return
@@ -255,29 +296,37 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""
-    if contract:
-        prompt = _language_prompt(prompt)
-    if config.AGENT == "claude":
-        return claude_runner.run(prompt, contract=contract)
-    if config.AGENT == "opencode":
-        full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
-        return _opencode(full)
-    raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+    _begin_turn()
+    try:
+        if contract:
+            prompt = _language_prompt(prompt)
+        if config.AGENT == "claude":
+            return claude_runner.run(prompt, contract=contract)
+        if config.AGENT == "opencode":
+            full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+            return _opencode(full)
+        raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+    finally:
+        _end_turn()
 
 
 def resume(session_id: str, prompt: str):
-    prompt = _language_prompt(prompt)
-    if config.AGENT == "claude":
-        return claude_runner.resume(session_id, prompt)
-    if config.AGENT == "opencode":
-        try:
-            return _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
-        except RuntimeError as err:
-            if "Session not found" not in str(err):
-                raise
-            # Sessions can be lost when an in-flight task changes agents or OpenCode's
-            # local store is reset. The task artifacts and branch remain authoritative.
-            log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
-            return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
-                             _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
-    raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+    _begin_turn()
+    try:
+        prompt = _language_prompt(prompt)
+        if config.AGENT == "claude":
+            return claude_runner.resume(session_id, prompt)
+        if config.AGENT == "opencode":
+            try:
+                return _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
+            except RuntimeError as err:
+                if "Session not found" not in str(err):
+                    raise
+                # Sessions can be lost when an in-flight task changes agents or OpenCode's
+                # local store is reset. The task artifacts and branch remain authoritative.
+                log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
+                return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
+                                 _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
+        raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+    finally:
+        _end_turn()

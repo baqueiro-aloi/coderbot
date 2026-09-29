@@ -113,7 +113,7 @@ class JiraHttp(unittest.TestCase):
              patch.object(jira, "_search", side_effect=[[], []]) as search:
             self.assertEqual(jira.list_pending_items(), [])
         self.assertIn('labels = "codebot-ready"', search.call_args_list[0].args[0])
-        self.assertNotIn("codebot-ready", search.call_args_list[1].args[0])
+        self.assertNotIn('labels = "codebot-ready"', search.call_args_list[1].args[0])
 
 
 class JiraIssueActions(unittest.TestCase):

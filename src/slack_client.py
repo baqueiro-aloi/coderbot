@@ -34,6 +34,8 @@ def _database():
                "nonce TEXT UNIQUE NOT NULL, PRIMARY KEY(channel, root_ts))")
     db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, "
                "root_ts TEXT NOT NULL, ts TEXT NOT NULL, text TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS status_requests (id TEXT PRIMARY KEY, "
+               "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     try:
         db.commit()
         yield db
@@ -86,9 +88,24 @@ def _accept_event(payload: dict) -> bool:
             or event.get("channel") != config.SLACK_CHANNEL_ID):
         return False
     root = event.get("thread_ts")
-    if not root or root == event.get("ts") or not event.get("ts"):
-        return False  # root/top-level messages are never commands
     channel = event["channel"]
+    if not event.get("ts"):
+        return False
+    if not root:
+        # Only a status inquiry can be addressed outside a task thread. Other
+        # top-level messages remain ignored, as do mutating commands.
+        parsed = parse_command(event.get("text") or "")
+        if not parsed or parsed[0] != "STATUS" or (parsed[1] and parsed[1] != config.INSTANCE_ID):
+            return False
+        with _database() as db:
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO status_requests(id,channel,ts) VALUES(?,?,?)",
+                (_thread_id(channel, event["ts"]), channel, event["ts"])).rowcount
+        if inserted:
+            _wake.set()
+        return True
+    if root == event["ts"]:
+        return False
     with _database() as db:
         if not db.execute("SELECT 1 FROM roots WHERE channel=? AND root_ts=?",
                           (channel, root)).fetchone():
@@ -399,6 +416,22 @@ def poll_command():
     return None
 
 
+def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
+    """Fetch only STATUS, leaving other queued replies untouched for the FSM."""
+    with _database() as db:
+        rows = db.execute("SELECT id,channel,ts FROM status_requests WHERE handled=0 "
+                          "ORDER BY CAST(ts AS REAL),ts").fetchall()
+    if rows:
+        msg_id, channel, ts = rows[0]
+        return msg_id, _thread_id(channel, ts)
+    if thread_id:
+        for msg_id, text, channel, root_ts in _pending(thread_id):
+            parsed = parse_command(text)
+            if parsed and parsed[0] == "STATUS" and (not parsed[1] or parsed[1] == config.INSTANCE_ID):
+                return msg_id, _thread_id(channel, root_ts)
+    return None
+
+
 def poll_reply(thread_id: str):
     pending = _pending(thread_id)
     if not pending:
@@ -414,6 +447,7 @@ def poll_reply(thread_id: str):
 def mark_processed(message_id: str) -> None:
     with _database() as db:
         db.execute("UPDATE messages SET handled=1 WHERE id=?", (message_id,))
+        db.execute("UPDATE status_requests SET handled=1 WHERE id=?", (message_id,))
 
 
 def drain_thread(thread_id: str) -> int:

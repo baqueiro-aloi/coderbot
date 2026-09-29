@@ -31,6 +31,10 @@ def poll_command():
     return _backend().poll_command()
 
 
+def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
+    return _backend().poll_status(thread_id)
+
+
 def poll_reply(thread_id: str):
     return _backend().poll_reply(thread_id)
 

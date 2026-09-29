@@ -248,11 +248,22 @@ def poll_command() -> tuple[str, str, str, bool, str] | None:
     instance name, and addressed to this instance (see command_for_me) so it can't fire by
     accident — and so a command for one instance is never executed by another.
     """
+    return _poll_command()
+
+
+def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
+    """Only look for status inquiries while the coding turn holds the main loop."""
+    found = _poll_command(only_status=True)
+    return (found[0], found[1]) if found else None
+
+
+def _poll_command(*, only_status: bool = False) -> tuple[str, str, str, bool, str] | None:
     service = _gmail()
     processed = _load_processed()
     listing = service.users().messages().list(
-        userId="me", q="(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) "
-                       "newer_than:2d -in:drafts", maxResults=25).execute()
+        userId="me", q=("STATUS " if only_status else
+                        "(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) ")
+                       + "newer_than:2d -in:drafts", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
             continue
@@ -267,6 +278,8 @@ def poll_command() -> tuple[str, str, str, bool, str] | None:
             continue
         body = _strip_quoted(_extract_body(message.get("payload", {})))
         command = command_for_me(body, headers.get("subject", ""))
+        if only_status and command != "STATUS":
+            continue
         if command:
             _cmd, target, note = parse_command(body)
             log.warning("%s command received (msg %s, thread %s, targeted=%s)",
