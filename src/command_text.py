@@ -1,9 +1,9 @@
 """Transport-neutral parsing of existing Codebot text commands."""
 import re
 
-COMMANDS = ("ABORT", "STATUS", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME")
+COMMANDS = ("ABORT", "STATUS", "KICK", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME")
 _ALIASES = {"PAUSE": "HOLD", "RESUME": "CONTINUE"}
-_CMD_RE = re.compile(r"^(ABORT|STATUS|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
+_CMD_RE = re.compile(r"^(ABORT|STATUS|KICK|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
                      re.IGNORECASE)
 _CONTINUE_RE = re.compile(
     r"^(CONTINUE|RESUME)\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",

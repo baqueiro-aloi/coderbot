@@ -65,6 +65,25 @@ class SlackInbox(unittest.TestCase):
         slack.mark_processed("C123:201.0")
         self.assertIsNone(slack.poll_status())
 
+    def test_top_level_kick_requires_instance_name_and_is_durable(self):
+        self.assertFalse(slack._accept_event({"event": {"type": "message", "ts": "300.0",
+                                               "channel": "C123", "user": "Uhuman", "text": "kick"}}))
+        targeted = {"event": {"type": "message", "ts": "301.0", "channel": "C123",
+                              "user": "Uhuman", "text": f"kick {config.INSTANCE_ID}"}}
+        self.assertTrue(slack._accept_event(targeted))
+        self.assertTrue(slack._accept_event(targeted))
+        self.assertEqual(slack.poll_kick(), ("C123:301.0", "C123:301.0"))
+        slack.mark_processed("C123:301.0")
+        self.assertIsNone(slack.poll_kick())
+
+    def test_kick_in_active_thread_does_not_consume_abort(self):
+        self.assertTrue(slack._accept_event(self.event("302.0", "ABORT")))
+        self.assertTrue(slack._accept_event(self.event("303.0", "kick")))
+        self.assertEqual(slack.poll_kick("C123:100.000001"),
+                         ("C123:303.0", "C123:100.000001"))
+        slack.mark_processed("C123:303.0")
+        self.assertEqual(slack.poll_command()[2], "ABORT")
+
     def test_status_filter_does_not_consume_an_earlier_mutating_command(self):
         self.assertTrue(slack._accept_event(self.event("102.0", "ABORT")))
         self.assertTrue(slack._accept_event(self.event("103.0", "status?")))

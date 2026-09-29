@@ -115,6 +115,7 @@ class Supervisor(unittest.TestCase):
         main._current_state = state
         main._work_active.set()
         with patch.object(config, "COMM_CHANNEL", "email"), \
+             patch.object(main.gmail_client, "poll_kick", return_value=None), \
              patch.object(main.gmail_client, "poll_status", return_value=("m1", "gmail-thread")), \
              patch.object(main.gmail_client, "send") as send, \
              patch.object(main.gmail_client, "mark_processed") as mark, \
@@ -127,6 +128,24 @@ class Supervisor(unittest.TestCase):
         save.assert_not_called()
         agent.assert_not_called()
         self.assertEqual(state["state"], "IMPLEMENTING")
+
+    def test_kick_is_processed_during_a_busy_turn_without_touching_the_fsm(self):
+        main._work_active.set()
+        with patch.object(config, "COMM_CHANNEL", "slack"), \
+             patch.object(main.agent_runner, "turn_snapshot", return_value={"active": True}), \
+             patch.object(main.gmail_client, "poll_kick", return_value=("m2", "C123:100.0")), \
+             patch.object(main.gmail_client, "poll_status") as status, \
+             patch.object(main.turn_control, "request_kick", return_value=True) as kick, \
+             patch.object(main.gmail_client, "mark_processed") as handled, \
+             patch.object(main.gmail_client, "send") as send, \
+             patch.object(main, "save_state") as save:
+            self.assertTrue(main._status_supervisor_once())
+        kick.assert_called_once()
+        handled.assert_called_once_with("m2")
+        self.assertIn("Reiniciando", send.call_args.args[1])
+        status.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.state["state"], "IMPLEMENTING")
 
     def test_stale_observation_reports_uncertainty(self):
         body = main._short_status(self.state, {"active": True, "started_at": 100.0,

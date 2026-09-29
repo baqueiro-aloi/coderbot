@@ -182,12 +182,13 @@ an app-level token with `connections:write`; grant the bot `chat:write`,
 `channels:history`, `channels:read`, `files:write`, and subscribe to
 `message.channels` events.
 Invite each app to the public channel. Coderbot posts one root message when it
-claims a task. Approvals, questions, PR review, STATUS/ABORT/DONE/HOLD/CONTINUE and
+claims a task. Approvals, questions, PR review, STATUS/KICK/ABORT/DONE/HOLD/CONTINUE and
 check-ins stay in that task's replies; any human member of the channel can act.
-Top-level messages are ignored except `status?`/`STATUS`, which receives a short
-answer in a reply thread under that message (a bare request is visible to every
-codebot app in the channel). Replies to other bots' task threads are ignored. Socket
-Mode records incoming replies immediately; if an event is missed, the waiting
+Top-level messages are ignored except `status?`/`STATUS` and an explicitly targeted
+`KICK <instance>`. Replies appear under the command message; a bare top-level
+`STATUS` is visible to every codebot app in the channel. Replies to other bots'
+task threads are ignored. Socket Mode records incoming replies immediately; if an
+event is missed, the waiting
 thread is reconciled from Slack history at most once a minute. If replies only
 arrive through reconciliation, check that Event Subscriptions is enabled and
 `message.channels` is subscribed for this app. An in-flight coding-agent turn
@@ -348,7 +349,8 @@ answer in the task thread without waiting for the coding agent to finish. In Gma
 the supervisor checks for status mail during long turns; in Slack it reads the
 durable Socket Mode inbox and, if an event was missed, reconciles the active thread
 through Slack's API at most once a minute. It also accepts a top-level status request.
-Other commands remain queued for the main state machine. The reply names the task,
+Other task-changing commands remain queued for the main state machine except `KICK`,
+which can interrupt the current agent turn. The status reply names the task,
 phase and elapsed time. Codebot writes a small metadata-only turn snapshot to
 `data/agent_activity.sqlite`; when using OpenCode it also reads the running session
 and its subagents, tasks and latest event timestamps directly from OpenCode's own
@@ -370,15 +372,18 @@ history reconciliation and read-only OpenCode progress reader, answers only
 `STATUS`, and never starts another agent or writes the bot's task state. The
 built-in supervisor takes over at the next normal container restart.
 
-## Mailbox commands: ABORT / STATUS / DONE / HOLD / CONTINUE
+## Mailbox commands: ABORT / STATUS / KICK / DONE / HOLD / CONTINUE
 
-Email codebot with a body of exactly `ABORT`, `STATUS`, `DONE`, `HOLD` (or `PAUSE`),
+Email codebot with a body of exactly `ABORT`, `STATUS`, `KICK`, `DONE`, `HOLD` (or `PAUSE`),
 or `CONTINUE` (or `RESUME`, which may be followed by a note) — case-insensitive,
 trailing punctuation tolerated — optionally with an instance name (`ABORT codebot-x7k2`)
 when several instances share the mailbox — see "Multiple instances" below for how bare
 commands are scoped.
-All are checked at the start of every tick and mailbox-wide (any thread, or a brand-new
-email), so they work even when the agent is stuck waiting on a thread — or in
+Commands are checked at the start of every tick; `KICK` also has an independent
+supervisor so it works **during** a blocked coding turn. Bare `KICK` is scoped to
+the task's thread (or its tagged email subject); outside it use `KICK <instance>`
+to avoid interrupting unrelated bots. The other commands work even when the agent
+is stuck waiting on a thread — or in
 WAIT_REVIEW, which never polls the inbox. **Only mail from `CODEBOT_USER_EMAIL` is
 honored** (it may be a comma-separated list) — a stranger emailing "ABORT" is ignored.
 Thread replies are held to the same rule: mail from any other sender in a task thread
@@ -396,6 +401,15 @@ is logged and ignored.
   counters, heartbeat age, tasks on hold, the time of the last real email on the task
   thread and the check-ins sent since, and the full text of the last email codebot
   sent — without changing anything.
+- **KICK** ends the currently running Claude/OpenCode CLI turn and retries its phase
+  from the last saved FSM checkpoint. It keeps the claimed task, branch, approvals,
+  session and files; the resumed agent is instructed to inspect partial work and
+  completed tasks before continuing. It does not consume the phase failure budget,
+  merge anything or reset the checkout. If no coding turn is active, it answers that
+  nothing changed. A bare `KICK` in a Slack task thread works; a top-level Slack
+  command must name this installation (`KICK <instance>`). The standalone
+  `status_watch.py` used for older running containers reports STATUS only; the
+  in-process supervisor is needed for KICK.
 - **HOLD** (or **PAUSE**) parks the current task: any half-finished git operation is
   aborted, all pending work is committed on the task branch (evidence files excluded),
   the task's state is saved in `data/holds.json`, its bullet in the doc gets an

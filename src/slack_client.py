@@ -36,6 +36,8 @@ def _database():
                "root_ts TEXT NOT NULL, ts TEXT NOT NULL, text TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS status_requests (id TEXT PRIMARY KEY, "
                "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS kick_requests (id TEXT PRIMARY KEY, "
+               "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     try:
         db.commit()
         yield db
@@ -92,14 +94,20 @@ def _accept_event(payload: dict) -> bool:
     if not event.get("ts"):
         return False
     if not root:
-        # Only a status inquiry can be addressed outside a task thread. Other
-        # top-level messages remain ignored, as do mutating commands.
+        # Bare KICK is task-scoped; only an explicitly targeted KICK can act
+        # outside the task thread. Other top-level mutations remain ignored.
         parsed = parse_command(event.get("text") or "")
-        if not parsed or parsed[0] != "STATUS" or (parsed[1] and parsed[1] != config.INSTANCE_ID):
+        if not parsed or (parsed[1] and parsed[1] != config.INSTANCE_ID):
+            return False
+        if parsed[0] == "STATUS":
+            table = "status_requests"
+        elif parsed[0] == "KICK" and parsed[1] == config.INSTANCE_ID:
+            table = "kick_requests"
+        else:
             return False
         with _database() as db:
             inserted = db.execute(
-                "INSERT OR IGNORE INTO status_requests(id,channel,ts) VALUES(?,?,?)",
+                f"INSERT OR IGNORE INTO {table}(id,channel,ts) VALUES(?,?,?)",
                 (_thread_id(channel, event["ts"]), channel, event["ts"])).rowcount
         if inserted:
             _wake.set()
@@ -439,6 +447,23 @@ def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
     return None
 
 
+def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
+    """Only KICK, with the same owned-thread and reconciliation safeguards."""
+    with _database() as db:
+        row = db.execute("SELECT id,channel,ts FROM kick_requests WHERE handled=0 "
+                         "ORDER BY CAST(ts AS REAL),ts LIMIT 1").fetchone()
+    if row:
+        msg_id, channel, ts = row
+        return msg_id, _thread_id(channel, ts)
+    if thread_id:
+        _reconcile(thread_id)
+        for msg_id, text, channel, root_ts in _pending(thread_id):
+            parsed = parse_command(text)
+            if parsed and parsed[0] == "KICK" and (not parsed[1] or parsed[1] == config.INSTANCE_ID):
+                return msg_id, _thread_id(channel, root_ts)
+    return None
+
+
 def poll_reply(thread_id: str):
     pending = _pending(thread_id)
     if not pending:
@@ -455,6 +480,7 @@ def mark_processed(message_id: str) -> None:
     with _database() as db:
         db.execute("UPDATE messages SET handled=1 WHERE id=?", (message_id,))
         db.execute("UPDATE status_requests SET handled=1 WHERE id=?", (message_id,))
+        db.execute("UPDATE kick_requests SET handled=1 WHERE id=?", (message_id,))
 
 
 def drain_thread(thread_id: str) -> int:

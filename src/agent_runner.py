@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -10,6 +11,7 @@ from contextvars import ContextVar
 import claude_runner
 import activity
 import config
+import turn_control
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -151,6 +153,18 @@ from the OpenSpec change artifacts and git history before acting; do not ask the
 user to repeat information that is available there.
 """
 
+_KICK_RECOVERY_CONTEXT = """The user interrupted the previous coding turn with KICK.
+The task, branch and approvals are unchanged. Inspect the actual git working tree,
+OpenSpec artifacts and completed tasks first; preserve partial valid work, repair
+unfinished edits and continue from the last verified checkpoint. Do not blindly
+repeat completed tasks or skip tests/reviews because of this interruption.
+"""
+
+
+def _after_kick(prompt: str) -> str:
+    state = _task_context.get() or {}
+    return _KICK_RECOVERY_CONTEXT + "\n" + prompt if state.get("kick_pending") else prompt
+
 
 def _opencode_environment() -> dict[str, str]:
     env = os.environ.copy()
@@ -264,7 +278,8 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     every stdout line to on_line as it arrives. Raises subprocess.TimeoutExpired (with
     the partial output) after killing the process, as subprocess.run would."""
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+    turn_control.register(proc)
     stderr_chunks: list[str] = []
     stderr_reader = threading.Thread(
         target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
@@ -273,7 +288,10 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
 
     def _kill_on_timeout() -> None:
         timed_out.set()
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     timer = threading.Timer(timeout, _kill_on_timeout)
     timer.daemon = True
@@ -292,7 +310,10 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
         stderr_reader.join(timeout=5)
         proc.stdout.close()
         proc.stderr.close()
+        kicked = turn_control.release(proc)
     stdout, stderr = "".join(stdout_lines), "".join(stderr_chunks)
+    if kicked:
+        raise turn_control.TurnKicked("user requested KICK")
     if timed_out.is_set():
         raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
@@ -342,7 +363,7 @@ def run(prompt: str, contract: bool = True):
     _begin_turn()
     try:
         if contract:
-            prompt = _language_prompt(prompt)
+            prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
             return claude_runner.run(prompt, contract=contract)
         if config.AGENT == "opencode":
@@ -356,7 +377,7 @@ def run(prompt: str, contract: bool = True):
 def resume(session_id: str, prompt: str):
     _begin_turn(session_id)
     try:
-        prompt = _language_prompt(prompt)
+        prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
             return claude_runner.resume(session_id, prompt)
         if config.AGENT == "opencode":

@@ -257,12 +257,19 @@ def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
     return (found[0], found[1]) if found else None
 
 
-def _poll_command(*, only_status: bool = False) -> tuple[str, str, str, bool, str] | None:
+def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
+    """A targeted or task-thread KICK; never consume other mailbox commands."""
+    found = _poll_command(only_kick=True)
+    return (found[0], found[1]) if found else None
+
+
+def _poll_command(*, only_status: bool = False,
+                  only_kick: bool = False) -> tuple[str, str, str, bool, str] | None:
     service = _gmail()
     processed = _load_processed()
     listing = service.users().messages().list(
-        userId="me", q=("STATUS " if only_status else
-                        "(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) ")
+        userId="me", q=("STATUS " if only_status else "KICK " if only_kick else
+                        "(ABORT OR STATUS OR KICK OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) ")
                        + "newer_than:2d -in:drafts", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
@@ -279,6 +286,8 @@ def _poll_command(*, only_status: bool = False) -> tuple[str, str, str, bool, st
         body = _strip_quoted(_extract_body(message.get("payload", {})))
         command = command_for_me(body, headers.get("subject", ""))
         if only_status and command != "STATUS":
+            continue
+        if only_kick and command != "KICK":
             continue
         if command:
             _cmd, target, note = parse_command(body)

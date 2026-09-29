@@ -25,6 +25,7 @@ import handoffs
 import milestones
 import proposal_package
 import task_source
+import turn_control
 import conversation as gmail_client
 import prompts
 
@@ -261,6 +262,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
     """
     state["session_id"] = result.session_id
+    state.pop("kick_pending", None)
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
                               f"Session: `{result.session_id}`\n\n{result.output.strip()}\n")
@@ -2794,7 +2796,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
               "evidence_url", "milestones_announced", "proposal_snapshot", "proposal_sent_key",
               "quality_report", "internal_review_report", "e2e_passed",
-              "implementation_summary", "pending_feedback", "architecture_report")
+              "implementation_summary", "pending_feedback", "architecture_report",
+              "kick_pending", "kick_count")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -3157,6 +3160,15 @@ def check_commands(state: dict) -> bool:
         return False
     if config.COMM_CHANNEL == "slack" and _handle_held_command(msg_id, thread_id, command, note):
         return False  # command addressed a held task, not the active one
+    if command == "KICK":
+        # The independent supervisor interrupts live turns; here there is no
+        # running agent to restart. Never fall through to ABORT.
+        gmail_client.mark_processed(msg_id)
+        body = ("No hay un turno del agente en ejecución; la tarea sigue igual."
+                if state.get("task_language", "English").casefold() == "spanish" else
+                "No coding-agent turn is running; the task is unchanged.")
+        gmail_client.send(subject(state, "kick"), body, thread_id)
+        return False
     if command == "CONTINUE":
         if not _request_continue(thread_id, note):
             if thread_id and thread_id == state.get("thread_id"):
@@ -3612,11 +3624,33 @@ def _status_supervisor_once() -> bool:
     """Serve one inquiry without touching the FSM or starting another agent turn."""
     state = dict(_current_state) if _current_state is not None else load_state()
     working = _work_active.is_set() and state.get("state") in PHASES
-    if config.COMM_CHANNEL == "email" and not working:
-        return False  # normal mailbox polling owns STATUS between turns
-    thread = state.get("thread_id") if working else None
+    turn = agent_runner.turn_snapshot()
+    thread = state.get("thread_id") if _work_active.is_set() and turn.get("active") else None
     with _status_command_lock:
-        request = gmail_client.poll_status(thread)
+        kick = gmail_client.poll_kick(thread) if turn.get("active") or config.COMM_CHANNEL == "slack" else None
+        if kick:
+            msg_id, reply_thread = kick
+            if turn_control.request_kick():
+                gmail_client.mark_processed(msg_id)
+                text = ("Reiniciando este turno del agente; conservaré la tarea y el trabajo ya guardado."
+                        if state.get("task_language", "English").casefold() == "spanish" else
+                        "Restarting this agent turn; keeping the task and saved work.")
+                try:
+                    gmail_client.send(subject(state, "kick"), text, reply_thread)
+                except Exception:
+                    log.exception("turn kicked but acknowledgment could not be sent")
+                return True
+            if not turn.get("active"):
+                gmail_client.mark_processed(msg_id)
+                text = ("No hay un turno del agente en ejecución; la tarea sigue igual."
+                        if state.get("task_language", "English").casefold() == "spanish" else
+                        "No coding-agent turn is running; the task is unchanged.")
+                gmail_client.send(subject(state, "kick"), text, reply_thread)
+                return True
+            return False  # process is starting; leave KICK queued
+        if config.COMM_CHANNEL == "email" and not working:
+            return False  # normal mailbox polling owns STATUS between turns
+        request = gmail_client.poll_status(state.get("thread_id") if working else None)
         if not request:
             return False
         if config.COMM_CHANNEL == "email" and not _work_active.is_set():
@@ -3879,6 +3913,19 @@ def _run_loop() -> None:
                 state.pop("retire_thread_id")
                 save_state(state)
             backoff = config.POLL_INTERVAL_SECONDS
+        except turn_control.TurnKicked:
+            # Discard only this tick's in-memory state. Last completed checkpoint
+            # and actual files remain authoritative; retry the same phase.
+            state = load_state()
+            if state.get("item"):
+                state["kick_pending"] = True
+                state["kick_count"] = state.get("kick_count", 0) + 1
+                save_state(state)
+            _current_state = state
+            log.info("user kicked agent turn; resuming %s without consuming failure budget",
+                     state.get("state"))
+            backoff = config.POLL_INTERVAL_SECONDS
+            continue
         except Exception as error:
             if _is_transient_network_error(error):
                 # A network blip is not a fault of this state: one line, no traceback,
