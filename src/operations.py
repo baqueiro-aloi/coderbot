@@ -146,7 +146,7 @@ def resources(names):
 
 def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None,
         exclusive=()):
-    with resources(exclusive):
+    with budget(timeout), resources(exclusive):
         return _run(argv, cwd=cwd, env=env, timeout=timeout, input=input, kind=kind, cleanup=cleanup)
 
 

@@ -20,9 +20,14 @@ def event(task_id, **metadata):
 
 @contextmanager
 def span(task_id, kind, label):
-    store = ExecutionStore(config.DATA_DIR / "execution.sqlite")
+    store = None
+    id = None
     started = time.time()
-    id = store.put("operation", task_id=task_id, status="running", data={"kind": kind, "label": label, "started": started})
+    try:
+        store = ExecutionStore(config.DATA_DIR / "execution.sqlite")
+        id = store.put("operation", task_id=task_id, status="running", data={"kind": kind, "label": label, "started": started})
+    except Exception:
+        log.warning("performance span unavailable", exc_info=True)
     status = "complete"
     try:
         yield
@@ -30,8 +35,12 @@ def span(task_id, kind, label):
         status = "interrupted"
         raise
     finally:
-        store.put("operation", task_id=task_id, id=id, status=status,
-                  data={"kind": kind, "label": label, "started": started, "finished": time.time()})
+        if store and id:
+            try:
+                store.put("operation", task_id=task_id, id=id, status=status,
+                          data={"kind": kind, "label": label, "started": started, "finished": time.time()})
+            except Exception:
+                log.warning("performance span completion unavailable", exc_info=True)
 
 
 def summarize(rows):

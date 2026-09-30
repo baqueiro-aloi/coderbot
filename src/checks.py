@@ -5,6 +5,7 @@ import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 import operations
 import preparation
@@ -16,7 +17,7 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(execute, check, repo, store, task_id) for check in plan]
+        futures = [pool.submit(copy_context().run, execute, check, repo, store, task_id) for check in plan]
         return [future.result() for future in futures]
 
 
@@ -27,7 +28,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
-        key_path=store.path.parent / "identity.key")
+        tools=tool_versions(check.argv, cwd), key_path=store.path.parent / "identity.key")
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(), "version": 1})
     previous = store.reusable_check(task_id, identity) if reuse else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
@@ -66,3 +67,24 @@ def execute(check, repo, store, task_id, *, reuse=True):
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, status="complete",
               data={"check": check.to_dict(), "result": result})
     return result
+
+
+def tool_versions(argv, cwd):
+    """Version probes are part of identity; unknown means conservative no reuse."""
+    executable = argv[0]
+    versions = {"executable": executable}
+    if Path(executable).name in ("node", "npm", "python", "python3", "pytest", "openspec"):
+        result = operations.run([executable, "--version"], cwd=cwd, timeout=15, kind="probe")
+        versions["version"] = (result.stdout + result.stderr).strip()[:300]
+    elif (Path(cwd) / executable).is_file():
+        import hashlib
+        versions["executable_hash"] = hashlib.sha256((Path(cwd) / executable).read_bytes()).hexdigest()
+    for name in ("node", "python3"):
+        if name == executable:
+            continue
+        try:
+            probe = operations.run([name, "--version"], cwd=cwd, timeout=15, kind="probe")
+            versions[name] = (probe.stdout + probe.stderr).strip()[:100]
+        except OSError:
+            versions[name] = "unavailable"
+    return versions
