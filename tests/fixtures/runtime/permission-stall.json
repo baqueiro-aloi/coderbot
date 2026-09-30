@@ -1,0 +1,11 @@
+{
+  "runtime_version": "1.18.18",
+  "root_session": "ses_fixture_root",
+  "events": [
+    {"at": 0, "type": "session.created", "properties": {"info": {"id": "ses_fixture_child", "parentID": "ses_fixture_root"}}},
+    {"at": 1, "type": "message.part.updated", "properties": {"part": {"sessionID": "ses_fixture_root", "type": "tool", "tool": "bash", "state": {"status": "completed", "output": "4 passed (1.1m)", "time": {"start": 0, "end": 1000}}}}},
+    {"at": 13, "type": "permission.asked", "properties": {"id": "per_fixture", "sessionID": "ses_fixture_child", "permission": "external_directory", "patterns": ["/scratch/outbox/*"]}},
+    {"at": 6603, "type": "fixture.timeout", "properties": {"sessionID": "ses_fixture_root"}},
+    {"at": 6736, "type": "fixture.resume", "properties": {"sessionID": "ses_fixture_root"}}
+  ]
+}
