@@ -14,3 +14,16 @@ deben fallar si una instalación está incompleta.
 Los harnesses compartidos mantienen workers=1. Para incrementarlos primero
 aislar propietarios de sesión, bases/workspaces, puertos, containers e imágenes.
 Compartir nombres de proyecto Compose o carpetas de output no constituye aislamiento.
+
+## Fixture PICA
+
+`pica_harness.grouped` conserva un lock `pica:harness` entre los dos proveedores:
+los puertos 8111/5177 y el workspace compartido requieren ejecución serial. La
+prueba del scheduler abre procesos reales y comprueba que una segunda operación
+con el mismo recurso espera a la primera. Una prueba de cleanup abre un puerto
+en un nieto y verifica que puede reutilizarse después de cancelar el grupo.
+
+Para habilitar workers de Playwright, cada worker debe recibir un workspace y
+OUTPUT_PATH propios y metadata de owner escrita antes de hacer visible la sesión.
+Para ejecutar proveedores simultáneamente deben recibir puertos y nombres de
+imagen/containers propios. Hasta completar esos cambios, mantener `workers: 1`.

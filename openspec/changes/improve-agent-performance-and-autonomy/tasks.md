@@ -63,7 +63,7 @@
 - [x] 7.3 Separar registry público y scopes privados en preparación/setup sin exponer o sobrescribir credenciales; probar auth privada requerida y paquetes públicos.
 - [x] 7.4 Definir contrato opcional de harness prepare/run/suites/providers/resources/artifacts y adapter legacy compatible.
 - [x] 7.5 Implementar adapter/fixture PICA con agrupación por proveedor, preparación por lockfile/browser/image y outputs únicos; validar flags realmente soportados.
-- [ ] 7.6 Documentar y probar aislamiento de sesiones/puertos para workers concurrentes; mantener ejecución serial cuando no se garantice aislamiento.
+- [x] 7.6 Documentar y probar aislamiento de sesiones/puertos para workers concurrentes; mantener ejecución serial cuando no se garantice aislamiento.
 
 ## 8. Evidencia y entrega recuperable
 
