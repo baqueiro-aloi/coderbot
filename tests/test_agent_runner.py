@@ -68,6 +68,13 @@ class StreamingTests(unittest.TestCase):
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
+    def test_role_routing_does_not_change_primary_model(self):
+        with patch.object(agent_runner.config, "OPENCODE_ROLE_MODELS", {"explore": "provider/fast"}), \
+             patch.object(agent_runner.config, "OPENCODE_ROLE_EFFORTS", {"explore": "low"}):
+            config = json.loads(agent_runner._opencode_environment()["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(config["model"], agent_runner.config.OPENCODE_MODEL)
+        self.assertEqual(config["agent"]["explore"]["model"], "provider/fast")
+        self.assertEqual(config["agent"]["explore"]["options"]["reasoningEffort"], "low")
     def setUp(self):
         self.transport = patch.object(agent_runner.config, "OPENCODE_TRANSPORT", "cli")
         self.transport.start()

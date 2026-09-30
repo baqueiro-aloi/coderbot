@@ -212,6 +212,10 @@ def _opencode_environment() -> dict[str, str]:
         if not isinstance(agents.setdefault(name, {}), dict):
             raise RuntimeError("OPENCODE_CONFIG_CONTENT agent entries must be objects")
         agents[name]["permission"] = {"*": "allow"}
+    for role, model in config.OPENCODE_ROLE_MODELS.items():
+        agents.setdefault(role, {})["model"] = model
+    for role, effort in config.OPENCODE_ROLE_EFFORTS.items():
+        agents.setdefault(role, {}).setdefault("options", {})["reasoningEffort"] = effort
     if config.OPENCODE_EFFORT:
         if config.OPENCODE_EFFORT not in ("none", "minimal", "low", "medium", "high", "xhigh"):
             raise RuntimeError("OPENCODE_EFFORT must be none, minimal, low, medium, high or xhigh")

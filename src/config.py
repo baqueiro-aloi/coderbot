@@ -1,5 +1,6 @@
 """Central configuration for codebot. Everything env-overridable."""
 import os
+import json
 import re
 import secrets
 from pathlib import Path
@@ -194,6 +195,8 @@ OPENCODE_EFFORT = (os.environ.get("OPENCODE_EFFORT") or "").strip().lower()
 OPENCODE_TRANSPORT = os.environ.get("CODEBOT_OPENCODE_TRANSPORT", "http")
 DETERMINISTIC_CHECKS = os.environ.get("CODEBOT_DETERMINISTIC_CHECKS", "on").lower() != "off"
 CONTEXT_TOKEN_BUDGET = int(os.environ.get("CODEBOT_CONTEXT_TOKEN_BUDGET", "80000"))
+OPENCODE_ROLE_MODELS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_MODELS", "{}"))
+OPENCODE_ROLE_EFFORTS = json.loads(os.environ.get("CODEBOT_OPENCODE_ROLE_EFFORTS", "{}"))
 
 SUPERPOWERS_VERSION = "v6.3.0"
 SUPERPOWERS_PLUGIN_DIR = Path(os.environ.get(
