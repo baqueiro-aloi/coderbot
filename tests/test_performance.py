@@ -7,6 +7,14 @@ from execution_store import ExecutionStore
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_overlapping_intervals_are_not_double_counted(self):
+        rows = [{"status": "complete", "data": {"started": 0, "finished": 10}},
+                {"status": "complete", "data": {"started": 5, "finished": 15}},
+                {"status": "running", "data": {"started": 20}}]
+        result = performance.summarize(rows)
+        self.assertEqual(result["accumulated_seconds"], 20)
+        self.assertEqual(result["active_wall_seconds"], 15)
+        self.assertEqual(result["incomplete_operations"], 1)
     def test_status_includes_controller_operation_without_llm(self):
         import main
         import operations
