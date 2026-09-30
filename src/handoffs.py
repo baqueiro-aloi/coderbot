@@ -29,6 +29,14 @@ def verification(state: dict) -> str:
                  else "- OpenSpec: outcome unavailable")
     checks = gate.get("commands") or []
     lines.append("- Checks: " + ("; ".join(checks) if checks else "outcome unavailable"))
+    final = state.get("final_check_report") or {}
+    for check in final.get("checks", []):
+        result = check.get("gate", {}).get("status", check.get("status", "unavailable"))
+        lines.append(f"- Final {check.get('check', 'check')}: {result}")
+        if check.get("gate", {}).get("preexisting"):
+            lines.append("  Pre-existing: " + "; ".join(check["gate"]["preexisting"]))
+        if check.get("status") in ("unknown", "infrastructure"):
+            lines.append("  Outcome not established; not reported as passed.")
     if gate.get("preexisting"):
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"

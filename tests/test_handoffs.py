@@ -44,6 +44,7 @@ class HumanHandoffs(unittest.TestCase):
             state = {"state": "WAIT_MERGE", "slug": "example", "branch": "bot-example",
                      "item": "Create API", "pr_url": "https://github.com/a/b/pull/3"}
             with patch.object(main, "save_state"), \
+                 patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
                  patch.object(main, "git"), \
                  patch.object(main, "email") as send:
                 main._queue_push(state, "feedback", "Added pagination and ran unit tests",
