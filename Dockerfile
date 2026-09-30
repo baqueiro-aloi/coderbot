@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # root/apt to install, which `bot` doesn't have at runtime. Install those once here,
 # as root, at build time. `install-deps` only touches OS packages (not the browser
 # binary itself), so it isn't tied to any particular target repo's Playwright version.
-RUN npx --yes playwright install-deps chromium \
+RUN npx --yes playwright@1.58.2 install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code@2.1.257 opencode-ai@1.18.18 @fission-ai/openspec@1.9.0 \
@@ -36,6 +36,9 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 RUN useradd -u 501 -m -s /bin/bash bot
 
 COPY agent-plugin /opt/coderbot/agent-plugin
+RUN npm install --prefix /opt/coderbot/runtime @opencode-ai/plugin@1.18.18 playwright@1.58.2 \
+    && PLAYWRIGHT_BROWSERS_PATH=/opt/coderbot/browsers /opt/coderbot/runtime/node_modules/.bin/playwright install chromium \
+    && chmod -R a+rX /opt/coderbot/browsers
 # The openspec-* skills are per-project files `openspec init` writes into a repo's
 # .claude/ and .opencode/ trees; target repos don't carry them, so generate them here
 # from the pinned CLI (same version the agent runs) into a managed dir both runners

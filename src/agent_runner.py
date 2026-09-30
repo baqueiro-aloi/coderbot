@@ -176,6 +176,7 @@ def _after_kick(prompt: str) -> str:
 
 def _opencode_environment() -> dict[str, str]:
     env = os.environ.copy()
+    env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
     try:
         inline = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
     except json.JSONDecodeError as err:
