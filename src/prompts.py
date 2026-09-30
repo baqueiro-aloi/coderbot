@@ -194,8 +194,8 @@ The user approved the proposal. Invoke `coderbot-openspec-workflow`,
 Work through every task in tasks.md, marking each complete only after its test passes.
 Tasks that do not depend on each other (e.g. touching different modules or layers)
 MUST be implemented concurrently by multiple subagents, each following strict TDD for
-its task; serialise only the tasks that build on another task's output, and run the
-integrated test suite yourself once the parallel tasks land.
+its task; serialise only the tasks that build on another task's output. Run focused
+integration checks once the tasks land; coderbot owns the complete final suite.
 If a test or technical check fails, invoke `systematic-debugging` before fixing it.
 Mandatory:
 $e2e_note
@@ -245,6 +245,8 @@ Invoke `coderbot-openspec-workflow` for internal review of change
 $slug. Internal review is mandatory. Invoke `requesting-code-review` with a fresh
 reviewer subagent. Prior test evidence and future external review are not substitutes.
 Fix every Critical or Important finding, rerun tests covering the fixes, and obtain a clean re-review.
+Review the correction diff on re-review; avoid rerunning complete suites or
+repeating a full review for administrative/document-only changes.
 Fix unrelated findings concurrently via separate subagents.
 Commit all review fixes before emitting the pass contract. Emit
 exactly one completion contract as the final standalone line, with no text after it:

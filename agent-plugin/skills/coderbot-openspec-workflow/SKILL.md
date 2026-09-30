@@ -18,9 +18,9 @@ Use the checkout coderbot supplied. Treat approved OpenSpec artifacts as the onl
 | EXPLORING | The agent uses `openspec-explore`; OpenSpec holds discoveries and coderbot controls transition. |
 | PROPOSING | The agent uses `openspec-propose`; OpenSpec holds proposal, design, specs, and tasks; coderbot obtains approval. |
 | IMPLEMENTING | The agent uses `openspec-apply-change` and required Superpowers skills, including `test-driven-development`; coderbot owns state. |
-| VERIFYING | The agent runs fresh full relevant verification, reports command evidence, and strictly validates OpenSpec using `verification-before-completion`; coderbot decides transition. |
+| VERIFYING | The agent runs focused checks and validates OpenSpec; coderbot owns the complete final suites and baseline comparison after independent review. |
 | INTERNAL_REVIEW | The agent obtains a fresh internal review using `requesting-code-review`. Prior test evidence and future external review are not substitutes; coderbot owns remediation state. |
-| E2E repair | If repair changes tracked code, the agent uses strict TDD, then repeats VERIFYING and INTERNAL_REVIEW before coderbot retries E2E. |
+| E2E repair | Repair only confirmed new regressions using focused checks, obtain independent re-review of the fix, and let coderbot invalidate affected checks before the final gate. |
 | ARCHIVING / OPEN_PR | Coderbot alone chooses archive timing, archives, pushes, creates the PR, and requests merge approval. |
 
 ## Hard Boundaries
@@ -41,7 +41,7 @@ Wall-clock time is the cost that matters in a headless run. Whenever work splits
 |---|---|
 | EXPLORING | One subagent per affected area (data model, API, UI, tests, conventions). |
 | IMPLEMENTING | One subagent per independent `tasks.md` task, each doing strict TDD; serialise only dependent tasks. |
-| VERIFYING | Independent verification commands (unit, lint, types, e2e, OpenSpec validation) run concurrently. |
+| VERIFYING | Request independent focused checks with CHECK_PLAN; do not rerun full suites or baseline work already owned by coderbot. |
 | INTERNAL_REVIEW / review threads | Unrelated findings or threads fixed by separate subagents. |
 
 Serialise only steps that genuinely depend on an earlier result. Parallel subagents inherit every hard boundary above.
