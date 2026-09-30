@@ -77,6 +77,8 @@ def discover(repo):
                     else ["npm", "run", name], cwd=directory, inputs=[directory],
                     reporter="node" if name == "test" and "node --test" in scripts[name] else "text"))
     if (repo / "e2e/run.sh").exists():
-        checks.append(Check("e2e", ["./run.sh"], cwd="e2e", inputs=["*"],
-                            resources=["harness:" + str(repo.resolve())], reporter="playwright"))
+        import harness_contract
+        managed = harness_contract.load(repo)
+        checks.extend(managed if managed is not None else [Check("e2e", ["./run.sh"], cwd="e2e", inputs=["*"],
+                            resources=["harness:" + str(repo.resolve())], reporter="playwright")])
     return checks
