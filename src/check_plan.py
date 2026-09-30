@@ -45,6 +45,12 @@ def load(repo):
     return parse(json.loads(path.read_text())) if path.exists() else None
 
 
+def reported(output):
+    lines = [line[len("CHECK_PLAN:"):].strip() for line in output.splitlines()
+             if line.startswith("CHECK_PLAN:")]
+    return parse(json.loads(lines[-1])) if lines else []
+
+
 def discover(repo):
     repo = Path(repo)
     configured = load(repo)

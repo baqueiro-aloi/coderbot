@@ -1,9 +1,13 @@
 import unittest
-from check_plan import parse
+from check_plan import parse, reported
 from check_results import parse_output
 
 
 class CheckPlanTests(unittest.TestCase):
+    def test_reported_plan_requests_real_execution(self):
+        self.assertEqual(reported("QUALITY_GATE: {}"), [])
+        plan = reported('summary\nCHECK_PLAN: {"version":1,"checks":[{"id":"unit","argv":["test"],"scope":"focused"}]}')
+        self.assertEqual(plan[0].scope, "focused")
     def test_unknown_output_never_becomes_identifiable_failure(self):
         self.assertEqual(parse_output("connection failed", 1, "unittest")["status"], "unknown")
         result = parse_output("FAIL: test_x (tests.X)\n----------------------------------------------------------------------\nAssertionError: bad\n----------------------------------------------------------------------\nRan 1 test in 0.1s\nFAILED", 1, "unittest")

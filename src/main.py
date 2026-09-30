@@ -19,6 +19,8 @@ import agent_runner
 import activity
 import phase_checkpoint
 import operations
+import check_plan
+import checks
 import architecture_report
 import config
 import drive_client
@@ -265,6 +267,13 @@ def handle_result(state: dict, result, phase: str) -> bool:
     keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
     """
     state["session_id"] = result.session_id
+    requested = check_plan.reported(result.output)
+    if requested:
+        database = phase_checkpoint.store()
+        task_id = database.task_identity(state, config.REPO_PATH)
+        outcomes = checks.execute_plan(requested, config.REPO_PATH, database, task_id)
+        state["focused_check_results"] = outcomes
+        state["reported_check_plan"] = [check.to_dict() for check in requested]
     state.pop("kick_pending", None)
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"

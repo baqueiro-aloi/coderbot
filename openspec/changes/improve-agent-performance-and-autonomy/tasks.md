@@ -34,7 +34,7 @@
 - [x] 4.3 Ejecutar checks bajo supervisor con logs/artifacts por run y resultados estructurados; añadir parsers JUnit/JSON y fallback de texto testeado.
 - [x] 4.4 Implementar reutilización por identidad y causa de invalidación; probar cambio de código, lockfile, runtime, entorno y check interrumpido.
 - [x] 4.5 Implementar scheduler con recursos exclusivos y límites de concurrencia; probar conflictos de puertos, checkout, preparación e imágenes.
-- [ ] 4.6 Registrar checks focalizados solicitados por agente y ejecutados por controller sin convertir contratos textuales en evidencia ficticia.
+- [x] 4.6 Registrar checks focalizados solicitados por agente y ejecutados por controller sin convertir contratos textuales en evidencia ficticia.
 
 ## 5. Baseline y suite completa final
 

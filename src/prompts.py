@@ -200,6 +200,9 @@ If a test or technical check fails, invoke `systematic-debugging` before fixing 
 Mandatory:
 $e2e_note
 - Commit your work on branch $branch with clear messages.
+- Request focused controller-run checks by emitting a standalone line:
+  CHECK_PLAN: {"version":1,"checks":[{"id":"focused","argv":["<tool>","<arg>"],"cwd":".","scope":"focused","inputs":["<affected path>"]}]}
+  This requests real execution; it is not itself evidence that a check passed.
 - Coderbot retains integration authority: do not push, create a PR, merge, or archive.
 - Do not commit any evidence file (screenshot, recording, report) - those are sent through the configured channel, never
   committed to the repo (see the evidence contract above).
