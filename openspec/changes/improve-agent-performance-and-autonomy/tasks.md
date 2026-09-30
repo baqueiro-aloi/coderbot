@@ -92,7 +92,7 @@
 - [x] 10.3 Implementar exportador de métricas con tiempos exclusivos y solapados, unknown explícito y retención acotada sin perder checkpoints activos.
 - [x] 10.4 Crear benchmark de ciclo con fake provider y latencias controladas para permisos hijos, bloqueo, baseline, crash y fallo de entrega.
 - [x] 10.5 Comparar baseline/nueva versión y publicar resultados reproducibles: cero esperas de permiso, bloqueo local detectado en menos de un minuto, checks deduplicados y ejecución normal sin KICK; medir objetivo de 80% menos tiempo improductivo sin afirmarlo si no se cumple.
-- [ ] 10.6 Ejecutar regresiones focalizadas por incremento y suite completa final de Coderbot; validar ambos runners, canales y backlogs con fault injection.
+- [x] 10.6 Ejecutar regresiones focalizadas por incremento y suite completa final de Coderbot; validar ambos runners, canales y backlogs con fault injection.
 
 ## 11. Documentación y rollout coordinado
 
