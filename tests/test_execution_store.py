@@ -6,6 +6,20 @@ from execution_store import ENTITIES, ExecutionStore
 
 
 class ExecutionStoreTests(unittest.TestCase):
+    def test_legacy_cursor_and_attempt_reconcile_after_crash(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            legacy = {"state": "VERIFYING", "branch": "feature", "base_sha": "abc"}
+            first = store.begin_attempt(dict(legacy), root)
+            restored = dict(legacy)
+            self.assertEqual(store.begin_attempt(restored, root), first)
+            task_id = restored["execution_task_id"]
+            checkpoint = store.put("checkpoint", task_id=task_id, status="complete",
+                data={"state_patch": {"state": "INTERNAL_REVIEW"}})
+            store.reconcile(restored, root)
+            self.assertEqual(restored["state"], "INTERNAL_REVIEW")
+            self.assertEqual(restored["execution_checkpoint_id"], checkpoint)
+
     def test_all_entities_survive_reopening_and_migration(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "execution.sqlite"
