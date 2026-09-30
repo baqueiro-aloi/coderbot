@@ -98,6 +98,6 @@
 
 - [x] 11.1 Actualizar README, env example, setup y docs de runtime/harness/checks/checkpoints con defaults, migración y diagnósticos observables.
 - [x] 11.2 Preparar staging aislado y verificar principal/subagentes/reanudación, suite final y artifacts con presupuesto acotado sin afectar tarea remota activa.
-- [ ] 11.3 Entregar cambio coordinado del harness PICA en su repositorio con preparación separada, agrupación y manifest; validar con controller nuevo antes de activarlo en producción.
-- [ ] 11.4 Ejecutar rollout de imagen/config tras checkpoint de la tarea activa y backup durable; registrar versión y comparación antes/después.
+- Tarea 11.3 retirada por decisión explícita del usuario: no modificar PICA ni otra aplicación destino. Los adaptadores y fixtures de Coderbot permanecen; no se considera implementado un cambio al harness externo.
+- [ ] 11.4 Ejecutar rollout de imagen/config únicamente de Coderbot tras checkpoint de la tarea activa y backup durable; registrar versión y comparación antes/después.
 - [ ] 11.5 Verificar recuperación/rollback conservando trabajo, trust-total y datos aditivos; documentar resultado y tareas de rollout realmente pendientes.

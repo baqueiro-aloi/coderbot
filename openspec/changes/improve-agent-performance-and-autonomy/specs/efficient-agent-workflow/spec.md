@@ -23,7 +23,7 @@ Coderbot SHALL transmitir a cada fase requisitos aprobados, decisiones, diff, ch
 - **THEN** se serializan o se aíslan antes de ejecutarse concurrentemente
 
 ### Requirement: Reusable dependency preparation
-Coderbot SHALL preparar herramientas gestionadas y dependencias una vez por fingerprint de entradas y verificar su disponibilidad antes de reutilizarlas. SHALL proporcionar contratos de harness compatibles con agrupación de specs/proveedor y artifacts explícitos; los harnesses existentes SHALL conservar una ruta compatible sin cachés injustificadas.
+Coderbot SHALL preparar sus herramientas gestionadas y dependencias una vez por fingerprint de entradas y verificar su disponibilidad antes de reutilizarlas. SHALL consumir capacidades y contratos ya disponibles del harness mediante adaptadores del controlador. Los harnesses legacy SHALL conservar una ruta compatible sin cachés injustificadas; este cambio SHALL NOT requerir modificar código, configuración o harness de la aplicación destino.
 
 #### Scenario: Segunda ejecución sin cambios
 - **WHEN** el fingerprint y las dependencias verificadas permanecen iguales
@@ -32,6 +32,10 @@ Coderbot SHALL preparar herramientas gestionadas y dependencias una vez por fing
 #### Scenario: Cambio de lockfile
 - **WHEN** cambian las entradas de preparación
 - **THEN** se invalida el estado preparado y se actualizan dependencias antes de ejecutar checks
+
+#### Scenario: Harness legacy sin preparación separada
+- **WHEN** el harness existente realiza instalaciones internas y no declara preparación reutilizable
+- **THEN** Coderbot conserva la invocación compatible y deduplica sus ejecuciones válidas sin editar el harness ni afirmar que eliminó sus instalaciones internas
 
 ### Requirement: Lightweight administrative operations
 Mensajes estáticos y comandos explícitos SHALL utilizar rutas deterministas. Las utilities que requieran LLM SHALL ejecutarse sin herramientas operativas, con modelo/esfuerzo y presupuesto propios, conservando texto ya localizado para conversación e historial.

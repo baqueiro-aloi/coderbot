@@ -2,7 +2,7 @@
 
 Ver `proposal.md` para motivación y las seis delta specs para contratos. La aplicación Python tiene una FSM en `src/main.py`, runners Claude/OpenCode y persistencia JSON; `activity.py` conserva solo el turno actual y consulta SQLite de OpenCode. El runtime desplegado fija OpenCode 1.18.18, cuyo CLI atiende permisos únicamente del sessionID principal. Los hijos conservan herramientas en running al solicitar acceso externo. El entorno se considera de confianza total por decisión explícita del usuario.
 
-`VERIFYING` acepta fallos reproducidos en main, mientras `do_e2e` exige exit code cero. Prompts y skills favorecen suites y reviews repetidas. `evidence.py` busca rutas fijas y regraba; el harness PICA observado publica bajo outbox, instala dependencias y construye una imagen por ejecución, comparte puertos y usa un worker. Coderbot es un controlador genérico de repos externos: su adapter y contrato pueden mejorar esos harnesses, pero modificar PICA requiere un cambio coordinado en ese repositorio, sin asumir que todo target soporta flags nuevos.
+`VERIFYING` acepta fallos reproducidos en main, mientras `do_e2e` exige exit code cero. Prompts y skills favorecen suites y reviews repetidas. `evidence.py` busca rutas fijas y regraba; el harness PICA observado publica bajo outbox, instala dependencias y construye una imagen por ejecución, comparte puertos y usa un worker. Coderbot es un controlador genérico de repos externos: este cambio mejora su invocación y recogida de resultados, sin modificar PICA ni exigir flags nuevos a un target.
 
 ## Goals / Non-Goals
 
@@ -14,7 +14,7 @@ Ver `proposal.md` para motivación y las seis delta specs para contratos. La apl
 
 **Non-Goals:**
 - Cambiar el modelo principal a ciegas, quitar aprobación de propuestas/merge o garantizar una aceleración porcentual sin benchmark comparable.
-- Automatizar cambios arbitrarios en todos los harnesses externos o elevar workers sobre fixtures compartidas sin aislamiento.
+- Modificar código, configuración o harness de la aplicación destino. No elevar workers sobre fixtures compartidas sin aislamiento existente.
 - Garantizar exactly-once en APIs que no permiten reconciliación; se requiere identidad durable y best-effort documentado para esas ventanas.
 
 ## Decisions
@@ -67,7 +67,7 @@ Prompts y bridge skill coherentes: TDD útil para comportamiento, focalizados, s
 
 Crear `preparation.py` y contrato opcional versionado del harness: prepare fingerprint, suites/providers, resources y artifact manifest. Preinstalar plugins/dependencias de puente en Dockerfile; separar registry público y scope @aloi para preparación sin auth privada global innecesaria. Verificar instalaciones antes de marcar prepared. No modificar ni imprimir tokens del registry.
 
-Harness legacy conserva ./run.sh y detección; su caché solo se utiliza si preparación separada verificable. Documentar y probar adapter PICA con fixture equivalente: agrupar specs por proveedor, preparar una vez por lockfiles/browser/image inputs y outputs únicos. Cambio efectivo del run.sh de PICA se entrega coordinado como último rollout de target, después de validar controller; workers siguen 1 hasta fixtures de sesión y puertos aislados. No reutilizar un servicio mutable sin comprobar snapshot/health.
+Harness legacy conserva ./run.sh y detección; su caché solo se utiliza si preparación separada verificable ya disponible. Documentar y probar adapter PICA dentro de Coderbot: agrupar specs con el --provider existente y reconocer outputs externos. No cambiar run.sh, fixtures ni configuración de PICA. Las instalaciones internas de un harness legacy quedan a cargo de ese harness; solo se optimizan las llamadas que realiza Coderbot. Workers siguen 1 cuando el target comparte recursos. El contrato opcional se consume únicamente si ya existe, sin requerir añadir archivos al destino.
 
 ### 7. Artifacts y finalización idempotente
 
@@ -94,7 +94,7 @@ Benchmark deterministic end-to-end con fake provider y subprocess reales ligeros
 - [Presupuestos demasiado cortos] → Perfiles por operación/repo, eventos de duración y overrides explícitos; no inferir bloqueo de silencio de test.
 - [Estado JSON y SQLite divergen] → Checkpoint store autoritativo de resultados, ids/cursor reconciliables y fault injection entre escrituras.
 - [Efectos externos sin idempotency API] → Reconciliación previa y límites documentados; no prometer exactly-once.
-- [Adapter target sin nuevo contrato] → Legacy path conservador y rollout del harness independiente, sin flags inventados.
+- [Adapter target sin nuevo contrato] → Legacy path conservador, sin modificar el destino ni inventar flags.
 - [Paralelismo sobre recursos compartidos] → Scheduler y ownership explícitos antes de habilitar concurrencia.
 - [Benchmark synthetic no refleja Azure] → Separar resultados controlados de staging real y no atribuir silencios históricos desconocidos.
 
@@ -106,6 +106,6 @@ Benchmark deterministic end-to-end con fake provider y subprocess reales ligeros
 4. Integrar checks/baseline y final gate detrás de configuración de rollout; activar por defecto tras tests de ambos runners y rutas de feedback.
 5. Activar handoffs/contexto, preparación, manifests y finalización durable; actualizar setup/docs/skills coherentes.
 6. Ejecutar suites focalizadas por incremento, suite completa final local y benchmark; staging de una tarea con permisos y recursos aislados.
-7. Rollout coordinado de controller y adapter/harness PICA, después de checkpoint de tarea activa. Registrar image/version y resultados antes/después.
+7. Rollout de Coderbot después de checkpoint de tarea activa. Registrar image/version y resultados antes/después. Se elimina el rollout del harness PICA por la corrección explícita de alcance del usuario.
 
 Rollback conserva state.json y backup de store antes de migración; detener intento con cleanup y restaurar imagen/config compatibles con cursor de fase. No borrar trabajo/artifacts ni volver a un runtime con solicitudes operativas pendientes; trust-total permanece aunque se reviertan optimizaciones. Datos aditivos no requieren downgrade destructivo y los checks sin identidad antigua se vuelven a validar conservadoramente.
