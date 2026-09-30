@@ -10,6 +10,24 @@ PLUGIN_ROOT = ROOT / "agent-plugin"
 
 
 class BridgeOpenCodePluginTests(unittest.TestCase):
+    def test_subagent_limit_queues_until_assignment_finishes(self):
+        script = r"""
+import {CoderbotOpenSpecPlugin} from './agent-plugin/.opencode/plugins/coderbot-openspec.js';
+process.env.CODEBOT_MAX_SUBAGENTS = '1';
+const hook = await CoderbotOpenSpecPlugin({serverUrl: 'http://localhost', directory: '/scratch',
+ fetch: async () => ({ok: true})});
+await hook['tool.execute.before']({tool:'task',callID:'1',sessionID:'a'}, {});
+let started = false;
+const queued = hook['tool.execute.before']({tool:'task',callID:'2',sessionID:'a'}, {}).then(() => started=true);
+await new Promise(resolve => setTimeout(resolve, 10));
+if (started) throw new Error('limit ignored');
+await hook['tool.execute.after']({callID:'1'});
+await queued;
+console.log(started);
+"""
+        proc = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT,
+                              capture_output=True, text=True, timeout=10, check=True)
+        self.assertEqual(proc.stdout.strip(), "true")
     def test_trusted_hook_overrides_inherited_agent_restrictions(self):
         script = r"""
 import {CoderbotOpenSpecPlugin} from './agent-plugin/.opencode/plugins/coderbot-openspec.js';

@@ -52,6 +52,10 @@ Work in parallel whenever possible — this is a standing instruction for every 
   subagent a self-contained brief and ask it for a concise conclusion, not a file dump.
 - Only serialise steps that genuinely depend on an earlier result (e.g. running tests
   after the code they test is written, or committing after all edits are done).
+- Delegate only when an independent unit is large enough to amortize startup and
+  integration. Assign exclusive file ownership; never edit the same files from
+  several agents. Batch lightweight reads directly instead of spawning a reviewer
+  for every tiny task. Respect the runtime's concurrent-subagent limit.
 """
 
 ENVIRONMENT += PARALLELISM
