@@ -23,3 +23,12 @@ venv/bin/python -m unittest discover -s tests -t .
 El porcentaje modelado no mide throughput real de Azure ni demuestra 80% de
 mejora del ciclo productivo completo. Esa medición requiere tareas comparables
 en staging/producción separando esperas humanas, outages y calidad del resultado.
+
+## Staging Linux
+
+Imagen `codebot-performance-staging:dfb1375` construida en Azure sin reemplazar
+el servicio activo. OpenCode 1.18.18 pasó integración real principal/general/explore,
+read/write/bash externos, reanudación, dos arranques y puente HTTP. Diecinueve
+pruebas de checks/baseline/artifacts/entrega/cancelación/métricas pasaron en Python
+3.12.13, incluyendo cleanup de nietos y recursos. No se usaron credenciales de
+Jira/Slack/Azure en esas pruebas.
