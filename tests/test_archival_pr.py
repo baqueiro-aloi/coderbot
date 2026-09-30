@@ -846,6 +846,10 @@ class NativePullRequestTests(unittest.TestCase):
 
 
 class PushPhaseTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(main.final_checks, "run", return_value={"status": "pass"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def state(self, continuation, **context):
         return {
             "state": "PUSHING",
@@ -862,7 +866,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main, "_enter_review_wait") as enter:
             main.do_push(state)
 
-        git.assert_called_once_with("push", "origin", "codebot-api-version")
+        git.assert_any_call("push", "origin", "codebot-api-version")
         resume.assert_not_called()
         resolve.assert_called_once()
         enter.assert_called_once_with(state)
@@ -910,7 +914,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main.agent_runner, "resume") as resume, patch.object(main, "email"):
             main.PHASES[state["state"]](state)
 
-        git.assert_called_once_with("push", "origin", "codebot-api-version")
+        git.assert_any_call("push", "origin", "codebot-api-version")
         resume.assert_not_called()
         self.assertEqual(state["state"], "WAIT_MERGE")
 

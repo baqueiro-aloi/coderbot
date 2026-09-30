@@ -3,6 +3,8 @@ communicating with the user exclusively by email."""
 import fcntl
 import json
 import hashlib
+import tempfile
+import shutil
 import logging
 import re
 import secrets
@@ -1384,8 +1386,13 @@ def _validate_archived_change(target: Path) -> None:
     future task forever. Parse the JSON report and fail only on our own change.
     """
     command = ["openspec", "validate", "--archived", "--strict", "--no-interactive", "--json"]
-    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True,
-                          timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    with tempfile.TemporaryDirectory(prefix="codebot-archive-validation-") as scratch:
+        root = Path(scratch)
+        destination = root / "openspec/changes/archive" / target.name
+        destination.parent.mkdir(parents=True)
+        shutil.copytree(target, destination)
+        proc = subprocess.run(command, cwd=root, capture_output=True, text=True,
+                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     try:
         items = json.loads(proc.stdout)["items"]
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):

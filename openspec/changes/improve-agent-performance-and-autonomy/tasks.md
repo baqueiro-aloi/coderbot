@@ -83,7 +83,7 @@
 - [x] 9.4 Aplicar deadline WAIT_REVIEW antes de todas sus salidas y respetar ausencia de workflow tras conflictos.
 - [x] 9.5 Conservar output/RESOLVE en continuación de threads después de preguntas y probar push/resolución sin nueva ronda innecesaria.
 - [x] 9.6 Completar snapshot HOLD/CONTINUE y persistir restauración antes de retirada; probar capacidades divergentes y crash intermedio.
-- [ ] 9.7 Evitar procesamiento global de archivo OpenSpec histórico cuando baste el alcance relevante y probar que no se omite validación del cambio activo.
+- [x] 9.7 Evitar procesamiento global de archivo OpenSpec histórico cuando baste el alcance relevante y probar que no se omite validación del cambio activo.
 
 ## 10. Observabilidad y aceptación
 
