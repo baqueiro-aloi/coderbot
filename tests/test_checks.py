@@ -10,6 +10,22 @@ from execution_store import ExecutionStore
 
 
 class CheckRunnerTests(unittest.TestCase):
+    def test_reuse_and_invalidation_for_content_and_environment(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "app.py").write_text("a")
+            store = ExecutionStore(Path(root) / "data/db")
+            check = Check("unit", [sys.executable, "-c", "print('ok')"], inputs=["app.py"], env_keys=["SETTING"])
+            execute(check, repo, store, "t")
+            self.assertTrue(execute(check, repo, store, "t")["reused"])
+            (repo / "app.py").write_text("b")
+            self.assertEqual(execute(check, repo, store, "t")["repetition_reason"], "content_changed")
+            with patch.dict("os.environ", {"SETTING": "new"}):
+                self.assertEqual(execute(check, repo, store, "t")["repetition_reason"], "environment_or_command_changed")
+
     def test_runs_real_process_and_retains_structured_result_and_report(self):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root) / "repo"

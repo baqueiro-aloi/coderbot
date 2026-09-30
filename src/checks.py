@@ -18,8 +18,17 @@ def execute(check, repo, store, task_id, *, reuse=True):
         key_path=store.path.parent / "identity.key")
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(), "version": 1})
     previous = store.reusable_check(task_id, identity) if reuse else None
-    if previous:
+    if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
         return {**previous["data"]["result"], "reused": True}
+    candidates = store.list("check_run", task_id)
+    previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
+                           and r["data"]["check"].get("id") == check.id), None)
+    reason = "no_previous_result"
+    if previous_check:
+        old = previous_check["data"].get("result", {})
+        reason = ("content_changed" if old.get("content") != content else
+                  "environment_or_command_changed" if old.get("environment") != environment else
+                  "incomplete_or_unusable_result")
     run_id = uuid.uuid4().hex
     report_dir = store.path.parent / "outbox/checks" / run_id
     report_dir.mkdir(parents=True)
@@ -40,7 +49,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     report = report_dir / "output.log"
     report.write_text(output)
     result.update(check=check.id, identity=identity, content=content, environment=environment,
-                  report=str(report), started=started, finished=time.time(), reused=False)
+                  report=str(report), started=started, finished=time.time(), reused=False,
+                  repetition_reason=reason)
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, status="complete",
               data={"check": check.to_dict(), "result": result})
     return result
