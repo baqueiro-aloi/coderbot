@@ -3508,6 +3508,12 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
                          f"({_fmt_dur(now - last)} ago).")
         if turn.get("process_dead"):
             lines.append("The agent process is no longer running.")
+    for operation in operations.snapshot()[:4]:
+        elapsed = _fmt_dur(now - operation["started_at"])
+        lines.append(("Operación" if spanish else "Operation") + ": "
+                     + f"{operation['kind']} / {operation['label']} ({elapsed}); "
+                     + ("presupuesto restante" if spanish else "budget remaining")
+                     + f": {operation['remaining']:.0f}s")
     return "\n".join(lines)
 
 
