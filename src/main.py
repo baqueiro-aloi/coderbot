@@ -23,6 +23,7 @@ import check_plan
 import checks
 import final_checks
 from execution_identity import snapshot as content_snapshot
+import delivery_checkpoint
 import architecture_report
 import config
 import drive_client
@@ -1708,9 +1709,18 @@ def _render_review_threads(state: dict, key: str = "review_threads") -> str:
 
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
-    evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
+    database = phase_checkpoint.store()
+    task_id = database.task_identity(state, config.REPO_PATH)
+    identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
+    recorded = delivery_checkpoint.step(database, task_id, identity, "RECORD",
+        lambda: [str(p) for p in evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))])
+    evidence_files = [Path(p) for p in recorded]
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
-    evidence_files, video_url = _offload_evidence_video(state, evidence_files)
+    def upload():
+        files, url = _offload_evidence_video(state, evidence_files)
+        return {"files": [str(p) for p in files], "url": url}
+    uploaded = delivery_checkpoint.step(database, task_id, identity, "UPLOAD", upload)
+    evidence_files, video_url = [Path(p) for p in uploaded["files"]], uploaded["url"]
     # Match Gmail's attachment cap before indexing evidence as available. The sender
     # can still explain an omitted file, but the cover must not claim it was attached.
     deliverable, omitted, size = [], [], 0
@@ -1777,7 +1787,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
                      "were set aside — please re-send your instruction against the updated "
                      "PR.\n\n")
     body += "Reply with change requests, or tell me to merge."
-    email(state, "PR ready for review", body, evidence_files, milestone="pr_review")
+    delivery_checkpoint.step(database, task_id, identity, "NOTIFY",
+        lambda: email(state, "PR ready for review", body, evidence_files, milestone="pr_review"))
     # pr_summary is kept (until the task ends) so a later re-finalize — e.g. after a
     # conflict resolution — doesn't email an empty summary.
     for key in ("review_since", "review_round", "review_run_link", "review_threads",

@@ -71,7 +71,7 @@
 - [x] 8.2 Reutilizar evidencia válida del gate final y actualizar specs sobre diff final; limitar grabación adicional a un intento focalizado por snapshot/parámetros.
 - [x] 8.3 Corregir detección legacy de archivos sobrescritos/nuevos y directorios externos; eliminar fallback a clips viejos o fallidos como evidencia aprobada.
 - [x] 8.4 Normalizar bytes/str de TimeoutExpired y hacer ffmpeg timeout best-effort con cleanup; probar fallback a clips válidos o evidencia ausente.
-- [ ] 8.5 Separar RECORD/CONVERT/UPLOAD/NOTIFY en checkpoints durables e identidades estables; probar retry sin repetir harness o programación.
+- [x] 8.5 Separar RECORD/CONVERT/UPLOAD/NOTIFY en checkpoints durables e identidades estables; probar retry sin repetir harness o programación.
 - [ ] 8.6 Reconciliar PR, Drive y entrega de canal tras crash donde las APIs lo permitan; documentar ventanas no reconciliables y evitar duplicados conocidos.
 - [ ] 8.7 Mantener handoff honesto de evidencia parcial/ausente y checks preexisting/unknown con las aprobaciones pendientes intactas.
 

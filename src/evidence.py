@@ -11,6 +11,7 @@ import operations
 import artifact_manifest
 from execution_identity import digest, snapshot
 from execution_store import ExecutionStore
+import delivery_checkpoint
 
 log = logging.getLogger(__name__)
 _recording_passed = False
@@ -209,7 +210,11 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     if not kept:
         log.info("_record_playwright_video: no clips to stitch")
         return []
-    stitched = _stitch_to_mp4(kept)
+    store = ExecutionStore(config.DATA_DIR / "execution.sqlite")
+    identity = digest([(str(p), artifact_manifest.file_hash(p)) for p in kept])
+    converted = delivery_checkpoint.step(store, "evidence", identity, "CONVERT",
+        lambda: str(result) if (result := _stitch_to_mp4(kept)) else None)
+    stitched = Path(converted) if converted else None
     if stitched:
         log.info("_record_playwright_video: returning stitched %s (%d bytes)", stitched, stitched.stat().st_size)
         return [stitched]
