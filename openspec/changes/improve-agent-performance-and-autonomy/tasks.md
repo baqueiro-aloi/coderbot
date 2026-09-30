@@ -60,7 +60,7 @@
 
 - [x] 7.1 Implementar preparation con fingerprint de dependencias y probes de disponibilidad; probar reutilización y reparación tras instalación parcial.
 - [x] 7.2 Preinstalar dependencias fijadas de plugins/puente/browsers gestionados en imagen y evitar auto-installs repetidos del runtime.
-- [ ] 7.3 Separar registry público y scopes privados en preparación/setup sin exponer o sobrescribir credenciales; probar auth privada requerida y paquetes públicos.
+- [x] 7.3 Separar registry público y scopes privados en preparación/setup sin exponer o sobrescribir credenciales; probar auth privada requerida y paquetes públicos.
 - [ ] 7.4 Definir contrato opcional de harness prepare/run/suites/providers/resources/artifacts y adapter legacy compatible.
 - [ ] 7.5 Implementar adapter/fixture PICA con agrupación por proveedor, preparación por lockfile/browser/image y outputs únicos; validar flags realmente soportados.
 - [ ] 7.6 Documentar y probar aislamiento de sesiones/puertos para workers concurrentes; mantener ejecución serial cuando no se garantice aislamiento.

@@ -16,6 +16,7 @@ import turn_control
 import phase_checkpoint
 import operations
 import handoff_context
+import package_registry
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -177,6 +178,10 @@ def _after_kick(prompt: str) -> str:
 def _opencode_environment() -> dict[str, str]:
     env = os.environ.copy()
     env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
+    npmrc = Path(env.get("NPM_CONFIG_USERCONFIG") or Path.home() / ".npmrc")
+    if npmrc.is_file():
+        runtime_npmrc = package_registry.public_runtime_npmrc(npmrc, config.DATA_DIR / "runtime.npmrc")
+        env["NPM_CONFIG_USERCONFIG"] = str(runtime_npmrc)
     try:
         inline = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
     except json.JSONDecodeError as err:
