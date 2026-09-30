@@ -3570,7 +3570,7 @@ def _continue_resolve_conflicts(state: dict, result) -> None:
 def _continue_address_pr_threads(state: dict, result) -> None:
     if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
-    _queue_push(state, "threads")
+    _queue_push(state, "threads", result.output)
 
 
 def _continue_apply_pr_feedback(state: dict, result) -> None:
