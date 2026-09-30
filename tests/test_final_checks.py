@@ -9,6 +9,16 @@ import final_checks
 
 
 class FinalCheckTests(unittest.TestCase):
+    def test_only_new_regressions_block_final_gate(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            failed = {"status": "fail", "failures": {"old": "old", "new": "new"}}
+            with patch("final_checks.check_plan.discover", return_value=[Check("unit", ["test"])]), \
+                 patch("final_checks.checks.execute_plan", return_value=[failed]), \
+                 patch("final_checks.baseline_result", return_value={"status": "fail", "failures": {"old": "old"}}):
+                report = final_checks.run({"base_sha": "a" * 40}, root, store)
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["gate"]["regressions"], ["new"])
     def test_eighteen_preexisting_failures_pass_without_repair(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")

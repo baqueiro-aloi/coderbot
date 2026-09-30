@@ -43,7 +43,7 @@
 - [x] 5.3 Persistir/reutilizar baseline por SHA, comando y entorno; ejecutar comparaciones necesarias sin rerun completo injustificado.
 - [x] 5.4 Cambiar VERIFY a checks focalizados/OpenSpec y la fase final a suites completas después de revisión, incluyendo tareas sin harness.
 - [x] 5.5 Unificar política VERIFY/E2E para preexisting/regression/infrastructure/unknown; probar que 18 fallos preexistentes no disparan reparación indiscriminada.
-- [ ] 5.6 Implementar reparación focalizada y re-review de regresiones finales, invalidando solo checks con entradas afectadas.
+- [x] 5.6 Implementar reparación focalizada y re-review de regresiones finales, invalidando solo checks con entradas afectadas.
 - [ ] 5.7 Integrar gates de snapshot final en feedback, threads y conflictos con continuación durable hacia push/entrega.
 - [ ] 5.8 Asociar reportes de calidad/review y SHA entregado al contenido válido; probar cambios exclusivamente de archivo OpenSpec y cambios de aplicación posteriores.
 

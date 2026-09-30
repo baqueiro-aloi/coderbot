@@ -1169,6 +1169,18 @@ def do_e2e(state: dict) -> None:
         state["final_check_report"] = report
         save_state(state)
         if report["status"] != "pass":
+            if report["status"] == "fail":
+                state["final_repair_round"] = state.get("final_repair_round", 0) + 1
+                if state["final_repair_round"] <= config.QUALITY_GATE_MAX_ROUNDS:
+                    regressions = [{"check": r["check"], "tests": r["gate"]["regressions"],
+                                    "report": r.get("report")} for r in report["checks"]
+                                   if r["gate"]["regressions"]]
+                    result = agent_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E,
+                        output=json.dumps(regressions, ensure_ascii=False)))
+                    if handle_result(state, result, "E2E"):
+                        return
+                    state["state"] = "INTERNAL_REVIEW"
+                    return
             _gate_failed(state, "E2E", "final_check_round", "Final checks: " + report["status"],
                          json.dumps(report, ensure_ascii=False)[-5000:])
             return
