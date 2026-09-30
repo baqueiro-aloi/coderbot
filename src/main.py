@@ -24,6 +24,7 @@ import checks
 import final_checks
 from execution_identity import snapshot as content_snapshot
 import delivery_checkpoint
+import message_templates
 import architecture_report
 import config
 import drive_client
@@ -93,6 +94,9 @@ def subject(state: dict, phase: str) -> str:
 
 def _localized(state: dict, message: str) -> str:
     language = state.get("task_language", "English")
+    static = message_templates.translate(message, language)
+    if static is not None:
+        return static
     if language.casefold() == "english" or not message.strip():
         return message
     result = agent_runner.run(prompts.render(

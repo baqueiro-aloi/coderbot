@@ -36,6 +36,8 @@ class TaskLanguageTests(unittest.TestCase):
     def test_working_sessions_and_openspec_keep_ticket_language(self):
         agent_runner.set_task_language("Spanish")
         with patch.object(config, "AGENT", "opencode"), \
+             patch.object(agent_runner.phase_checkpoint, "replay", return_value=None), \
+             patch.object(agent_runner.phase_checkpoint, "record"), \
              patch.object(agent_runner, "_opencode", return_value=Mock()) as invoke:
             agent_runner.run(prompts.PROPOSE)
             self.assertIn("Use Spanish", invoke.call_args.args[0])
