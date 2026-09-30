@@ -17,6 +17,7 @@ from pathlib import Path
 
 import agent_runner
 import activity
+import phase_checkpoint
 import architecture_report
 import config
 import drive_client
@@ -3893,6 +3894,8 @@ def _run_loop() -> None:
                 state["last_transition"] = time.time()
             _maybe_ping(state)
             save_state(state)
+            if state.get("item") and state["state"] != prev:
+                phase_checkpoint.retire(state, prev)
             if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
                 gmail_client.close_thread(state["retire_thread_id"])
                 state.pop("retire_thread_id")

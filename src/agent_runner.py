@@ -12,6 +12,7 @@ import claude_runner
 import activity
 import config
 import turn_control
+import phase_checkpoint
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -394,14 +395,22 @@ def run(prompt: str, contract: bool = True):
     classifiers) whose only output instruction must be their own JSON contract."""
     _begin_turn()
     try:
+        context = _task_context.get() if contract else None
+        original_prompt = prompt
+        if context and (saved := phase_checkpoint.replay(context, prompt)):
+            return OpenCodeResult(saved["session_id"], saved["output"])
         if contract:
             prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
-            return claude_runner.run(prompt, contract=contract)
-        if config.AGENT == "opencode":
+            result = claude_runner.run(prompt, contract=contract)
+        elif config.AGENT == "opencode":
             full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
-            return _opencode(full)
-        raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+            result = _opencode(full)
+        else:
+            raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+        if context:
+            phase_checkpoint.record(context, original_prompt, result)
+        return result
     finally:
         _end_turn()
 
@@ -409,20 +418,28 @@ def run(prompt: str, contract: bool = True):
 def resume(session_id: str, prompt: str):
     _begin_turn(session_id)
     try:
+        context = _task_context.get()
+        original_prompt = prompt
+        if context and (saved := phase_checkpoint.replay(context, prompt)):
+            return OpenCodeResult(saved["session_id"], saved["output"])
         prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
-            return claude_runner.resume(session_id, prompt)
-        if config.AGENT == "opencode":
+            result = claude_runner.resume(session_id, prompt)
+        elif config.AGENT == "opencode":
             try:
-                return _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
+                result = _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
             except RuntimeError as err:
                 if "Session not found" not in str(err):
                     raise
                 # Sessions can be lost when an in-flight task changes agents or OpenCode's
                 # local store is reset. The task artifacts and branch remain authoritative.
                 log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
-                return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
-                                 _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
-        raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+                result = _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
+                                  _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
+        else:
+            raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
+        if context:
+            phase_checkpoint.record(context, original_prompt, result)
+        return result
     finally:
         _end_turn()
