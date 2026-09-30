@@ -33,3 +33,19 @@ detener y limpiar el intento, conservar el cursor/store actual y elegir una imag
 compatible con esos datos aditivos. Trust-total se mantiene durante rollback;
 una imagen antigua sin ese comportamiento solo se utiliza con el plugin gestionado
 de confianza total correspondiente.
+
+## Verificación de rollback aislado
+
+La imagen anterior `codebot-performance-rollback:20260930t234904z` se probó en
+un contenedor aislado con el código/plugin gestionado nuevo: la integración
+headless de confianza total pasó en OpenCode 1.18.18 y quince pruebas de store,
+reanudación, cancelación, artifacts y entrega pasaron en Linux. Esto valida
+compatibilidad de la imagen anterior con los datos aditivos sin revertir el
+servicio productivo ni perder las mejoras de permisos.
+
+La verificación de mounts comprueba que release cambia solo /app y rollback
+restaura las fuentes originales, manteniendo seeds, datos y checkout destino.
+La recuperación productiva conservó rama/sesión y reutilizó resultados terminados;
+se observaron builds aprobados y lint indeterminado. Los resultados de checks
+del destino siguen reportándose por separado del éxito del rollout: no se afirma
+que la tarea PICA esté terminada ni que todos sus tests aprueben.
