@@ -14,14 +14,14 @@ import urllib.request
 import urllib.error
 
 
-def probe(executable="opencode", plugin=None):
+def probe(executable="opencode", plugin=None, exercise=None, extra_config=None):
     with tempfile.TemporaryDirectory(prefix="codebot-runtime-probe-") as scratch:
         root = Path(scratch)
         env = {**os.environ, **{f"XDG_{name}_HOME": str(root / name.lower())
                                for name in ("DATA", "CONFIG", "CACHE", "STATE")},
                "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": "allow", "plugin": [],
                    "share": "disabled", "autoupdate": False, "lsp": False, "formatter": False,
-                   **({"plugin": [str(plugin)]} if plugin else {})}),
+                   **({"plugin": [str(plugin)]} if plugin else {}), **(extra_config or {})}),
                "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
                "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1"}
         env.pop("OPENCODE_CONFIG", None)
@@ -64,11 +64,13 @@ def probe(executable="opencode", plugin=None):
                 assert updated["permission"][-1] == allow[0]
                 assert isinstance(request("/session/" + parent["id"] + "/children"), list)
                 assert isinstance(request("/permission"), list)
+                exercise_result = exercise(request, root, parent) if exercise else None
                 request("/session/" + parent["id"], method="DELETE")
                 version = subprocess.run([executable, "--version"], env=env, cwd=root,
                     capture_output=True, text=True, timeout=15, check=True).stdout.strip()
                 return {"version": version, "config": "valid", "session_update": "valid",
-                        "children": "valid", "permission_list": "valid"}
+                        "children": "valid", "permission_list": "valid",
+                        **({"exercise": exercise_result} if exercise else {})}
             finally:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
