@@ -8,6 +8,9 @@ from pathlib import Path
 
 import config
 import operations
+import artifact_manifest
+from execution_identity import digest, snapshot
+from execution_store import ExecutionStore
 
 log = logging.getLogger(__name__)
 
@@ -105,15 +108,34 @@ def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
     return the recorded evidence file(s) — a stitched Playwright video, or the
     generated Newman run report."""
     spec_files = normalize_spec_files(spec_files)
+    detected = detect_branch_specs(kind)
+    spec_files = list(dict.fromkeys([*spec_files, *detected]))
     if not spec_files:
         log.info("record_evidence: no spec files given — falling back to branch spec detection")
         spec_files = detect_branch_specs(kind)
     if not spec_files:
         log.warning("record_evidence: no spec/collection files found — no evidence will be produced")
         return []
+    manifest = os.environ.get("CODEBOT_ARTIFACT_MANIFEST")
+    content = snapshot(config.REPO_PATH)
+    if manifest and Path(manifest).is_file():
+        entries = artifact_manifest.load(manifest, snapshot=content)
+        if entries:
+            return [Path(entry["path"]) for entry in entries]
+    store = ExecutionStore(config.DATA_DIR / "execution.sqlite")
+    identity = digest({"content": content, "specs": spec_files, "kind": kind})
+    recorded = store.list("artifact", "evidence", identity=identity, status="recorded")
+    if recorded:
+        return [Path(p) for p in recorded[0]["data"].get("paths", []) if Path(p).is_file()]
+    # Mark the attempt before running: interruptions do not cause endless re-recording.
+    record_id = store.put("artifact", task_id="evidence", identity=identity, status="recorded", data={"paths": []})
     if kind == "newman":
-        return _record_newman_report(spec_files)
-    return _record_playwright_video(spec_files)
+        paths = _record_newman_report(spec_files)
+    else:
+        paths = _record_playwright_video(spec_files)
+    store.put("artifact", task_id="evidence", identity=identity, id=record_id, status="recorded",
+              data={"paths": [str(p) for p in paths]})
+    return paths
 
 
 def _run_recording(specs: list[str], extra_args: list[str]) -> str:
@@ -159,10 +181,6 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     log.info("recording evidence: re-running @evidence tests of %s with video on", specs)
     tail = _run_recording(specs, ["--grep", "@evidence"])
     after = clips()
-    if not (after - before):
-        log.info("no @evidence-tagged test produced a clip; re-running full specs %s", specs)
-        tail = _run_recording(specs, [])
-        after = clips()
     new = sorted(after - before)
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "

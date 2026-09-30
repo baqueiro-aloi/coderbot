@@ -68,7 +68,7 @@
 ## 8. Evidencia y entrega recuperable
 
 - [x] 8.1 Implementar manifest de artifacts con run, snapshot, spec/test, resultado, rutas y hashes para Playwright y Newman.
-- [ ] 8.2 Reutilizar evidencia válida del gate final y actualizar specs sobre diff final; limitar grabación adicional a un intento focalizado por snapshot/parámetros.
+- [x] 8.2 Reutilizar evidencia válida del gate final y actualizar specs sobre diff final; limitar grabación adicional a un intento focalizado por snapshot/parámetros.
 - [ ] 8.3 Corregir detección legacy de archivos sobrescritos/nuevos y directorios externos; eliminar fallback a clips viejos o fallidos como evidencia aprobada.
 - [ ] 8.4 Normalizar bytes/str de TimeoutExpired y hacer ffmpeg timeout best-effort con cleanup; probar fallback a clips válidos o evidencia ausente.
 - [ ] 8.5 Separar RECORD/CONVERT/UPLOAD/NOTIFY en checkpoints durables e identidades estables; probar retry sin repetir harness o programación.

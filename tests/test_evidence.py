@@ -15,7 +15,10 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.reported_specs(output), ["dynamic-page-title.spec.ts"])
 
     def test_recorder_normalizes_persisted_markdown_spec_name(self):
-        with patch("evidence._record_playwright_video", return_value=[]) as record:
+        with patch("evidence._record_playwright_video", return_value=[]) as record, \
+             patch("evidence.detect_branch_specs", return_value=[]), \
+             patch("evidence.snapshot", return_value="fixture"), \
+             tempfile.TemporaryDirectory() as root, patch.object(evidence.config, "DATA_DIR", Path(root)):
             evidence.record_evidence(["dynamic-page-title.spec.ts`"], "playwright")
 
         self.assertEqual(record.call_args.args[0], ["dynamic-page-title.spec.ts"])
@@ -30,8 +33,7 @@ class EvidenceTests(unittest.TestCase):
         # @evidence demo test first, then the full spec when no clip appeared.
         commands = [c.args[0] for c in run.call_args_list]
         self.assertEqual(commands, [
-            ["./run.sh", "dynamic-page-title.spec.ts", "--grep", "@evidence"],
-            ["./run.sh", "dynamic-page-title.spec.ts"]])
+            ["./run.sh", "dynamic-page-title.spec.ts", "--grep", "@evidence"]])
         self.assertEqual(run.call_args.kwargs["env"]["PICA_E2E_VIDEO"], "on")
         self.assertEqual(run.call_args.kwargs["env"]["PW_VIDEO"], "on")
 
