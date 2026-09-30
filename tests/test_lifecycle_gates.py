@@ -147,6 +147,10 @@ class LifecycleGateTests(unittest.TestCase):
         patcher = patch.object(main, "announce_milestone")
         patcher.start()
         self.addCleanup(patcher.stop)
+        for patcher in (patch.object(main.config, "DETERMINISTIC_CHECKS", False),
+                        patch.object(main, "content_snapshot", return_value="fixture")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def base_state(self, **updates):
         state = {
@@ -240,7 +244,7 @@ class LifecycleGateTests(unittest.TestCase):
                 self.assertEqual(state["verify_round"], 1)
 
     def test_clean_review_routes_by_e2e_capability(self):
-        for has_harness, expected in ((True, "E2E"), (False, "ARCHIVING")):
+        for has_harness, expected in ((True, "E2E"), (False, "E2E")):
             with self.subTest(has_harness=has_harness):
                 state = self.base_state(
                     state="INTERNAL_REVIEW", review_gate_round=1,
@@ -281,7 +285,7 @@ class LifecycleGateTests(unittest.TestCase):
             second_prompt = resume.call_args.args[1]
 
         self.assertNotIn("REJECTED", first_prompt)
-        self.assertIn("against `develop` in a throwaway `git worktree`", first_prompt)
+        self.assertIn("immutable base SHA `develop`", first_prompt)
         self.assertIn("REJECTED (round 1 of 2)", second_prompt)
         self.assertIn("quality gate status is not pass", second_prompt)
         self.assertIn("- npm run lint: fail (100 errors)", second_prompt)

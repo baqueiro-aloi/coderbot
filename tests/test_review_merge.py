@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
@@ -184,6 +185,7 @@ class MergeGate(unittest.TestCase):
         if force is not None:
             v["force"] = force
         with patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
+             patch.object(main, "trail"), \
              patch.object(main, "_pr_merge_state", return_value=("OPEN", mergeable)), \
              patch.object(main, "unresolved_review_threads", return_value=threads), \
              patch.object(main, "email") as email, \
@@ -298,7 +300,7 @@ class Conflicts(unittest.TestCase):
 
     def test_resolution_with_commit_queues_push_for_re_review(self):
         state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
-                 "conflict_return": "WAIT_MERGE", "stale_replies": True}
+                 "conflict_return": "WAIT_MERGE", "stale_replies": True, "has_code_review": True}
         with patch.object(main, "git", side_effect=["head-1", "head-2"]), \
              patch.object(main.agent_runner, "resume", return_value=Mock(
                  session_id="sid", output="merged", question=None, attachments=[])), \
@@ -306,7 +308,7 @@ class Conflicts(unittest.TestCase):
             main.do_resolve_conflicts(state)
         self.assertEqual(state["state"], "PUSHING")
         self.assertEqual(state["push_context"]["continuation"], "conflicts")
-        with patch.object(main, "git"):
+        with patch.object(main, "git"), patch.object(main.final_checks, "run", return_value={"status": "pass"}):
             main.do_push(state)
         self.assertEqual(state["state"], "WAIT_REVIEW")
         self.assertTrue(state["await_new_run"])
@@ -326,7 +328,7 @@ class Conflicts(unittest.TestCase):
 
 class ReviewWait(unittest.TestCase):
     def state(self):
-        return {"state": "WAIT_REVIEW", "item": "t", "pr_url": PR, "review_since": 0,
+        return {"state": "WAIT_REVIEW", "item": "t", "pr_url": PR, "review_since": time.time(),
                 "e2e_specs": [], "await_new_run": True}
 
     def test_new_run_with_ocr_threads_enters_address_review(self):

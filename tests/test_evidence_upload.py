@@ -75,6 +75,8 @@ class FinalizePrTests(unittest.TestCase):
                       "pr_url": "https://github.com/acme/repo/pull/7", "pr_summary": "summary",
                       "e2e_kind": "playwright", "has_e2e_harness": True}
         for p in (patch.object(main.config, "EVIDENCE_UPLOAD", True),
+                  patch.object(main.config, "DATA_DIR", Path(self.scratch.name) / "data"),
+                  patch.object(main, "content_snapshot", return_value="fixture"),
                   patch.object(main, "unresolved_review_threads", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
@@ -82,7 +84,7 @@ class FinalizePrTests(unittest.TestCase):
     def _finalize(self, evidence_files, link):
         with patch.object(main.evidence, "record_evidence", return_value=evidence_files), \
              patch.object(main.drive_client, "upload_evidence", return_value=link) as upload, \
-             patch.object(main, "email") as email:
+             patch.object(main, "email", return_value=None) as email:
             main.finalize_pr(self.state)
         return email.call_args.args, upload
 
@@ -132,6 +134,7 @@ class FeedbackPushTests(unittest.TestCase):
                  "push_context": {"continuation": "feedback", "output": "fixed details",
                                   "attachments": [str(MP4), "/tmp/evidence.txt"]}}
         with patch.object(main.config, "EVIDENCE_UPLOAD", True), \
+             patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
              patch.object(main, "git"), \
              patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
              patch.object(main, "email") as email:

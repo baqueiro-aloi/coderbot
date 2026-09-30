@@ -35,6 +35,7 @@ class CommunicationLifecycle(unittest.TestCase):
                                           "impact": "New database deployment boundary",
                                           "paths": ["deploy/database.tf"]}]}
                 with patch.object(main.config, "REPO_PATH", repo), \
+                     patch.object(main, "content_snapshot", return_value="fixture"), \
                      patch.object(main.config, "DATA_DIR", Path(tmp) / "data"), \
                      patch.object(main.config, "COMM_CHANNEL", channel), \
                      patch.object(main, "save_state"), patch.object(main, "trail"), \
