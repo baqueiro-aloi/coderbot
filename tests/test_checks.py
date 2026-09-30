@@ -10,6 +10,20 @@ from execution_store import ExecutionStore
 
 
 class CheckRunnerTests(unittest.TestCase):
+    def test_scheduler_serializes_exclusive_resources(self):
+        from checks import execute_plan
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            store = ExecutionStore(Path(root) / "data/db")
+            plan = [Check(str(i), [sys.executable, "-c", "import time; time.sleep(.1)"],
+                          resources=["port:8111"]) for i in range(2)]
+            results = execute_plan(plan, repo, store, "t")
+            # Operation start times are stored before lock acquisition; use the
+            # wall time bound plus distinct reports to establish serialized runs.
+            self.assertGreater(max(r["finished"] for r in results) - min(r["started"] for r in results), .2)
+            self.assertEqual([r["check"] for r in results], ["0", "1"])
     def test_reuse_and_invalidation_for_content_and_environment(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as root:

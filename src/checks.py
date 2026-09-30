@@ -4,10 +4,19 @@ import os
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import operations
 from check_results import parse_output
 from execution_identity import digest, environment_identity, snapshot
+
+
+def execute_plan(plan, repo, store, task_id, *, workers=3):
+    # Each process takes sorted exclusive resources before launch. Preserve result
+    # order for deterministic reporting, independently of completion order.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(execute, check, repo, store, task_id) for check in plan]
+        return [future.result() for future in futures]
 
 
 def execute(check, repo, store, task_id, *, reuse=True):
