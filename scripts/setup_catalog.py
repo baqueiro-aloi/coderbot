@@ -75,6 +75,7 @@ SETTINGS = (
     field("CLAUDE_CONFIG_PATH", "Claude", "Alternative Claude configuration location.", advanced=True),
     field("OPENCODE_PROVIDER", "OpenCode", "Provider ID used for OpenCode login."),
     field("OPENCODE_MODEL", "OpenCode", "Full provider/model identifier."),
+    field("OPENCODE_EFFORT", "OpenCode", "Thinking/reasoning effort for GPT models. Low is faster; medium balances speed and depth; high/xhigh spend more time reasoning. Blank keeps OpenCode defaults. Supported levels depend on the model/provider.", kind="choice", choices=("", "none", "minimal", "low", "medium", "high", "xhigh")),
     field("CODEBOT_ACTIVITY_TRAIL", "Operations", "Post milestones to the backlog item.", "on", "switch", advanced=True),
     field("CODEBOT_SELF_HEAL_CODE_REVIEW", "Operations", "Seed missing review workflow tasks.", "on", "switch", advanced=True),
     field("CODEBOT_LOG_LEVEL", "Operations", "Runtime log verbosity.", "DEBUG", "choice", advanced=True, choices=("DEBUG", "INFO")),

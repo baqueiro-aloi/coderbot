@@ -194,6 +194,25 @@ def _opencode_environment() -> dict[str, str]:
     openspec_skills = str(config.OPENSPEC_SKILLS_DIR / "opencode")
     inline["skills"] = {**skills, "paths": list(dict.fromkeys([*paths, openspec_skills]))}
     inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
+    if config.OPENCODE_EFFORT:
+        if config.OPENCODE_EFFORT not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+            raise RuntimeError("OPENCODE_EFFORT must be none, minimal, low, medium, high or xhigh")
+        provider_id, separator, model_id = config.OPENCODE_MODEL.partition("/")
+        if not separator or not provider_id or not model_id:
+            raise RuntimeError("OPENCODE_MODEL must be provider/model when setting OPENCODE_EFFORT")
+        # Merge only the selected model, retaining custom endpoints, auth and options.
+        current = inline
+        for key in ("provider", provider_id, "models", model_id):
+            child = current.setdefault(key, {})
+            if not isinstance(child, dict):
+                raise RuntimeError(f"OPENCODE_CONFIG_CONTENT {key} must contain a JSON object")
+            current = child
+        for key in ("options", "variants"):
+            if not isinstance(current.setdefault(key, {}), dict):
+                raise RuntimeError(f"OPENCODE_CONFIG_CONTENT model {key} must contain a JSON object")
+        current["options"]["reasoningEffort"] = config.OPENCODE_EFFORT
+        # Explicit selection also overrides a variant retained by a resumed session.
+        current["variants"]["coderbot-effort"] = {"reasoningEffort": config.OPENCODE_EFFORT}
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
     return env
 
@@ -322,11 +341,14 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
 def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     cmd = ["opencode", "run", "--dir", str(config.REPO_PATH), "--model", config.OPENCODE_MODEL,
            "--auto", "--format", "json"]
+    if config.OPENCODE_EFFORT:
+        cmd.extend(["--variant", "coderbot-effort"])
     if session_id:
         cmd.extend(["--session", session_id])
     cmd.append(prompt)
-    log.info("opencode %s model=%s (prompt %d chars)",
-             "resume" if session_id else "run", config.OPENCODE_MODEL, len(prompt))
+    log.info("opencode %s model=%s effort=%s (prompt %d chars)",
+             "resume" if session_id else "run", config.OPENCODE_MODEL,
+             config.OPENCODE_EFFORT or "default", len(prompt))
     proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
                           timeout=config.AGENT_TIMEOUT_SECONDS)
 

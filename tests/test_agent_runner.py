@@ -139,6 +139,50 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertIn("--session", command)
         self.assertEqual(command[command.index("--session") + 1], "ses_123")
 
+    def test_effort_applies_to_new_and_resumed_runs_preserving_provider_config(self):
+        model_id = "gpt-6.1-sol/gpt-6.1-sol"
+        existing = {"provider": {"azure": {
+            "options": {"baseURL": "https://example.test"},
+            "models": {model_id: {"options": {"textVerbosity": "low", "reasoningEffort": "high"},
+                                  "variants": {"custom": {"reasoningEffort": "high"}}},
+                       "other": {"options": {"reasoningEffort": "high"}}}}}}
+        with patch.object(agent_runner.config, "OPENCODE_MODEL", "azure/" + model_id), \
+             patch.object(agent_runner.config, "OPENCODE_EFFORT", "low"), \
+             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(existing)}), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            agent_runner._opencode("start")
+            agent_runner._opencode("continue", "ses_old")
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertEqual(command[command.index("--variant") + 1], "coderbot-effort")
+            provider = json.loads(call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["azure"]
+            self.assertEqual(provider["options"], existing["provider"]["azure"]["options"])
+            self.assertEqual(provider["models"][model_id]["options"],
+                             {"textVerbosity": "low", "reasoningEffort": "low"})
+            self.assertEqual(provider["models"][model_id]["variants"]["coderbot-effort"],
+                             {"reasoningEffort": "low"})
+            self.assertEqual(provider["models"][model_id]["variants"]["custom"],
+                             {"reasoningEffort": "high"})
+            self.assertEqual(provider["models"]["other"], existing["provider"]["azure"]["models"]["other"])
+
+    def test_blank_effort_preserves_defaults_and_omits_variant(self):
+        existing = {"provider": {"azure": {"models": {
+            "gpt-6.1-sol": {"options": {"reasoningEffort": "high"}}}}}}
+        with patch.object(agent_runner.config, "OPENCODE_EFFORT", ""), \
+             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(existing)}), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            agent_runner._opencode("start")
+        self.assertNotIn("--variant", run.call_args.args[0])
+        inline = json.loads(run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(inline["provider"], existing["provider"])
+
+    def test_invalid_effort_fails_before_launching_opencode(self):
+        with patch.object(agent_runner.config, "OPENCODE_EFFORT", "typo"), \
+             patch("agent_runner._run_streaming") as run:
+            with self.assertRaisesRegex(RuntimeError, "OPENCODE_EFFORT must be"):
+                agent_runner._opencode("start")
+        run.assert_not_called()
+
     def test_resume_recovers_from_missing_session(self):
         missing = subprocess.CompletedProcess([], 1, "", "Error: Session not found")
         recovered = subprocess.CompletedProcess(

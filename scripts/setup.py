@@ -957,7 +957,7 @@ def _text_section(env: EnvFile, page: str) -> EnvFile:
                 index += 1
                 continue
             shown = "(set; hidden)" if setting.secret and current else current or "(empty)"
-            choices = " / ".join(setting.choices)
+            choices = " / ".join(choice or "default (blank)" for choice in setting.choices)
             print(setting.help + (f" Options: {choices}" if choices else ""))
             prompt = f"{setting.key} [{shown}] (Enter keeps; /clear empties): "
             try:

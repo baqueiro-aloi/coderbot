@@ -17,6 +17,31 @@ except ImportError:
 
 @unittest.skipIf(SetupApp is None, "host Textual dependency not installed")
 class SetupMenu(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_effort_can_be_saved_and_reset_to_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("CODEBOT_AGENT=opencode\nOPENCODE_PROVIDER=azure\n"
+                            "OPENCODE_MODEL=azure/gpt-6.1-sol\n")
+            app = SetupApp(EnvFile(path))
+            with patch.object(setup_ui, "test_section", return_value=[]):
+                async with app.run_test(size=(120, 80)) as pilot:
+                    await pilot.click("#section-Agent")
+                    await pilot.pause()
+                    effort = app.query_one("#setting-OPENCODE_EFFORT", Select)
+                    self.assertEqual(effort.value, "")
+                    effort.value = "low"
+                    await pilot.pause()
+                    await pilot.click("#save")
+                    await pilot.pause()
+                    self.assertEqual(EnvFile(path).values["OPENCODE_EFFORT"], "low")
+                    await pilot.click("#section-Agent")
+                    await pilot.pause()
+                    app.query_one("#setting-OPENCODE_EFFORT", Select).value = ""
+                    await pilot.pause()
+                    await pilot.click("#save")
+                    await pilot.pause()
+                    self.assertEqual(EnvFile(path).values["OPENCODE_EFFORT"], "")
+
     async def test_main_menu_syncs_existing_vm_and_checks_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"

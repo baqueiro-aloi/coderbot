@@ -266,7 +266,7 @@ class SetupApp(App[bool]):
                                       prompt="Choose a joined public channel",
                                       id=f"setting-{setting.key}"))
             elif setting.choices:
-                widgets.append(Select([(choice, choice) for choice in setting.choices],
+                widgets.append(Select([(choice or "Default (OpenCode/provider)", choice) for choice in setting.choices],
                                       value=value if value in setting.choices else setting.choices[0],
                                       id=f"setting-{setting.key}"))
             else:

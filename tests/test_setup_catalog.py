@@ -51,7 +51,16 @@ class CatalogAudit(unittest.TestCase):
         self.assertFalse(relevant(BY_KEY["CODEBOT_SLACK_APP_TOKEN"],
                                   {"CODEBOT_COMM_CHANNEL": "email"}))
         self.assertTrue(relevant(BY_KEY["CODEBOT_SLACK_APP_TOKEN"],
-                                 {"CODEBOT_COMM_CHANNEL": "slack"}))
+                                  {"CODEBOT_COMM_CHANNEL": "slack"}))
+
+    def test_opencode_effort_is_editable_in_agent_and_validated(self):
+        from scripts.setup_catalog import validate_value
+        setting = BY_KEY["OPENCODE_EFFORT"]
+        self.assertIn(setting, guided_setup.fields_for("Agent", {"CODEBOT_AGENT": "opencode"}))
+        self.assertNotIn(setting, guided_setup.fields_for("Agent", {"CODEBOT_AGENT": "claude"}))
+        for value in ("", "none", "minimal", "low", "medium", "high", "xhigh"):
+            self.assertIsNone(validate_value(setting, value))
+        self.assertIsNotNone(validate_value(setting, "typo"))
 
     def test_pasted_doc_url_and_multiple_trusted_email_addresses(self):
         from scripts.setup_catalog import validate_value

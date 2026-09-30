@@ -659,6 +659,10 @@ test catches newly added runtime options missing from setup.
    # provider's browser/device-code/API-key flow; credentials stay in data/opencode/.
    OPENCODE_PROVIDER=
    OPENCODE_MODEL=<provider/model>
+   # Optional GPT reasoning effort; low favors speed, medium balances speed/depth.
+   # Choices: none, minimal, low, medium, high, xhigh (model/provider dependent).
+   # Empty preserves OpenCode defaults. Also editable in setup's Agent section.
+   OPENCODE_EFFORT=
    # Optional; DEBUG (default) or INFO — DEBUG traces every email, video, and git call
    CODEBOT_LOG_LEVEL=DEBUG
    # Optional; maximum verification/internal-review repair rounds (default 3)
