@@ -87,6 +87,7 @@ def run_suite() -> tuple[bool, str]:
         proc = operations.run(
             ["./run.sh"], cwd=E2E_DIR,
             timeout=config.E2E_TIMEOUT_SECONDS,
+            exclusive=[str(E2E_DIR)],
         )
     except subprocess.TimeoutExpired as exc:
         log.error("e2e suite timed out after %ss; tearing down leaked stack",
@@ -122,6 +123,7 @@ def _run_recording(specs: list[str], extra_args: list[str]) -> str:
         proc = operations.run(
             ["./run.sh", *specs, *extra_args], cwd=E2E_DIR,
             timeout=config.E2E_TIMEOUT_SECONDS,
+            exclusive=[str(E2E_DIR)],
             # The target harness exposes a documented opt-in to Playwright's `video: "on"`
             # setting. Both spellings: PICA_E2E_VIDEO for harnesses built against this
             # contract and PW_VIDEO for older Playwright configs that gate on it.

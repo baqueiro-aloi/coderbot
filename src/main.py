@@ -3683,6 +3683,7 @@ class ShutdownRequested(BaseException):
 
 
 def _request_shutdown(signum, _frame) -> None:
+    turn_control.request_kick()
     raise ShutdownRequested(signal.Signals(signum).name)
 
 

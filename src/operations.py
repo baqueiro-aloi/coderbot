@@ -14,6 +14,7 @@ import turn_control
 _budget: ContextVar = ContextVar("operation_budget", default=None)
 _lock = threading.Lock()
 _active = {}
+_resource_locks = {}
 
 
 class Budget:
@@ -125,7 +126,29 @@ def terminate(process, grace=3):
     process.wait(timeout=5)
 
 
-def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None):
+@contextmanager
+def resources(names):
+    with _lock:
+        locks = [_resource_locks.setdefault(name, threading.Lock()) for name in sorted(set(names))]
+    acquired = []
+    try:
+        for lock in locks:
+            if not lock.acquire(timeout=remaining(900)):
+                raise TimeoutError("Exclusive execution resource unavailable")
+            acquired.append(lock)
+        yield
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
+
+
+def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None,
+        exclusive=()):
+    with resources(exclusive):
+        return _run(argv, cwd=cwd, env=env, timeout=timeout, input=input, kind=kind, cleanup=cleanup)
+
+
+def _run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None):
     operation = begin(kind, str(argv[0]), timeout)
     process = None
     try:

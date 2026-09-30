@@ -9,6 +9,18 @@ from pathlib import Path
 
 
 class BudgetTests(unittest.TestCase):
+    def test_shutdown_exception_still_cleans_resource(self):
+        from unittest.mock import patch
+        cleaned = []
+        with patch("operations.subprocess.Popen") as popen:
+            process = popen.return_value
+            process.communicate.side_effect = KeyboardInterrupt()
+            with patch("operations.terminate") as terminate:
+                with self.assertRaises(KeyboardInterrupt):
+                    operations.run(["tool"], cleanup=lambda: cleaned.append(True))
+                terminate.assert_called_once_with(process)
+        self.assertEqual(cleaned, [True])
+
     def test_timeout_reaps_process_and_runs_resource_cleanup(self):
         cleaned = []
         with self.assertRaises(subprocess.TimeoutExpired):
