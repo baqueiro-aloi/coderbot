@@ -7,6 +7,7 @@ import uuid
 
 import operations
 from checks import execute
+from execution_identity import digest, environment_identity, snapshot
 
 
 def signature(error, roots=()):
@@ -31,6 +32,28 @@ def compare(feature, baseline, *, roots=()):
         target.append(test)
     return {"status": "fail" if regressions else "pass" if preexisting else "indeterminate",
             "preexisting": preexisting, "regressions": regressions}
+
+
+def baseline_result(check, repo, sha, store):
+    cache_task = "baseline:" + str(Path(repo).resolve()) + ":" + sha
+    environment = environment_identity(check.argv, repo, env_keys=check.env_keys,
+                                       key_path=store.path.parent / "identity.key")
+    identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment})
+    saved = store.reusable_check(cache_task, identity)
+    if saved and saved["data"]["result"]["status"] in ("pass", "fail"):
+        return saved["data"]["result"]
+    with worktree(repo, sha, store.path.parent) as path:
+        # Absolute executables may be reused only with identical dependency inputs.
+        dependency_inputs = ["requirements*.txt", "**/requirements*.txt", "package*.json", "**/package*.json"]
+        if snapshot(repo, dependency_inputs) != snapshot(path, dependency_inputs):
+            return {"status": "indeterminate", "failures": {}, "reason": "dependency_inputs_differ"}
+        argv = [str(path / Path(arg).relative_to(Path(repo).resolve()))
+                if arg.startswith(str(Path(repo).resolve()) + "/") and not ".venv/" in arg
+                else arg for arg in check.argv]
+        result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False)
+        result["failures"] = {test: signature(error, (path, repo)) for test, error in result.get("failures", {}).items()}
+    store.record_check(cache_task, identity, result=result)
+    return result
 
 
 @contextmanager
