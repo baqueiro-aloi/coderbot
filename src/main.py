@@ -2890,7 +2890,11 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "evidence_url", "milestones_announced", "proposal_snapshot", "proposal_sent_key",
               "quality_report", "internal_review_report", "e2e_passed",
               "implementation_summary", "pending_feedback", "architecture_report",
-              "kick_pending", "kick_count")
+              "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
+              "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
+              "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
+              "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
+              "post_review_check_round")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -3187,6 +3191,7 @@ def _resume_held_task(state: dict, hold: dict) -> None:
     # New holds carry their persisted language. A legacy hold is classified on
     # the next FSM tick, rather than starting another classifier mid-resume.
     agent_runner.set_task_language(state.get("task_language"))
+    save_state(state)
     _save_holds([h for h in _load_holds() if h.get("thread_id") != hold.get("thread_id")])
     if note and state["state"] in WAITS and state["state"] != "WAIT_REVIEW":
         # The note answers whatever the task was waiting on (approval, question, merge).
