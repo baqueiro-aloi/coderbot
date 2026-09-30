@@ -7,6 +7,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import operations
+import preparation
 from check_results import parse_output
 from execution_identity import digest, environment_identity, snapshot
 
@@ -21,6 +22,8 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
 
 def execute(check, repo, store, task_id, *, reuse=True):
     repo = Path(repo).resolve()
+    if check.preparation:
+        preparation.ensure(check.preparation, repo, store, task_id)
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
