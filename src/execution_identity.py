@@ -2,6 +2,8 @@
 import fnmatch
 import hashlib
 import json
+import hmac
+import os
 from pathlib import Path
 import subprocess
 
@@ -12,6 +14,25 @@ EXCLUDED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".pytes
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def environment_identity(argv, cwd, *, env_keys=(), environ=None, tools=None, key_path):
+    """Use a private local HMAC key: secret values never become stored metadata."""
+    key_path = Path(key_path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "wb") as output:
+            output.write(os.urandom(32))
+    key = key_path.read_bytes()
+    env = os.environ if environ is None else environ
+    private = hmac.new(key, json.dumps({name: env.get(name) for name in sorted(env_keys)},
+                       sort_keys=True).encode(), hashlib.sha256).hexdigest()
+    return digest({"argv": list(argv), "cwd": str(Path(cwd).resolve()),
+                   "environment": private, "tools": tools or {}})
 
 
 def snapshot(repo, inputs=None):

@@ -3,10 +3,21 @@ import subprocess
 import tempfile
 import unittest
 
-from execution_identity import snapshot
+from execution_identity import environment_identity, snapshot
 
 
 class IdentityTests(unittest.TestCase):
+    def test_environment_command_and_tool_versions_invalidate_without_secret_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            kwargs = {"cwd": root, "env_keys": ["TOKEN"], "environ": {"TOKEN": "secret"},
+                      "tools": {"node": "22"}, "key_path": Path(root) / "identity.key"}
+            first = environment_identity(["npm", "test"], **kwargs)
+            self.assertEqual(first, environment_identity(["npm", "test"], **kwargs))
+            self.assertNotIn("secret", first)
+            kwargs["environ"] = {"TOKEN": "changed"}
+            self.assertNotEqual(first, environment_identity(["npm", "test"], **kwargs))
+            self.assertEqual((Path(root) / "identity.key").stat().st_mode & 0o777, 0o600)
+
     def test_content_changes_without_status_change_and_document_scope(self):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root)
