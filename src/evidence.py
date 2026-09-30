@@ -13,6 +13,7 @@ from execution_identity import digest, snapshot
 from execution_store import ExecutionStore
 
 log = logging.getLogger(__name__)
+_recording_passed = False
 
 E2E_DIR = config.REPO_PATH / "e2e"
 # The compose file run.sh brings up (relative to E2E_DIR); torn down by codebot itself
@@ -141,6 +142,8 @@ def record_evidence(spec_files: list[str], kind: str | None) -> list[Path]:
 def _run_recording(specs: list[str], extra_args: list[str]) -> str:
     """One run.sh invocation with video forced on; best-effort (clips are harvested
     after). Returns the run's output tail for diagnostics."""
+    global _recording_passed
+    _recording_passed = False
     try:
         proc = operations.run(
             ["./run.sh", *specs, *extra_args], cwd=E2E_DIR,
@@ -160,6 +163,7 @@ def _run_recording(specs: list[str], extra_args: list[str]) -> str:
         return f"evidence run TIMED OUT after {config.E2E_TIMEOUT_SECONDS}s"
     if proc.returncode != 0:
         log.warning("evidence run exit=%d; stderr tail:\n%s", proc.returncode, proc.stderr[-1500:])
+    _recording_passed = proc.returncode == 0
     return (proc.stdout + proc.stderr)[-1500:]
 
 
@@ -171,23 +175,27 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     tests out of the emailed video. Specs without one fall back to recording everything
     in the given files.
     """
-    results_dir = E2E_DIR / "test-results"
-
-    def clips() -> set[Path]:
-        return set(results_dir.rglob("*.webm")) if results_dir.exists() else set()
+    def clips() -> dict[Path, tuple]:
+        files = set()
+        for root in (E2E_DIR / "test-results", config.DATA_DIR / "outbox/pica-e2e"):
+            if root.exists():
+                files.update(root.rglob("*.webm"))
+        return {p: (p.stat().st_mtime_ns, p.stat().st_size, artifact_manifest.file_hash(p)) for p in files}
 
     before = clips()
     specs = [Path(s).name for s in spec_files]
     log.info("recording evidence: re-running @evidence tests of %s with video on", specs)
     tail = _run_recording(specs, ["--grep", "@evidence"])
     after = clips()
-    new = sorted(after - before)
+    if not _recording_passed:
+        return []
+    new = sorted(p for p, identity in after.items() if before.get(p) != identity)
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
                     "check PICA_E2E_VIDEO/PW_VIDEO wiring and test-results mount, and whether "
                     "the spec skipped itself (bare `./run.sh <spec>` invocation, no extra "
                     "flags/env). Run output tail:\n%s", len(before), len(after), tail)
-    videos = new or sorted(after)
+    videos = new
     kept = [v for v in videos if v.stat().st_size > 0]
     for v in kept:
         log.info("evidence clip: %s (%d bytes)", v, v.stat().st_size)

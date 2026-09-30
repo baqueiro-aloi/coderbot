@@ -9,6 +9,15 @@ import evidence
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_old_clip_is_not_returned_when_recording_produces_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            e2e = Path(tmp)
+            (e2e / "test-results").mkdir()
+            (e2e / "test-results/old.webm").write_bytes(b"old")
+            with patch.object(evidence, "E2E_DIR", e2e), \
+                 patch.object(evidence.config, "DATA_DIR", e2e), \
+                 patch("evidence.operations.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                self.assertEqual(evidence._record_playwright_video(["a.spec.ts"]), [])
     def test_reported_specs_strip_markdown_code_delimiters(self):
         output = "summary\nE2E_SPEC: `dynamic-page-title.spec.ts`\n"
 
