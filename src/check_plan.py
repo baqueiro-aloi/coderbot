@@ -1,6 +1,7 @@
 """Versioned, declarative checks for the trusted deterministic runner."""
 from dataclasses import asdict, dataclass, field
 import json
+import sys
 from pathlib import Path
 
 
@@ -42,3 +43,34 @@ def parse(value):
 def load(repo):
     path = Path(repo) / ".codebot/checks.json"
     return parse(json.loads(path.read_text())) if path.exists() else None
+
+
+def discover(repo):
+    repo = Path(repo)
+    configured = load(repo)
+    if configured is not None:
+        return configured
+    checks = []
+    for directory in (".", "backend", "PICAv1/backend"):
+        area = repo / directory
+        if (area / "tests").is_dir() and (directory != "." or (area / "requirements.txt").exists()):
+            python = area / ".venv/bin/python"
+            checks.append(Check("unit:" + directory,
+                [str(python.resolve()) if python.exists() else sys.executable,
+                 "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=directory,
+                inputs=[directory] if directory != "." else ["src", "tests", "requirements.txt"],
+                reporter="unittest"))
+    for directory in (".", "frontend"):
+        package = repo / directory / "package.json"
+        if not package.exists():
+            continue
+        scripts = json.loads(package.read_text()).get("scripts", {})
+        for name in ("test", "lint", "build"):
+            if name in scripts:
+                checks.append(Check(f"{name}:{directory}", ["npm", "test"] if name == "test"
+                    else ["npm", "run", name], cwd=directory, inputs=[directory],
+                    reporter="node" if name == "test" and "node --test" in scripts[name] else "text"))
+    if (repo / "e2e/run.sh").exists():
+        checks.append(Check("e2e", ["./run.sh"], cwd="e2e", inputs=["*"],
+                            resources=["harness:" + str(repo.resolve())], reporter="playwright"))
+    return checks
