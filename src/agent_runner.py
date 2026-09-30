@@ -17,6 +17,7 @@ import phase_checkpoint
 import operations
 import handoff_context
 import package_registry
+import performance
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -117,6 +118,8 @@ def _observe(event: dict) -> None:
     if context and kind == "step_finish" and event.get("sourceSessionID", event.get("sessionID")) == _turn.get("session_id"):
         tokens = part.get("tokens") or {}
         context["session_context_tokens"] = tokens.get("total", 0)
+        performance.event(str(context.get("branch", "task")), phase=context.get("state"),
+                          kind="llm_step", tokens=tokens.get("total", 0))
 
 
 def set_task_language(language: str | None) -> None:

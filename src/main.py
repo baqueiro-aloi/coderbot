@@ -28,6 +28,7 @@ import final_checks
 from execution_identity import snapshot as content_snapshot
 import delivery_checkpoint
 import message_templates
+import performance
 import architecture_report
 import config
 import drive_client
@@ -3990,7 +3991,8 @@ def _run_loop() -> None:
                     elif state["state"] in WAITS:
                         handle_wait(state)
                     else:
-                        PHASES[state["state"]](state)
+                        with performance.span(str(state.get("branch", "idle")), "phase", state["state"]):
+                            PHASES[state["state"]](state)
                 finally:
                     _work_active.clear()
             # Success: clear this state's consecutive-failure counter.

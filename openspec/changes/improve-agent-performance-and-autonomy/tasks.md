@@ -87,7 +87,7 @@
 
 ## 10. Observabilidad y aceptación
 
-- [ ] 10.1 Instrumentar timeline durable por fase/intento/operación, retry reasons, tokens/contexto, checks, cleanup, espera humana y entrega con datos sanitizados.
+- [x] 10.1 Instrumentar timeline durable por fase/intento/operación, retry reasons, tokens/contexto, checks, cleanup, espera humana y entrega con datos sanitizados.
 - [ ] 10.2 Extender STATUS a operaciones del controller y descendientes con duración/deadline/espera observables sin LLM ni mutación del turno.
 - [ ] 10.3 Implementar exportador de métricas con tiempos exclusivos y solapados, unknown explícito y retención acotada sin perder checkpoints activos.
 - [ ] 10.4 Crear benchmark de ciclo con fake provider y latencias controladas para permisos hijos, bloqueo, baseline, crash y fallo de entrega.
