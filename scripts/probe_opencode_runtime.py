@@ -11,15 +11,17 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import urllib.error
 
 
-def probe(executable="opencode"):
+def probe(executable="opencode", plugin=None):
     with tempfile.TemporaryDirectory(prefix="codebot-runtime-probe-") as scratch:
         root = Path(scratch)
         env = {**os.environ, **{f"XDG_{name}_HOME": str(root / name.lower())
                                for name in ("DATA", "CONFIG", "CACHE", "STATE")},
                "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": "allow", "plugin": [],
-                   "share": "disabled", "autoupdate": False, "lsp": False, "formatter": False}),
+                   "share": "disabled", "autoupdate": False, "lsp": False, "formatter": False,
+                   **({"plugin": [str(plugin)]} if plugin else {})}),
                "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
                "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1"}
         env.pop("OPENCODE_CONFIG", None)
@@ -48,8 +50,11 @@ def probe(executable="opencode"):
                         data=json.dumps(data).encode() if data is not None else None,
                         headers={"Content-Type": "application/json", "x-opencode-directory": str(root)},
                         method=method)
-                    with urllib.request.urlopen(req, timeout=15) as response:
-                        return json.load(response)
+                    try:
+                        with urllib.request.urlopen(req, timeout=15) as response:
+                            return json.load(response)
+                    except urllib.error.HTTPError as error:
+                        raise RuntimeError(error.read().decode()) from error
 
                 config = request("/config")
                 assert config["permission"] == {"*": "allow"} or config["permission"] == "allow"

@@ -196,14 +196,14 @@ def _opencode_environment() -> dict[str, str]:
     inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
     # This runtime is explicitly trusted. The managed hook also overrides agents
     # loaded from project/global files after this inline configuration is merged.
-    inline["permission"] = "allow"
+    inline["permission"] = {"*": "allow"}
     agents = inline.setdefault("agent", {})
     if not isinstance(agents, dict):
         raise RuntimeError("OPENCODE_CONFIG_CONTENT agent must contain a JSON object")
     for name in set(agents) | {"build", "plan", "general", "explore"}:
         if not isinstance(agents.setdefault(name, {}), dict):
             raise RuntimeError("OPENCODE_CONFIG_CONTENT agent entries must be objects")
-        agents[name]["permission"] = "allow"
+        agents[name]["permission"] = {"*": "allow"}
     if config.OPENCODE_EFFORT:
         if config.OPENCODE_EFFORT not in ("none", "minimal", "low", "medium", "high", "xhigh"):
             raise RuntimeError("OPENCODE_EFFORT must be none, minimal, low, medium, high or xhigh")

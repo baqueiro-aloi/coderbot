@@ -24,8 +24,8 @@ console.log(JSON.stringify(config));
         proc = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT,
                               capture_output=True, text=True, timeout=10, check=True)
         config = json.loads(proc.stdout)
-        self.assertEqual(config["permission"], "allow")
-        self.assertTrue(all(a["permission"] == "allow" for a in config["agent"].values()))
+        self.assertEqual(config["permission"], {"*": "allow"})
+        self.assertTrue(all(a["permission"] == {"*": "allow"} for a in config["agent"].values()))
         self.assertEqual(config["agent"]["explore"]["description"], "retain")
         self.assertEqual(config["agent"]["custom"]["model"], "provider/model")
 

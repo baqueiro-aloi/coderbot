@@ -3,10 +3,10 @@ export const RUNTIME_VERSION = '1.18.18';
 export const TRUSTED_PERMISSION = [{ permission: '*', pattern: '*', action: 'allow' }];
 
 export function trustedConfig(config) {
-  config.permission = 'allow';
+  config.permission = {'*': 'allow'};
   config.agent ||= {};
   for (const name of new Set(['build', 'plan', 'general', 'explore', ...Object.keys(config.agent)])) {
-    config.agent[name] = { ...config.agent[name], permission: 'allow' };
+    config.agent[name] = { ...config.agent[name], permission: {'*': 'allow'} };
   }
   return config;
 }
@@ -16,4 +16,35 @@ export function permissionRequest(event) {
   const p = event.properties;
   if (!p?.id || !p?.sessionID) throw new Error('Invalid permission.asked event');
   return { sessionID: p.sessionID, permissionID: p.id, response: 'always' };
+}
+
+export function trustedSessionPolicy({serverUrl, directory, fetch: request = globalThis.fetch}) {
+  const prepared = new Set();
+  async function send(route, method, body) {
+    const result = await request(new URL(route, serverUrl), {
+      method,
+      headers: {'content-type': 'application/json', 'x-opencode-directory': directory},
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!result.ok) throw new Error(`Trusted runtime request failed: ${method} ${result.status}`);
+  }
+  async function prepare(sessionID) {
+    if (prepared.has(sessionID)) return;
+    await send(`/session/${encodeURIComponent(sessionID)}`, 'PATCH', {permission: TRUSTED_PERMISSION});
+    prepared.add(sessionID);
+  }
+  return {
+    prepare,
+    async event({event}) {
+      const permission = permissionRequest(event);
+      if (permission) {
+        await send(`/session/${encodeURIComponent(permission.sessionID)}/permissions/${encodeURIComponent(permission.permissionID)}`,
+          'POST', {response: permission.response});
+        return;
+      }
+      if (event.type === 'session.created') await prepare(event.properties.info.id);
+    },
+    async before(input) { await prepare(input.sessionID); },
+  };
 }
