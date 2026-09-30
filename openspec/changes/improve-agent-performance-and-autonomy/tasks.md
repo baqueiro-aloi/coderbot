@@ -49,7 +49,7 @@
 
 ## 6. Handoffs, prompts y modelo de trabajo
 
-- [ ] 6.1 Implementar handoff_context acotado con requisitos, decisiones, diff, findings, checks y acción pendiente para sesiones por fase.
+- [x] 6.1 Implementar handoff_context acotado con requisitos, decisiones, diff, findings, checks y acción pendiente para sesiones por fase.
 - [ ] 6.2 Iniciar revisión con contexto fresco y rotar/compactar implementación al presupuesto configurable; probar reanudación con mapping de sesiones.
 - [ ] 6.3 Actualizar prompts y bridge skill para checks focalizados, suite final del controller y review/re-review independiente sin duplicación.
 - [ ] 6.4 Reconciliar TDD y KICK para preservar trabajo con evidencia válida, tratando código desconocido mediante diagnóstico focalizado.
