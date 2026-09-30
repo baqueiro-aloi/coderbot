@@ -38,6 +38,18 @@ def budget(seconds):
         _budget.reset(token)
 
 
+def bounded(seconds):
+    def decorate(function):
+        from functools import wraps
+        @wraps(function)
+        def call(*args, **kwargs):
+            limit = seconds() if callable(seconds) else seconds
+            with budget(limit):
+                return function(*args, **kwargs)
+        return call
+    return decorate
+
+
 def remaining(limit):
     current = _budget.get()
     return current.remaining(limit) if current else limit

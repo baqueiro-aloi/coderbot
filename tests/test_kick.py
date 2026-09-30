@@ -99,6 +99,8 @@ class StateRecovery(unittest.TestCase):
         agent_runner.set_task_context(state)
         try:
             with patch.object(config, "AGENT", "opencode"), \
+                 patch.object(agent_runner.phase_checkpoint, "replay", return_value=None), \
+                 patch.object(agent_runner.phase_checkpoint, "record"), \
                  patch.object(agent_runner, "_opencode", return_value=Mock()) as call:
                 agent_runner.resume("ses", "continue")
             prompt = call.call_args.args[0]

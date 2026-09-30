@@ -328,7 +328,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
         except ProcessLookupError:
             pass
 
-    timer = threading.Timer(timeout, _kill_on_timeout)
+    timer = threading.Timer(operations.remaining(timeout), _kill_on_timeout)
     timer.daemon = True
     timer.start()
     stop_watch = threading.Event()
@@ -354,6 +354,8 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     finally:
         stop_watch.set()
         timer.cancel()
+        if proc.poll() is None:
+            operations.terminate(proc)
         stderr_reader.join(timeout=5)
         proc.stdout.close()
         proc.stderr.close()
@@ -415,6 +417,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     return result
 
 
+@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""
@@ -440,6 +443,7 @@ def run(prompt: str, contract: bool = True):
         _end_turn()
 
 
+@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def resume(session_id: str, prompt: str):
     _begin_turn(session_id)
     try:
