@@ -13,6 +13,22 @@ ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
 
 
 class ExecutionStore:
+    def reusable_check(self, task_id, identity):
+        rows = self.list("check_run", task_id, identity=identity, status="complete")
+        return rows[0] if rows else None
+
+    def record_check(self, task_id, identity, *, result, status="complete", tdd=None):
+        if tdd not in (None, "RED", "GREEN"):
+            raise ValueError("TDD evidence must be RED or GREEN")
+        return self.put("check_run", task_id=task_id, identity=identity, status=status,
+                        data={"result": result, "tdd": tdd})
+
+    def interrupt_running(self, task_id):
+        with self.connection() as db:
+            for entity in ("operation", "check_run", "phase_attempt"):
+                db.execute(f"UPDATE {entity} SET status='interrupted',updated=? "
+                           "WHERE task_id=? AND status='running'", (time.time(), task_id))
+
     def task_identity(self, state, repo):
         """Derivable for legacy state even if its new cursor was never saved."""
         raw = json.dumps([str(Path(repo).resolve()), state.get("branch"),

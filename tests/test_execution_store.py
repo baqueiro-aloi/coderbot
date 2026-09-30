@@ -6,6 +6,16 @@ from execution_store import ENTITIES, ExecutionStore
 
 
 class ExecutionStoreTests(unittest.TestCase):
+    def test_interrupted_checks_are_not_reusable_and_tdd_is_durable(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            store.record_check("t", "input", result={"exit": 1}, status="running", tdd="RED")
+            self.assertIsNone(store.reusable_check("t", "input"))
+            store.interrupt_running("t")
+            self.assertEqual(store.list("check_run", "t")[0]["status"], "interrupted")
+            store.record_check("t", "green", result={"exit": 0}, tdd="GREEN")
+            self.assertEqual(store.reusable_check("t", "green")["data"]["tdd"], "GREEN")
+
     def test_legacy_cursor_and_attempt_reconcile_after_crash(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
