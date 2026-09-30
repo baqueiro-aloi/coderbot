@@ -1831,6 +1831,9 @@ def handle_review_wait(state: dict) -> None:
     Unresolved threads — not "comments newer than a watermark" — are the work queue:
     a thread the worker skipped, or one posted after a run was processed, stays in the
     queue instead of silently accumulating until merge time."""
+    if time.time() - state.get("review_since", time.time()) > config.REVIEW_WAIT_TIMEOUT_SECONDS:
+        finalize_pr(state, note="Automated review wait exhausted its deadline; review status is not established.")
+        return
     check = code_review_check(state["pr_url"])
     bucket = check.get("bucket") if check else None
     same_run = check is not None and check.get("link") == state.get("review_run_link")
@@ -2482,7 +2485,10 @@ def do_push(state: dict) -> None:
         state.pop("review_comments", None)
         _enter_review_wait(state)
     elif continuation == "conflicts":
-        _enter_review_wait(state)  # the resolved branch needs its re-review
+        if state.get("has_code_review"):
+            _enter_review_wait(state)
+        else:
+            finalize_pr(state)
     elif continuation == "feedback":
         attachments = [Path(path) for path in context.get("attachments", [])]
         attachments, video_url = _offload_evidence_video(state, attachments)
