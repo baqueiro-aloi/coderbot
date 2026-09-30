@@ -9,6 +9,23 @@ import phase_checkpoint
 
 
 class CheckpointReplayTests(unittest.TestCase):
+    def test_review_uses_fresh_session_and_bounded_handoff(self):
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(phase_checkpoint.config, "DATA_DIR", Path(root) / "data"), \
+             patch.object(phase_checkpoint.config, "REPO_PATH", Path(root)), \
+             patch.object(agent_runner.config, "AGENT", "opencode"), \
+             patch("agent_runner._opencode", return_value=agent_runner.OpenCodeResult("review", "done")) as call:
+            subprocess.run(["git", "init", "-q", root], check=True)
+            (Path(root) / ".gitignore").write_text("data/\n")
+            state = {"state": "INTERNAL_REVIEW", "branch": "b", "item": "t"}
+            agent_runner.set_task_context(state)
+            try:
+                agent_runner.resume("huge_history", "review")
+                self.assertIsNone(call.call_args.args[1])
+                self.assertIn("Durable task handoff", call.call_args.args[0])
+                self.assertEqual(state["phase_sessions"]["INTERNAL_REVIEW"], "review")
+            finally:
+                agent_runner.set_task_context(None)
     def test_crash_before_fsm_save_replays_completed_turn_not_agent(self):
         with tempfile.TemporaryDirectory() as root, \
              patch.object(phase_checkpoint.config, "DATA_DIR", Path(root) / "data"), \

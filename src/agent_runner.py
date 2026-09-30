@@ -15,6 +15,7 @@ import config
 import turn_control
 import phase_checkpoint
 import operations
+import handoff_context
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -111,6 +112,9 @@ def _observe(event: dict) -> None:
     context = _task_context.get()
     if context and persist:
         _persist(activity.observe, context, activity=label, session_id=session_id, now=observed)
+    if context and kind == "step_finish" and event.get("sourceSessionID", event.get("sessionID")) == _turn.get("session_id"):
+        tokens = part.get("tokens") or {}
+        context["session_context_tokens"] = tokens.get("total", 0)
 
 
 def set_task_language(language: str | None) -> None:
@@ -451,9 +455,18 @@ def resume(session_id: str, prompt: str):
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             return OpenCodeResult(saved["session_id"], saved["output"])
+        if context:
+            phase = context.get("state")
+            sessions = context.setdefault("phase_sessions", {})
+            fresh = (phase == "INTERNAL_REVIEW" and phase not in sessions) or (
+                context.get("session_context_tokens", 0) > config.CONTEXT_TOKEN_BUDGET)
+            if fresh:
+                prompt = handoff_context.render(context, phase) + "\n\n" + prompt
+                session_id = None
+                context["session_context_tokens"] = 0
         prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
-            result = claude_runner.resume(session_id, prompt)
+            result = claude_runner.resume(session_id, prompt) if session_id else claude_runner.run(prompt)
         elif config.AGENT == "opencode":
             try:
                 result = _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
@@ -469,6 +482,7 @@ def resume(session_id: str, prompt: str):
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
             phase_checkpoint.record(context, original_prompt, result)
+            context.setdefault("phase_sessions", {})[context["state"]] = result.session_id
         return result
     finally:
         _end_turn()

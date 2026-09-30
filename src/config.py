@@ -193,6 +193,7 @@ OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 OPENCODE_EFFORT = (os.environ.get("OPENCODE_EFFORT") or "").strip().lower()
 OPENCODE_TRANSPORT = os.environ.get("CODEBOT_OPENCODE_TRANSPORT", "http")
 DETERMINISTIC_CHECKS = os.environ.get("CODEBOT_DETERMINISTIC_CHECKS", "on").lower() != "off"
+CONTEXT_TOKEN_BUDGET = int(os.environ.get("CODEBOT_CONTEXT_TOKEN_BUDGET", "80000"))
 
 SUPERPOWERS_VERSION = "v6.3.0"
 SUPERPOWERS_PLUGIN_DIR = Path(os.environ.get(
