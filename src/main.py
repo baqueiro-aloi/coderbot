@@ -1077,7 +1077,7 @@ def _gate_feedback(state: dict, counter: str) -> str:
 
 def _verify_prompt(state: dict) -> str:
     return (_gate_feedback(state, "verify_round")
-            + prompts.render(prompts.VERIFY, slug=state["slug"], base=config.BASE_BRANCH))
+            + prompts.render(prompts.VERIFY, slug=state["slug"], base=state.get("base_sha") or config.BASE_BRANCH))
 
 
 def _internal_review_prompt(state: dict) -> str:

@@ -9,6 +9,16 @@ import final_checks
 
 
 class FinalCheckTests(unittest.TestCase):
+    def test_eighteen_preexisting_failures_pass_without_repair(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            failed = {"status": "fail", "failures": {f"test_{i}": "AssertionError: baseline" for i in range(18)}}
+            with patch("final_checks.check_plan.discover", return_value=[Check("e2e", ["run"])]), \
+                 patch("final_checks.checks.execute_plan", return_value=[failed]), \
+                 patch("final_checks.baseline_result", return_value=failed):
+                report = final_checks.run({"branch": "b", "base_sha": "a" * 40}, root, store)
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(len(report["checks"][0]["gate"]["preexisting"]), 18)
     def test_without_harness_still_executes_complete_unit_suite(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
