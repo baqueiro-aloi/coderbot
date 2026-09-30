@@ -210,8 +210,12 @@ LOG_LEVEL = (os.environ.get("CODEBOT_LOG_LEVEL") or "DEBUG").upper()
 POLL_INTERVAL_SECONDS = int(os.environ.get("CODEBOT_POLL_INTERVAL", "120"))
 # CODEBOT_CLAUDE_TIMEOUT is retained as a fallback for existing installations.
 AGENT_TIMEOUT_SECONDS = int(os.environ.get(
-    "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "7200")))
-E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "3600"))
+    "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "1800")))
+E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "900"))
+UTILITY_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_UTILITY_TIMEOUT", "30"))
+LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "45"))
+SUBAGENT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBAGENT_TIMEOUT", "600"))
+PROVIDER_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_PROVIDER_TIMEOUT", "180"))
 # Short calls (git/gh) must never hang the tick loop; a timeout surfaces as a tick
 # failure and feeds the retry/backoff path instead of wedging forever.
 SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBPROCESS_TIMEOUT", "120"))

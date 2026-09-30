@@ -12,7 +12,7 @@ set -u
 DATA_DIR="${CODEBOT_DATA_DIR:-/app/data}"
 HEARTBEAT="${DATA_DIR}/heartbeat"
 STALE="${CODEBOT_HEARTBEAT_STALE:-360}"   # ~3x poll interval: report unhealthy for visibility
-HARD="${CODEBOT_HEARTBEAT_HARD:-9000}"    # > max legit tick (agent 2h + margin): force restart
+HARD="${CODEBOT_HEARTBEAT_HARD:-600}"     # Supervisor deadlines handle legitimate long work.
 
 # No heartbeat yet: the process may still be starting (start-period covers this).
 [ -f "$HEARTBEAT" ] || exit 0

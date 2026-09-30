@@ -3668,7 +3668,8 @@ def _status_supervisor_loop() -> None:
 def _heartbeat_loop() -> None:
     while True:
         try:
-            if time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS:
+            if (not operations.expired() and
+                    (operations.snapshot() or time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS)):
                 config.HEARTBEAT_PATH.write_text(str(int(time.time())))
         except Exception:
             log.exception("heartbeat write failed")

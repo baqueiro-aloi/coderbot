@@ -9,6 +9,7 @@ import signal
 import subprocess
 
 import turn_control
+import config
 
 
 _budget: ContextVar = ContextVar("operation_budget", default=None)
@@ -89,7 +90,8 @@ def observe(event):
         tool = part.get("tool", "tool")
         if any(entry["id"] == id for entry in snapshot()):
             return
-        limit = 600 if tool == "task" else 900 if tool == "bash" else 45
+        limit = (config.SUBAGENT_TIMEOUT_SECONDS if tool == "task" else
+                 config.E2E_TIMEOUT_SECONDS if tool == "bash" else config.LOCAL_TOOL_TIMEOUT_SECONDS)
         begin("subagent" if tool == "task" else "tool", tool, limit, id=id)
     elif kind == "tool_use" and id:
         finish(id)
@@ -98,7 +100,7 @@ def observe(event):
         status = event.get("status", {}).get("type")
         if status == "retry":
             if not any(entry["id"] == sid for entry in snapshot()):
-                begin("provider", "provider retry", 180, id=sid)
+                begin("provider", "provider retry", config.PROVIDER_TIMEOUT_SECONDS, id=sid)
         else:
             finish(sid)
 
