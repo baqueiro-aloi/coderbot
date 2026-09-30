@@ -38,7 +38,7 @@
 
 ## 5. Baseline y suite completa final
 
-- [ ] 5.1 Crear worktree baseline sobre base_sha inmutable y entorno comparable con recursos aislados y cleanup supervisado.
+- [x] 5.1 Crear worktree baseline sobre base_sha inmutable y entorno comparable con recursos aislados y cleanup supervisado.
 - [ ] 5.2 Comparar fallos por identidad de test y firma de error conservadora; probar errores semánticamente distintos, infraestructura y baseline indeterminado.
 - [ ] 5.3 Persistir/reutilizar baseline por SHA, comando y entorno; ejecutar comparaciones necesarias sin rerun completo injustificado.
 - [ ] 5.4 Cambiar VERIFY a checks focalizados/OpenSpec y la fase final a suites completas después de revisión, incluyendo tareas sin harness.
