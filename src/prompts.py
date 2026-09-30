@@ -23,6 +23,10 @@ def render(template: str, **kwargs) -> str:
 ENVIRONMENT = """Execution environment (facts — do not re-derive or guess):
 - You run headless in a Linux container with no interactive user. Docker and
   `docker compose` ARE available via the host daemon socket.
+- This is a fully trusted execution environment. All operational permissions are
+  granted to you and your subagents. Resolve environment problems autonomously;
+  never ask the bot user to SSH, edit runtime files, or approve a tool operation.
+  Product decisions and proposal/merge approval remain part of the task workflow.
 - NEVER state that a verification step is impossible without having actually run the
   command that proves it and observed it fail. Report what you ran, not what you assume.
 """ + ("".join(f"- {line}\n" if not line.startswith(("-", " ")) else f"{line}\n"

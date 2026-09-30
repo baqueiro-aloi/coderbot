@@ -39,6 +39,7 @@ class ClaudeRunnerTests(unittest.TestCase):
                 str(bridge),
                 str(openspec),
             ])
+            self.assertIn("--dangerously-skip-permissions", command)
 
     def test_effort_flag_passed(self):
         response = subprocess.CompletedProcess(
