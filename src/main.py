@@ -21,6 +21,7 @@ import phase_checkpoint
 import operations
 import check_plan
 import checks
+import final_checks
 import architecture_report
 import config
 import drive_client
@@ -1135,7 +1136,7 @@ def _complete_internal_review(state: dict, result) -> None:
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
     state["internal_review_report"] = parsed
-    state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
+    state["state"] = "E2E"  # Final unit/lint/build checks also apply without a UI harness.
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
     if state["state"] == "ARCHIVING":
@@ -1163,6 +1164,18 @@ def _finish_e2e_repair(state: dict) -> None:
 
 
 def do_e2e(state: dict) -> None:
+    if config.DETERMINISTIC_CHECKS:
+        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+        state["final_check_report"] = report
+        save_state(state)
+        if report["status"] != "pass":
+            _gate_failed(state, "E2E", "final_check_round", "Final checks: " + report["status"],
+                         json.dumps(report, ensure_ascii=False)[-5000:])
+            return
+        state["e2e_passed"] = bool(state.get("has_e2e_harness"))
+        state["state"] = "ARCHIVING"
+        announce_milestone(state, "archiving", "Final checks passed; I'm archiving the change.")
+        return
     if "e2e_repair_head" in state and "e2e_repair_status" in state:
         _finish_e2e_repair(state)
         if state["state"] != "E2E":

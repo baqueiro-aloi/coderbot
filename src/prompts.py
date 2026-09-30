@@ -211,17 +211,18 @@ $e2e_report_note
 
 VERIFY = ENVIRONMENT + """
 Invoke `coderbot-openspec-workflow` for the verification phase of change
-$slug. Run fresh, complete relevant verification commands in this phase; do not reuse
-prior evidence. Run independent verification commands (unit tests, lint, type checks,
-e2e, OpenSpec validation) in parallel — in one message or via subagents — rather than
-one after another. Report each command and result. Strictly validate the active OpenSpec
+$slug. Run focused checks for the affected behavior in this phase and request
+controller-run checks with CHECK_PLAN. Do not rerun full suites or baseline suites:
+the controller owns a complete final verification after independent review and
+reuses only content/environment-bound valid results. Report each actual command
+and result. Strictly validate the active OpenSpec
 change and confirm all OpenSpec apply tasks are complete.
 A failing check never passes by being re-run or re-reported. For every failure:
 - If the change introduced or worsened it, fix it, commit the fix on the task branch,
   and rerun the check.
-- If the very same failure exists on the base branch `$base` (run the same command
-  against `$base` in a throwaway `git worktree`; never check out `$base` in place),
-  it is pre-existing: leave it alone and list it under "preexisting" in the contract.
+- The controller compares failures against the immutable base SHA `$base` through
+  an isolated baseline worktree. Do not label a failure pre-existing without its
+  recorded comparison; report unresolved checks for the final gate.
 "status" is "pass" only when every check passes or every remaining failure is a
 confirmed pre-existing one. "preexisting" may be omitted or empty when nothing is
 pre-existing. Emit exactly one completion contract as the final standalone line, with no

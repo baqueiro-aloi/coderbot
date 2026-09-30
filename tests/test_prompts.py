@@ -169,8 +169,7 @@ class PromptContractTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "Run fresh, complete relevant verification commands in this phase; do not reuse "
-            "prior evidence.",
+            "Run focused checks for the affected behavior in this phase",
             rendered.replace("\n", " "),
         )
         self.assertIn(
@@ -182,8 +181,8 @@ class PromptContractTests(unittest.TestCase):
         self.assertNotIn("Skip commands already run", rendered)
         # Pre-existing failures: confirmed against the base branch, never checked out in place.
         self.assertIn("A failing check never passes by being re-run or re-reported.", rendered)
-        self.assertIn("against `main` in a throwaway `git worktree`", rendered)
-        self.assertIn("never check out `main` in place", rendered)
+        self.assertIn("immutable base SHA `main`", rendered)
+        self.assertIn("isolated baseline worktree", rendered)
         self.assert_no_integration_authority(rendered)
         self.assertEqual(rendered.count(contract), 1)
         self.assertEqual(rendered.strip().splitlines()[-1], contract)
