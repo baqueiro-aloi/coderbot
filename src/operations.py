@@ -4,6 +4,11 @@ from contextvars import ContextVar
 import threading
 import time
 import uuid
+import os
+import signal
+import subprocess
+
+import turn_control
 
 
 _budget: ContextVar = ContextVar("operation_budget", default=None)
@@ -88,3 +93,49 @@ def observe(event):
 def clear():
     with _lock:
         _active.clear()
+
+
+def terminate(process, grace=3):
+    """Signal the whole group even if its leader already exited."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.wait()
+        return
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
+
+
+def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None):
+    operation = begin(kind, str(argv[0]), timeout)
+    process = None
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input else None,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        turn_control.register(process)
+        try:
+            stdout, stderr = process.communicate(input=input, timeout=remaining(timeout))
+        except BaseException:
+            terminate(process)
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    finally:
+        kicked = turn_control.release(process) if process is not None else False
+        if process is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream and not stream.closed:
+                    stream.close()
+        try:
+            if cleanup:
+                cleanup()
+        finally:
+            finish(operation)
+        if kicked:
+            raise turn_control.TurnKicked("user requested KICK")

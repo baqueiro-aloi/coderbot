@@ -1,9 +1,43 @@
 import unittest
 from operations import Budget, budget, remaining
 import operations
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 
 class BudgetTests(unittest.TestCase):
+    def test_timeout_reaps_process_and_runs_resource_cleanup(self):
+        cleaned = []
+        with self.assertRaises(subprocess.TimeoutExpired):
+            operations.run([sys.executable, "-c", "import time; time.sleep(30)"],
+                           timeout=.1, cleanup=lambda: cleaned.append(True))
+        self.assertEqual(cleaned, [True])
+        self.assertEqual(operations.snapshot(), [])
+
+    def test_cancel_kills_grandchild_holding_port(self):
+        import socket
+        import time
+        with tempfile.TemporaryDirectory() as root:
+            port_file = str(Path(root) / "port")
+            child = "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',0)); open(%r,'w').write(str(s.getsockname()[1])); time.sleep(30)" % port_file
+            leader = subprocess.Popen([sys.executable, "-c",
+                "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',%r]); time.sleep(30)" % child],
+                start_new_session=True)
+            try:
+                for _ in range(100):
+                    if Path(port_file).exists():
+                        break
+                    time.sleep(.01)
+                port = int(Path(port_file).read_text())
+                operations.terminate(leader, grace=.1)
+                with socket.socket() as probe:
+                    probe.bind(("127.0.0.1", port))
+            finally:
+                operations.terminate(leader, grace=.1)
+
     def test_tool_state_distinguishes_subagent_and_silent_test(self):
         operations.clear()
         try:
