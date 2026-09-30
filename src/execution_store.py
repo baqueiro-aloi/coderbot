@@ -1,0 +1,82 @@
+"""Durable execution outcomes; independent of the optional progress telemetry."""
+from contextlib import contextmanager
+import json
+from pathlib import Path
+import sqlite3
+import time
+import uuid
+
+
+ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
+            "checkpoint", "artifact", "delivery_step")
+
+
+class ExecutionStore:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.connection() as db:
+            db.execute("PRAGMA journal_mode=WAL")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version > 1:
+                raise ValueError(f"Execution store schema {version} is newer than supported")
+            for entity in ENTITIES:
+                db.execute(f"CREATE TABLE IF NOT EXISTS {entity} ("
+                    "id TEXT PRIMARY KEY, task_id TEXT NOT NULL, parent_id TEXT, "
+                    "status TEXT NOT NULL, identity TEXT, created REAL NOT NULL, "
+                    "updated REAL NOT NULL, data TEXT NOT NULL)")
+                db.execute(f"CREATE INDEX IF NOT EXISTS {entity}_task_identity "
+                           f"ON {entity}(task_id,identity,status)")
+            db.execute("PRAGMA user_version=1")
+
+    @contextmanager
+    def connection(self):
+        db = sqlite3.connect(self.path, timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA busy_timeout=5000")
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def _entity(entity):
+        if entity not in ENTITIES:
+            raise ValueError(f"Unknown execution entity: {entity}")
+        return entity
+
+    def put(self, entity, *, task_id, data, status="running", identity=None,
+            parent_id=None, id=None):
+        entity = self._entity(entity)
+        id = id or uuid.uuid4().hex
+        now = time.time()
+        encoded = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        with self.connection() as db:
+            db.execute(f"INSERT INTO {entity} VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET status=excluded.status, "
+                "identity=excluded.identity,updated=excluded.updated,data=excluded.data",
+                (id, task_id, parent_id, status, identity, now, now, encoded))
+        return id
+
+    def get(self, entity, id):
+        with self.connection() as db:
+            row = db.execute(f"SELECT * FROM {self._entity(entity)} WHERE id=?", (id,)).fetchone()
+        return self._decode(row) if row else None
+
+    @staticmethod
+    def _decode(row):
+        result = dict(row)
+        result["data"] = json.loads(result["data"])
+        return result
+
+    def list(self, entity, task_id, *, identity=None, status=None):
+        conditions, args = ["task_id=?"], [task_id]
+        for name, value in (("identity", identity), ("status", status)):
+            if value is not None:
+                conditions.append(f"{name}=?")
+                args.append(value)
+        with self.connection() as db:
+            rows = db.execute(f"SELECT * FROM {self._entity(entity)} WHERE "
+                              + " AND ".join(conditions) + " ORDER BY updated DESC", args).fetchall()
+        return [self._decode(row) for row in rows]
