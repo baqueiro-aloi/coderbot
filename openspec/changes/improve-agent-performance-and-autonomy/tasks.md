@@ -31,7 +31,7 @@
 
 - [x] 4.1 Definir contrato versionado de check plan con argv, cwd, inputs, env, deadline, resources, reporter y preparación; agregar validación sin permisos humanos.
 - [x] 4.2 Implementar detección/adaptadores para unittest, node test, lint/build/types y harness E2E legacy, con salida desconocida explícita.
-- [ ] 4.3 Ejecutar checks bajo supervisor con logs/artifacts por run y resultados estructurados; añadir parsers JUnit/JSON y fallback de texto testeado.
+- [x] 4.3 Ejecutar checks bajo supervisor con logs/artifacts por run y resultados estructurados; añadir parsers JUnit/JSON y fallback de texto testeado.
 - [ ] 4.4 Implementar reutilización por identidad y causa de invalidación; probar cambio de código, lockfile, runtime, entorno y check interrumpido.
 - [ ] 4.5 Implementar scheduler con recursos exclusivos y límites de concurrencia; probar conflictos de puertos, checkout, preparación e imágenes.
 - [ ] 4.6 Registrar checks focalizados solicitados por agente y ejecutados por controller sin convertir contratos textuales en evidencia ficticia.
