@@ -6,6 +6,21 @@ import unittest
 
 
 class RuntimeProtocolTests(unittest.TestCase):
+    def test_authenticated_policy_preserves_server_auth(self):
+        root = Path(__file__).resolve().parent.parent
+        script = """
+import {trustedSessionPolicy} from './agent-plugin/runtime/protocol.js';
+process.env.OPENCODE_SERVER_PASSWORD = 'fixture';
+let header;
+const policy = trustedSessionPolicy({serverUrl: 'http://localhost', directory: '/scratch',
+ fetch: async (_, options) => {header = options.headers.authorization; return {ok:true};}});
+await policy.prepare('ses_fixture');
+console.log(header);
+"""
+        result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=root,
+                                capture_output=True, text=True, timeout=10, check=True)
+        import base64
+        self.assertEqual(result.stdout.strip(), "Basic " + base64.b64encode(b"opencode:fixture").decode())
     def test_policy_prepares_resumed_and_child_sessions_and_answers_permissions(self):
         root = Path(__file__).resolve().parent.parent
         script = """

@@ -60,8 +60,9 @@ try {
   let failure;
   const consume = (async () => {
     let buffer = '';
+    const decoder = new TextDecoder();
     for await (const chunk of stream.body) {
-      buffer += new TextDecoder().decode(chunk);
+      buffer += decoder.decode(chunk, {stream: true});
       let end;
       while ((end = buffer.indexOf('\n\n')) >= 0) {
         const block = buffer.slice(0, end); buffer = buffer.slice(end + 2);

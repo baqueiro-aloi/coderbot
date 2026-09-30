@@ -63,7 +63,7 @@ def discover(repo):
             python = area / ".venv/bin/python"
             checks.append(Check("unit:" + directory,
                 [str(python.resolve()) if python.exists() else sys.executable,
-                 "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=directory,
+                 "-m", "unittest", "discover", "-s", "tests", "-v", *(["-t", "."] if directory == "." else [])], cwd=directory,
                 inputs=[directory] if directory != "." else ["src", "tests", "requirements.txt"],
                 reporter="unittest"))
     for directory in (".", "frontend"):

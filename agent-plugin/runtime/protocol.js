@@ -21,9 +21,13 @@ export function permissionRequest(event) {
 export function trustedSessionPolicy({serverUrl, directory, fetch: request = globalThis.fetch}) {
   const prepared = new Set();
   async function send(route, method, body) {
+    const headers = {'content-type': 'application/json', 'x-opencode-directory': directory};
+    if (process.env.OPENCODE_SERVER_PASSWORD) {
+      headers.authorization = 'Basic ' + Buffer.from(`${process.env.OPENCODE_SERVER_USERNAME || 'opencode'}:${process.env.OPENCODE_SERVER_PASSWORD}`).toString('base64');
+    }
     const result = await request(new URL(route, serverUrl), {
       method,
-      headers: {'content-type': 'application/json', 'x-opencode-directory': directory},
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(10000),
     });
