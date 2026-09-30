@@ -9,6 +9,17 @@ import final_checks
 
 
 class FinalCheckTests(unittest.TestCase):
+    def test_push_failure_preserves_continuation_before_any_push(self):
+        import main
+        state = {"state": "PUSHING", "branch": "b", "item": "t",
+                 "push_context": {"continuation": "threads", "output": "RESOLVE: x"}}
+        with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
+             patch.object(main.final_checks, "run", return_value={"status": "indeterminate", "checks": []}), \
+             patch.object(main, "save_state"), patch.object(main, "_gate_failed"), \
+             patch.object(main, "git") as git:
+            main.do_push(state)
+        git.assert_not_called()
+        self.assertEqual(state["push_context"]["output"], "RESOLVE: x")
     def test_only_new_regressions_block_final_gate(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")

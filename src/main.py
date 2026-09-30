@@ -2422,6 +2422,15 @@ def do_push(state: dict) -> None:
     if continuation not in ("review", "feedback", "threads", "conflicts"):
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
+    if config.DETERMINISTIC_CHECKS:
+        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+        state["final_check_report"] = report
+        save_state(state)
+        if report["status"] != "pass":
+            _gate_failed(state, "PUSHING", "post_review_check_round",
+                         "Post-review final checks: " + report["status"], json.dumps(report)[-5000:])
+            return
+
     git("push", "origin", state["branch"])
     _notify_architecture(state, update=True)
     if continuation == "review":
