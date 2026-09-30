@@ -11,7 +11,7 @@
 
 - [x] 2.1 Implementar execution_store SQLite WAL con migraciones aditivas y entidades de tarea, intento, operación, check, hallazgo, checkpoint, artifact y entrega.
 - [x] 2.2 Implementar identidad estable de tarea/intento y reconciliación con state.json; probar recuperación de estado anterior sin datos nuevos.
-- [ ] 2.3 Implementar snapshots de contenido tracked/untracked relevante y exclusiones explícitas; probar ediciones con git status idéntico y cambios documentales.
+- [x] 2.3 Implementar snapshots de contenido tracked/untracked relevante y exclusiones explícitas; probar ediciones con git status idéntico y cambios documentales.
 - [ ] 2.4 Implementar fingerprints de argv/cwd, entorno, lockfiles y herramientas con manejo de secretos sin exportar valores.
 - [ ] 2.5 Persistir resultado de turno y próxima acción antes de notificaciones; probar crash entre store, state.json y efecto externo.
 - [ ] 2.6 Persistir checks y evidencia RED/GREEN con procedencia; invalidar running/interrupted y recuperar solo resultados completos.
