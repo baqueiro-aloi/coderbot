@@ -79,9 +79,9 @@ class BridgeSkillTests(unittest.TestCase):
         self.assertEqual(self.skill.lower().count("checkout"), 1)
 
     def test_requires_strict_tdd_for_inherited_production_code(self):
-        self.assertIn("Strict TDD applies to inherited production code", self.skill)
-        self.assertIn("delete or revert it and restart test-first", self.skill)
-        self.assertIn("previous agent", self.skill)
+        self.assertIn("Preserve valid work from previous attempts", self.skill)
+        self.assertIn("durable RED/GREEN evidence", self.skill)
+        self.assertNotIn("delete or revert it and restart test-first", self.skill)
 
     def test_phase_contract_has_exact_order(self):
         expected = [

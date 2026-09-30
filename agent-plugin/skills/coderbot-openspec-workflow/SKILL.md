@@ -48,19 +48,19 @@ Serialise only steps that genuinely depend on an earlier result. Parallel subage
 
 ## Strict TDD
 
-Strict TDD applies to inherited production code. If production implementation exists without an observed failing test, including work from a previous agent, delete or revert it and restart test-first. Tests added afterward are not TDD. Use `test-driven-development`; do not replace its RED-GREEN-REFACTOR procedure here.
+Use test-driven-development for new behavior. On recovery inspect durable RED/GREEN evidence, completed tasks and the actual diff first. Preserve valid work from previous attempts; do not delete or rebuild implementation solely because the current session did not witness its tests. For unknown or incomplete work, diagnose and run focused coverage, then repair minimally. Report missing TDD evidence honestly rather than inventing it.
 
 ## Rationalization Counters
 
 | Excuse | Reality |
 |---|---|
-| "Preserve inherited code and add coverage." | Untested inherited implementation must be removed and rebuilt from a witnessed RED. |
+| "Restart all work after KICK." | Preserve valid checkpoints and RED/GREEN evidence; repair only incomplete work. |
 | "The work is verified, so I can open the PR." | Verification produces evidence; coderbot owns every lifecycle side effect. |
 | "Archiving is the obvious next step." | Only coderbot selects archive timing and enters `ARCHIVING / OPEN_PR`. |
 
 ## Red Flags
 
-- Retrospective tests for inherited implementation
+- Inventing RED/GREEN evidence or discarding valid work merely because a session restarted
 - Any agent-run archive, push, PR, merge, or branch-finishing command
 - Any merge-strategy recommendation
 
@@ -68,9 +68,9 @@ Stop and return control to coderbot when any red flag appears.
 
 ## Example
 
-In `IMPLEMENTING`, discover inherited untested code: remove it, witness the focused test fail, implement minimally, report the phase result, and hand control back to coderbot.
+In `IMPLEMENTING`, recover partial code: inspect checkpoints, run focused checks for incomplete behavior, repair minimally and hand control back to coderbot.
 
 ## Common Mistakes
 
 - Treating phase completion as permission to advance the workflow
-- Keeping previous-agent code because deleting it feels wasteful
+- Rebuilding previous-agent work without examining its checkpoint evidence
