@@ -191,6 +191,7 @@ CLAUDE_FALLBACK_COOLDOWN_SECONDS = int(
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL") or ""
 # Empty preserves OpenCode/provider defaults; explicit values control GPT reasoning.
 OPENCODE_EFFORT = (os.environ.get("OPENCODE_EFFORT") or "").strip().lower()
+OPENCODE_TRANSPORT = os.environ.get("CODEBOT_OPENCODE_TRANSPORT", "http")
 
 SUPERPOWERS_VERSION = "v6.3.0"
 SUPERPOWERS_PLUGIN_DIR = Path(os.environ.get(

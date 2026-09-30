@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
 import threading
+import subprocess
 
 from probe_opencode_runtime import probe
 
@@ -88,6 +89,15 @@ def exercise_runtime():
                         "parts": [{"type": "text", "text": "Resume fixture."}]})
                     roles.append(role)
                 assert request("/permission") == []
+                bridge = Path(__file__).resolve().parent.parent / "agent-plugin/runtime/run.js"
+                process = subprocess.run(["node", str(bridge)], cwd=root, env=request.environment,
+                    input=json.dumps({"directory": str(root), "model": "fixture/fixture",
+                                      "prompt": "Run fixture tools."}),
+                    capture_output=True, text=True, timeout=30)
+                assert process.returncode == 0, (process.stdout, process.stderr)
+                events = [json.loads(line) for line in process.stdout.splitlines()]
+                assert any(e["type"] == "tool_start" for e in events), events
+                assert any(e["type"] == "text" for e in events), events
                 return roles
 
             plugin = Path(__file__).resolve().parent.parent / "agent-plugin/.opencode/plugins/coderbot-openspec.js"

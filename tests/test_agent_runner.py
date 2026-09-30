@@ -68,6 +68,10 @@ class StreamingTests(unittest.TestCase):
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self.transport = patch.object(agent_runner.config, "OPENCODE_TRANSPORT", "cli")
+        self.transport.start()
+        self.addCleanup(self.transport.stop)
     superpowers = Path("/managed/superpowers")
     bridge = Path("/managed/bridge")
 
@@ -115,6 +119,15 @@ class OpenCodeRunnerTests(unittest.TestCase):
             result = agent_runner._opencode("hello")
         self.assertEqual(result.session_id, "ses_123")
         self.assertEqual(result.output, "first\nsecond")
+
+    def test_http_transport_uses_stdin_without_prompt_in_process_args(self):
+        with patch.object(agent_runner.config, "OPENCODE_TRANSPORT", "http"), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            result = agent_runner._opencode("private prompt", "ses_old")
+        self.assertEqual(result.output, "done")
+        self.assertEqual(run.call_args.args[0][0], "node")
+        self.assertNotIn("private prompt", " ".join(run.call_args.args[0]))
+        self.assertEqual(json.loads(run.call_args.kwargs["input_text"])["sessionID"], "ses_old")
 
     def test_raises_for_opencode_error_event(self):
         proc = subprocess.CompletedProcess(

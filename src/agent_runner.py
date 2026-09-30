@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 from contextvars import ContextVar
 
 import claude_runner
@@ -303,12 +304,13 @@ def _stream_line(line: str) -> None:
 
 
 def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
-                   on_line=_stream_line) -> subprocess.CompletedProcess:
+                   on_line=_stream_line, input_text=None) -> subprocess.CompletedProcess:
     """subprocess.run(capture_output=True, text=True, timeout=...) equivalent that hands
     every stdout line to on_line as it arrives. Raises subprocess.TimeoutExpired (with
     the partial output) after killing the process, as subprocess.run would."""
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+                            stderr=subprocess.PIPE, stdin=subprocess.PIPE if input_text is not None else None,
+                            text=True, start_new_session=True)
     turn_control.register(proc)
     stderr_chunks: list[str] = []
     stderr_reader = threading.Thread(
@@ -326,6 +328,9 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     timer = threading.Timer(timeout, _kill_on_timeout)
     timer.daemon = True
     timer.start()
+    if input_text is not None:
+        proc.stdin.write(input_text)
+        proc.stdin.close()
     stdout_lines: list[str] = []
     try:
         for line in proc.stdout:
@@ -360,8 +365,16 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     log.info("opencode %s model=%s effort=%s (prompt %d chars)",
              "resume" if session_id else "run", config.OPENCODE_MODEL,
              config.OPENCODE_EFFORT or "default", len(prompt))
-    proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
-                          timeout=config.AGENT_TIMEOUT_SECONDS)
+    if config.OPENCODE_TRANSPORT == "http":
+        bridge = Path(config.BRIDGE_PLUGIN_DIR) / "runtime" / "run.js"
+        proc = _run_streaming(["node", str(bridge)], cwd=config.REPO_PATH,
+            env=_opencode_environment(), timeout=config.AGENT_TIMEOUT_SECONDS,
+            input_text=json.dumps({"directory": str(config.REPO_PATH), "model": config.OPENCODE_MODEL,
+                "sessionID": session_id, "variant": "coderbot-effort" if config.OPENCODE_EFFORT else None,
+                "prompt": prompt}))
+    else:
+        proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
+                              timeout=config.AGENT_TIMEOUT_SECONDS)
 
     output, errors, observed_session = [], [], None
     for line in proc.stdout.splitlines():

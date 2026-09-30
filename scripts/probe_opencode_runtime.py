@@ -57,6 +57,7 @@ def probe(executable="opencode", plugin=None, exercise=None, extra_config=None):
                         raise RuntimeError(error.read().decode()) from error
 
                 config = request("/config")
+                request.environment = env
                 assert config["permission"] == {"*": "allow"} or config["permission"] == "allow"
                 allow = [{"permission": "*", "pattern": "*", "action": "allow"}]
                 parent = request("/session", {"title": "probe", "permission": allow})
