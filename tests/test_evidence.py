@@ -9,6 +9,19 @@ import evidence
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_timeout_bytes_and_ffmpeg_timeout_are_best_effort(self):
+        with patch("evidence.operations.run", side_effect=subprocess.TimeoutExpired(["run"], 1,
+                 output=b"partial", stderr=b"error")), patch("evidence._teardown_stack"):
+            passed, output = evidence.run_suite()
+        self.assertFalse(passed)
+        self.assertIn("partial", output)
+        with tempfile.TemporaryDirectory() as root:
+            clip = Path(root) / "clip.webm"
+            clip.write_bytes(b"video")
+            with patch("evidence.shutil.which", return_value="ffmpeg"), \
+                 patch.object(evidence.config, "DATA_DIR", Path(root)), \
+                 patch("evidence.operations.run", side_effect=subprocess.TimeoutExpired(["ffmpeg"], 1)):
+                self.assertIsNone(evidence._stitch_to_mp4([clip]))
     def test_old_clip_is_not_returned_when_recording_produces_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             e2e = Path(tmp)

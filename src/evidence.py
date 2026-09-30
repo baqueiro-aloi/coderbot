@@ -15,6 +15,10 @@ from execution_store import ExecutionStore
 log = logging.getLogger(__name__)
 _recording_passed = False
 
+
+def _text(value):
+    return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+
 E2E_DIR = config.REPO_PATH / "e2e"
 # The compose file run.sh brings up (relative to E2E_DIR); torn down by codebot itself
 # when a timed-out run.sh could not (see _teardown_stack).
@@ -97,7 +101,7 @@ def run_suite() -> tuple[bool, str]:
         log.error("e2e suite timed out after %ss; tearing down leaked stack",
                   config.E2E_TIMEOUT_SECONDS)
         _teardown_stack()
-        tail = ((exc.stdout or "") + "\n" + (exc.stderr or ""))[-6000:]
+        tail = (_text(exc.stdout) + "\n" + _text(exc.stderr))[-6000:]
         return False, f"e2e suite TIMED OUT after {config.E2E_TIMEOUT_SECONDS}s\n{tail}"
     output = (proc.stdout + "\n" + proc.stderr)[-8000:]
     log.info("e2e suite exit=%d", proc.returncode)
@@ -250,8 +254,11 @@ def _stitch_to_mp4(clips: list[Path]) -> Path | None:
              len(clips), out.name, scratch_dir)
     returned_from_tmp = False  # the scratch dir only survives if we return its file
     try:
-        proc = operations.run(cmd,
-                              timeout=config.E2E_TIMEOUT_SECONDS)
+        try:
+            proc = operations.run(cmd, timeout=config.E2E_TIMEOUT_SECONDS)
+        except (subprocess.TimeoutExpired, TimeoutError, OSError):
+            log.warning("evidence conversion unavailable or timed out")
+            return None
         if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             log.warning("ffmpeg stitch failed rc=%d; stderr tail:\n%s",
                         proc.returncode, proc.stderr[-1500:])
