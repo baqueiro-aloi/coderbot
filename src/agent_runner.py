@@ -447,7 +447,8 @@ def run(prompt: str, contract: bool = True):
             result = claude_runner.run(prompt, contract=contract)
         elif config.AGENT == "opencode":
             full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
-            result = _opencode(full)
+            with operations.budget(config.UTILITY_TIMEOUT_SECONDS if not contract else config.AGENT_TIMEOUT_SECONDS):
+                result = _opencode(full)
         else:
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:

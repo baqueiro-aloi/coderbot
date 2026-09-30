@@ -2,6 +2,7 @@
 communicating with the user exclusively by email."""
 import fcntl
 import json
+import hashlib
 import logging
 import re
 import secrets
@@ -111,6 +112,25 @@ def _send_localized(state: dict, subj: str, body: str, thread_id: str) -> None:
     gmail_client.send(_localized(state, subj), _localized(state, body), thread_id)
 
 
+def _localized_pair(state, phase, body):
+    if state.get("task_language", "English").casefold() == "english":
+        return phase, body
+    cache = state.setdefault("localized_messages", {})
+    key = hashlib.sha256((phase + "\0" + body).encode()).hexdigest()
+    if key in cache:
+        return tuple(cache[key])
+    # One text-only utility handles both fields; reuse its output for trail.
+    result = agent_runner.run("Translate subject and body to " + state["task_language"]
+        + '. Return ONLY JSON with keys subject and body. Preserve commands, URLs and code.\n'
+        + json.dumps({"subject": phase, "body": body}, ensure_ascii=False), contract=False)
+    value = parse_json_reply(result.output)
+    pair = (value["subject"], value["body"])
+    cache[key] = list(pair)
+    if len(cache) > 30:
+        cache.pop(next(iter(cache)))
+    return pair
+
+
 def _language_state_for_thread(state: dict, thread_id: str | None) -> dict:
     if thread_id == state.get("thread_id"):
         return state
@@ -138,8 +158,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
     # The one-shot localizer never resumes or changes the task's coding session.
     if state.get("task_language"):
-        phase = _localized(state, phase)
-        body = _localized(state, body)
+        phase, body = _localized_pair(state, phase, body)
     subj = subject(state, phase)
     log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
@@ -157,7 +176,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     names = [Path(a).name for a in (attachments or [])]
     activity = body + (f"\n\nAttachments ({'emailed' if config.COMM_CHANNEL == 'email' else 'shared'}): {', '.join(names)}" if names else "")
     if state.get("task_language"):
-        trail(state, phase, activity, localized=not names)
+        trail(state, phase, activity, localized=True)
     else:
         trail(state, phase, activity)
 

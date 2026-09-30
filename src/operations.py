@@ -33,7 +33,7 @@ class Budget:
 @contextmanager
 def budget(seconds):
     inherited = _budget.get()
-    token = _budget.set(inherited or Budget(seconds))
+    token = _budget.set(Budget(inherited.remaining(seconds)) if inherited else Budget(seconds))
     try:
         yield _budget.get()
     finally:

@@ -64,13 +64,12 @@ class TaskLanguageTests(unittest.TestCase):
         state: dict = {"item": "Seleccionar modelo", "slug": "modelo", "state": "WAIT_REPLY",
                        "thread_id": "C123:1.0", "task_language": "Spanish"}
         with patch.object(main.agent_runner, "run", side_effect=[
-                SimpleNamespace(output="pregunta durante EXPLORING"),
-                SimpleNamespace(output="Tarea: Seleccionar modelo\n\nResponde en este hilo.")]) as run, \
+                SimpleNamespace(output='{"subject":"pregunta durante EXPLORING","body":"Tarea: Seleccionar modelo\\n\\nResponde en este hilo."}')]) as run, \
              patch.object(main.gmail_client, "send", return_value="C123:1.0") as send, \
              patch.object(main, "trail"), patch.object(main, "_note_contact"):
             main.email(state, "question during EXPLORING",
                        "Task: Seleccionar modelo\n\nReply in this Slack thread.")
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
         self.assertTrue(all(c.kwargs["contract"] is False for c in run.call_args_list))
         self.assertIn("pregunta durante EXPLORING", send.call_args.args[0])
         self.assertEqual(send.call_args.args[1], "Tarea: Seleccionar modelo\n\nResponde en este hilo.")

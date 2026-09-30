@@ -218,6 +218,10 @@ def _invoke_with_model(args: list[str], prompt: str,
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--plugin-dir", str(config.OPENSPEC_SKILLS_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
+    if "--tools" in args:
+        for _ in range(3):
+            index = cmd.index("--plugin-dir")
+            del cmd[index:index + 2]
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, config.CLAUDE_EFFORT,
              len(prompt), _config_report())
@@ -252,6 +256,9 @@ def run(prompt: str, contract: bool = True) -> ClaudeResult:
     # the JSON contract in their own prompt — the sentinel contract would otherwise let
     # a classifier emit NEED_USER_INPUT instead of JSON and loop the reply forever.
     full = SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+    if not contract:
+        with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
+            return _invoke(["--tools", ""], full)
     return _invoke([], full)
 
 

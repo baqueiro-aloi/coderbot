@@ -95,6 +95,8 @@ try {
   const [providerID, ...model] = input.model.split('/');
   const result = await (await request(`/session/${root}/message`, 'POST', {
     model: {providerID, modelID: model.join('/')}, variant: input.variant,
+    ...(input.utility ? {tools: {read:false, write:false, edit:false, apply_patch:false,
+      bash:false, task:false, grep:false, glob:false, webfetch:false, skill:false}} : {}),
     agent: input.agent || 'build', parts: [{type: 'text', text: input.prompt}],
   })).json();
   messageIDs.add(result.info.id);
