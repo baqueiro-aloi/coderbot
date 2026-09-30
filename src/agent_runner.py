@@ -32,6 +32,7 @@ OUTBOX_DIR = claude_runner.OUTBOX_DIR
 EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 _task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
 _task_context: ContextVar[dict | None] = ContextVar("task_context", default=None)
+_utility: ContextVar[bool] = ContextVar("utility", default=False)
 _turn_lock = threading.Lock()
 _turn: dict = {"active": False}
 
@@ -242,6 +243,12 @@ def _opencode_environment() -> dict[str, str]:
         # Explicit selection also overrides a variant retained by a resumed session.
         current["variants"]["coderbot-effort"] = {"reasoningEffort": config.OPENCODE_EFFORT}
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
+    if _utility.get():
+        inline["plugin"] = []
+        inline["skills"] = {"paths": []}
+        inline["agent"] = {"utility": {"mode": "primary", "description": "Text-only utility", "permission": {"*": "allow"}}}
+        inline["default_agent"] = "utility"
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
     return env
 
 
@@ -399,6 +406,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             env=_opencode_environment(), timeout=config.AGENT_TIMEOUT_SECONDS,
             input_text=json.dumps({"directory": str(config.REPO_PATH), "model": config.OPENCODE_MODEL,
                 "sessionID": session_id, "variant": "coderbot-effort" if config.OPENCODE_EFFORT else None,
+                "agent": "utility" if _utility.get() else "build", "utility": _utility.get(),
                 "prompt": prompt}))
     else:
         proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
@@ -436,6 +444,7 @@ def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""
     _begin_turn()
+    utility_token = _utility.set(not contract)
     try:
         context = _task_context.get() if contract else None
         original_prompt = prompt
@@ -455,6 +464,7 @@ def run(prompt: str, contract: bool = True):
             phase_checkpoint.record(context, original_prompt, result)
         return result
     finally:
+        _utility.reset(utility_token)
         _end_turn()
 
 

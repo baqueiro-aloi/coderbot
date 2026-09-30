@@ -722,10 +722,13 @@ def do_pick(state: dict) -> None:
         items = mine
     else:
         items = prioritize_items(items)
-    result = agent_runner.run(prompts.render(
-        prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)),
-        contract=False)
-    choice = parse_json_reply(result.output)
+    if len(items) == 1:
+        slug = re.sub(r"[^a-z0-9]+", "-", items[0]["text"].casefold()).strip("-")[:60]
+        choice = {"item": items[0]["text"], "slug": slug or "task"}
+    else:
+        result = agent_runner.run(prompts.render(
+            prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)), contract=False)
+        choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
     chosen = next((i for i in items
@@ -956,9 +959,10 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # Never let the autonomous working session self-declare approval. Classify the
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
-    verdict = parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply),
-                         contract=False).output)
+    explicit = reply.strip().casefold().rstrip(".! ")
+    verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "implementa")
+               else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply),
+                         contract=False).output))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
     if action not in ("approve", "changes", "abort", "complete"):

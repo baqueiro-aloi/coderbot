@@ -68,6 +68,14 @@ class StreamingTests(unittest.TestCase):
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
+    def test_utility_configuration_omits_coding_plugins(self):
+        token = agent_runner._utility.set(True)
+        try:
+            config = json.loads(agent_runner._opencode_environment()["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config["plugin"], [])
+            self.assertEqual(config["default_agent"], "utility")
+        finally:
+            agent_runner._utility.reset(token)
     def test_role_routing_does_not_change_primary_model(self):
         with patch.object(agent_runner.config, "OPENCODE_ROLE_MODELS", {"explore": "provider/fast"}), \
              patch.object(agent_runner.config, "OPENCODE_ROLE_EFFORTS", {"explore": "low"}):

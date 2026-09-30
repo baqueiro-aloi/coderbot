@@ -79,7 +79,7 @@
 
 - [x] 9.1 Crear plantillas estáticas por idioma para fases, STATUS, check-ins y recuperación, eliminando llamadas LLM administrativas redundantes.
 - [x] 9.2 Implementar utility profile sin coding tools/plugins, con timeout/modelo/esfuerzo propios y traducción conjunta reutilizada por conversación/trail.
-- [ ] 9.3 Resolver comandos explícitos y candidato único determinísticamente; mantener clasificación de ambigüedades y semántica de aprobación.
+- [x] 9.3 Resolver comandos explícitos y candidato único determinísticamente; mantener clasificación de ambigüedades y semántica de aprobación.
 - [ ] 9.4 Aplicar deadline WAIT_REVIEW antes de todas sus salidas y respetar ausencia de workflow tras conflictos.
 - [ ] 9.5 Conservar output/RESOLVE en continuación de threads después de preguntas y probar push/resolución sin nueva ronda innecesaria.
 - [ ] 9.6 Completar snapshot HOLD/CONTINUE y persistir restauración antes de retirada; probar capacidades divergentes y crash intermedio.
