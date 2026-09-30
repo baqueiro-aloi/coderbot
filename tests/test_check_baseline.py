@@ -3,10 +3,17 @@ import subprocess
 import tempfile
 import unittest
 
-from check_baseline import worktree
+from check_baseline import compare, worktree
 
 
 class BaselineTests(unittest.TestCase):
+    def test_semantic_error_difference_is_regression_and_unknown_blocks(self):
+        base = {"status": "fail", "failures": {"test": "AssertionError: expected 2"}}
+        same = compare(base, base)
+        self.assertEqual(same["preexisting"], ["test"])
+        changed = {"status": "fail", "failures": {"test": "AssertionError: expected 3"}}
+        self.assertEqual(compare(changed, base)["regressions"], ["test"])
+        self.assertEqual(compare(base, {"status": "infrastructure"})["status"], "indeterminate")
     def test_worktree_is_pinned_and_removed_after_failure(self):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root) / "repo"
