@@ -14,6 +14,7 @@ import activity
 import config
 import turn_control
 import phase_checkpoint
+import operations
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -65,6 +66,7 @@ def _begin_turn(session_id: str = "") -> None:
 
 
 def _end_turn() -> None:
+    operations.clear()
     with _turn_lock:
         _turn["active"] = False
         last = _turn.get("last_activity")
@@ -297,6 +299,7 @@ def _stream_line(line: str) -> None:
     if not isinstance(event, dict):
         return
     _observe(event)
+    operations.observe(event)
     summary = summarize_event(event)
     if summary is None:
         return
@@ -328,6 +331,14 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     timer = threading.Timer(timeout, _kill_on_timeout)
     timer.daemon = True
     timer.start()
+    stop_watch = threading.Event()
+    def watch():
+        while not stop_watch.wait(.5):
+            if operations.expired():
+                _kill_on_timeout()
+                return
+    watchdog = threading.Thread(target=watch, daemon=True)
+    watchdog.start()
     if input_text is not None:
         proc.stdin.write(input_text)
         proc.stdin.close()
@@ -341,6 +352,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
                 log.exception("agent stream logging failed")
         proc.wait()
     finally:
+        stop_watch.set()
         timer.cancel()
         stderr_reader.join(timeout=5)
         proc.stdout.close()

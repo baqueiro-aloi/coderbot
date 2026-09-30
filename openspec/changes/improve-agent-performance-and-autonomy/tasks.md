@@ -20,7 +20,7 @@
 
 - [x] 3.1 Integrar servidor OpenCode local por intento y puente Node fijado que emita tool start/end, session status, permisos y errores principales/hijos.
 - [x] 3.2 Implementar operations con deadlines monotónicos por clase y presupuesto agregado compartido por retry/fallback/backoff.
-- [ ] 3.3 Clasificar espera de proveedor, herramienta, subagente y proceso muerto; detectar lectura bloqueada sin matar tests silenciosos dentro de presupuesto.
+- [x] 3.3 Clasificar espera de proveedor, herramienta, subagente y proceso muerto; detectar lectura bloqueada sin matar tests silenciosos dentro de presupuesto.
 - [ ] 3.4 Implementar cancelación TERM/gracia/KILL/reap y callbacks de cleanup sobre procesos y recursos propios; probar nietos y puertos residuales.
 - [ ] 3.5 Integrar runners Claude/OpenCode con supervisor y recuperación acotada desde checkpoint, conservando compatibilidad de resultados.
 - [ ] 3.6 Extender KICK a checks, E2E, grabación y conversión ejecutados por Python, conservando tarea, rama y aprobaciones.

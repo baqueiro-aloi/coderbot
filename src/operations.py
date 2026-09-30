@@ -6,7 +6,7 @@ import time
 import uuid
 
 
-_budget = ContextVar("operation_budget", default=None)
+_budget: ContextVar = ContextVar("operation_budget", default=None)
 _lock = threading.Lock()
 _active = {}
 
@@ -60,3 +60,31 @@ def snapshot():
 
 def expired():
     return [entry for entry in snapshot() if not entry["remaining"]]
+
+
+def observe(event):
+    """Only observable state, never commands, output or reasoning."""
+    kind = event.get("type")
+    part = event.get("part") or {}
+    id = part.get("id")
+    if kind == "tool_start" and id:
+        tool = part.get("tool", "tool")
+        if any(entry["id"] == id for entry in snapshot()):
+            return
+        limit = 600 if tool == "task" else 900 if tool == "bash" else 45
+        begin("subagent" if tool == "task" else "tool", tool, limit, id=id)
+    elif kind == "tool_use" and id:
+        finish(id)
+    elif kind == "session_status":
+        sid = "provider:" + str(event.get("sourceSessionID") or event.get("sessionID"))
+        status = event.get("status", {}).get("type")
+        if status == "retry":
+            if not any(entry["id"] == sid for entry in snapshot()):
+                begin("provider", "provider retry", 180, id=sid)
+        else:
+            finish(sid)
+
+
+def clear():
+    with _lock:
+        _active.clear()
