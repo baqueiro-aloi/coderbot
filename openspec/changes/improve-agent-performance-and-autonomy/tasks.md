@@ -2,7 +2,7 @@
 
 - [x] 1.1 Crear fixtures sanitizadas de permiso hijo pendiente, E2E terminado y reanudación del incidente; documentar baseline reproducible sin usar datos de credenciales.
 - [x] 1.2 Validar schema y APIs de OpenCode fijado y definir contrato del puente de eventos; agregar pruebas de compatibilidad del runtime gestionado.
-- [ ] 1.3 Aplicar permiso global allow y normalizar overrides operativos de todos los perfiles y configuraciones gestionadas; probar restricciones heredadas ask/deny.
+- [x] 1.3 Aplicar permiso global allow y normalizar overrides operativos de todos los perfiles y configuraciones gestionadas; probar restricciones heredadas ask/deny.
 - [ ] 1.4 Implementar política efectiva para sesiones principales, descendientes y reanudadas y resolución automática de permisos residuales de toda la familia.
 - [ ] 1.5 Verificar Claude sin permisos operativos y mantener aprobaciones funcionales vía FSM; probar que no se solicita intervención SSH/config al usuario del bot.
 - [ ] 1.6 Ejecutar integración headless acotada en scratch para read/write/bash externos con principal, general, explore, reanudación y reinicio.
