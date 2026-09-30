@@ -33,6 +33,13 @@ def parse_output(output, exit_code, reporter="text"):
             recognized = isinstance(failures, dict) and all(isinstance(v, str) for v in failures.values())
         except (ValueError, KeyError, TypeError):
             recognized = False
+    elif reporter == "playwright":
+        recognized = bool(re.search(r"\d+ (?:failed|passed)\b", output))
+        for match in re.finditer(r"^\s*\d+\) (\[.+?\].+?)\n(.*?)(?=^\s*\d+\) \[|^\s*\d+ (?:failed|passed)|\Z)", output, re.M | re.S):
+            test = re.sub(r":\d+:\d+", ":<line>", match[1].strip())
+            # Retain assertion/error context, exclude artifact paths and timing.
+            detail = match[2].split("attachment #", 1)[0].strip()
+            failures[test] = detail
     # Playwright list output is not a stable identity contract. Use JSON/JUnit via
     # an explicit plan for baseline attribution; zero exit is still a real pass.
     status = "pass" if exit_code == 0 else "fail" if recognized and failures else "unknown"

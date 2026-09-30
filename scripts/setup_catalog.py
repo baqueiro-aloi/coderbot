@@ -95,6 +95,7 @@ SETTINGS = (
     field("CODEBOT_OPENCODE_ROLE_MODELS", "Limits", "JSON role/model overrides.", "{}", advanced=True),
     field("CODEBOT_OPENCODE_ROLE_EFFORTS", "Limits", "JSON role/effort overrides.", "{}", advanced=True),
     field("CODEBOT_ARTIFACT_MANIFEST", "Operations", "Harness artifact manifest path.", advanced=True),
+    field("CODEBOT_MAX_SUBAGENTS", "Limits", "Maximum concurrent subagents.", "3", "positive", advanced=True),
     field("CODEBOT_E2E_MAX_ROUNDS", "Limits", "Maximum E2E repair rounds.", "5", "positive", advanced=True),
     field("CODEBOT_SUBPROCESS_TIMEOUT", "Limits", "Git/GitHub subprocess timeout.", "120", "positive", advanced=True),
     field("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "Limits", "Verification/internal-review repair rounds.", "3", "positive", advanced=True),

@@ -36,7 +36,8 @@ def compare(feature, baseline, *, roots=()):
 
 def baseline_result(check, repo, sha, store):
     cache_task = "baseline:" + str(Path(repo).resolve()) + ":" + sha
-    environment = environment_identity(check.argv, repo, env_keys=check.env_keys,
+    from checks import tool_versions
+    environment = environment_identity(check.argv, repo, env_keys=check.env_keys, tools=tool_versions(check.argv, Path(repo) / check.cwd),
                                        key_path=store.path.parent / "identity.key")
     identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment})
     saved = store.reusable_check(cache_task, identity)

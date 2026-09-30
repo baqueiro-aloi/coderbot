@@ -205,6 +205,44 @@ their original spelling.
 
 ## Lifecycle
 
+### Trusted autonomous runtime and performance
+
+Coderbot's runtime is fully trusted: the principal and every subagent have all
+operational permissions, including external directories. Managed configuration
+overrides inherited permission restrictions; residual requests are automatically
+answered for child sessions. Product/proposal/merge decisions remain in the task
+conversation. Runtime configuration is loaded on process startup; restart the
+service when changing plugins/configuration.
+
+OpenCode defaults to the managed HTTP event bridge (`CODEBOT_OPENCODE_TRANSPORT=http`)
+so tool starts, child activity and provider retries are observable. Defaults:
+aggregate agent 1800 s, E2E 900 s, local read/search 45 s, subagent 600 s,
+provider retry 180 s and utilities 30 s. Each is environment-overridable in the
+setup catalog. KICK also cancels controller-run tests and evidence operations.
+
+Implementation/review use focused checks; the deterministic runner owns complete
+final checks and compares identifiable failures against the immutable `base_sha`.
+Results are reused only with matching content, command, tools and declared
+environment. Unknown failures and incomparable baseline environments do not pass.
+`.codebot/checks.json` can declare project-specific full/focused check plans.
+See [harness contract](docs/harness-contract.md) for preparation, resource locks,
+provider grouping and artifact manifests.
+
+`data/execution.sqlite` stores additive durable outcomes/checkpoints and delivery
+steps alongside the compatible `state.json` cursor. Keep both during migration;
+do not delete execution state while a task is active. See
+[delivery recovery](docs/delivery-recovery.md) and
+[performance results](docs/performance-results.md).
+
+```sh
+python scripts/performance_report.py data/execution.sqlite <task-branch>
+python scripts/benchmark_runtime.py
+python scripts/test_trusted_runtime.py
+```
+
+The benchmark uses controlled local fixtures; its modeled permission-wait savings
+are distinct from measurements of real Azure end-to-end throughput.
+
 ```
 IDLE → pick item (see "Backlog sources") → claim it → branch <instance>-<slug>
       → EXPLORING → PROPOSING → send proposal → WAIT_APPROVAL

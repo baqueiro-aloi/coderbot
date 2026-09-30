@@ -96,7 +96,7 @@
 
 ## 11. Documentación y rollout coordinado
 
-- [ ] 11.1 Actualizar README, env example, setup y docs de runtime/harness/checks/checkpoints con defaults, migración y diagnósticos observables.
+- [x] 11.1 Actualizar README, env example, setup y docs de runtime/harness/checks/checkpoints con defaults, migración y diagnósticos observables.
 - [ ] 11.2 Preparar staging aislado y verificar principal/subagentes/reanudación, suite final y artifacts con presupuesto acotado sin afectar tarea remota activa.
 - [ ] 11.3 Entregar cambio coordinado del harness PICA en su repositorio con preparación separada, agrupación y manifest; validar con controller nuevo antes de activarlo en producción.
 - [ ] 11.4 Ejecutar rollout de imagen/config tras checkpoint de la tarea activa y backup durable; registrar versión y comparación antes/después.

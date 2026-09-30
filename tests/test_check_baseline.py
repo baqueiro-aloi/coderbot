@@ -15,6 +15,7 @@ class BaselineTests(unittest.TestCase):
             store = ExecutionStore(Path(root) / "data/db")
             check = Check("unit", ["python", "test"])
             with patch("check_baseline.worktree") as work, \
+                 patch("checks.tool_versions", return_value={"python": "fixture"}), \
                  patch("check_baseline.snapshot", return_value="same"), \
                  patch("check_baseline.execute", return_value={"status": "pass", "failures": {}}) as run:
                 work.return_value.__enter__.return_value = Path(root) / "baseline"
