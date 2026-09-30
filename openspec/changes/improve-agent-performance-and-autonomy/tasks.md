@@ -45,7 +45,7 @@
 - [x] 5.5 Unificar política VERIFY/E2E para preexisting/regression/infrastructure/unknown; probar que 18 fallos preexistentes no disparan reparación indiscriminada.
 - [x] 5.6 Implementar reparación focalizada y re-review de regresiones finales, invalidando solo checks con entradas afectadas.
 - [x] 5.7 Integrar gates de snapshot final en feedback, threads y conflictos con continuación durable hacia push/entrega.
-- [ ] 5.8 Asociar reportes de calidad/review y SHA entregado al contenido válido; probar cambios exclusivamente de archivo OpenSpec y cambios de aplicación posteriores.
+- [x] 5.8 Asociar reportes de calidad/review y SHA entregado al contenido válido; probar cambios exclusivamente de archivo OpenSpec y cambios de aplicación posteriores.
 
 ## 6. Handoffs, prompts y modelo de trabajo
 

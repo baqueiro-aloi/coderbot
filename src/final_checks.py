@@ -4,6 +4,7 @@ from pathlib import Path
 import check_plan
 import checks
 from check_baseline import baseline_result, compare
+from execution_identity import snapshot
 
 
 def run(state, repo, store):
@@ -26,6 +27,6 @@ def run(state, repo, store):
         else:
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})
-    return {"status": "pass" if outcomes and all(r["gate"]["status"] == "pass" for r in outcomes)
+    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(r["gate"]["status"] == "pass" for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)
             else "fail", "checks": outcomes}

@@ -9,6 +9,10 @@ import final_checks
 
 
 class FinalCheckTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("final_checks.snapshot", return_value="fixture-content")
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def test_push_failure_preserves_continuation_before_any_push(self):
         import main
         state = {"state": "PUSHING", "branch": "b", "item": "t",

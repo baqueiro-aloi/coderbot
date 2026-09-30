@@ -22,6 +22,7 @@ import operations
 import check_plan
 import checks
 import final_checks
+from execution_identity import snapshot as content_snapshot
 import architecture_report
 import config
 import drive_client
@@ -1136,6 +1137,7 @@ def _complete_internal_review(state: dict, result) -> None:
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
     state["internal_review_report"] = parsed
+    state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
     state["state"] = "E2E"  # Final unit/lint/build checks also apply without a UI harness.
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
@@ -2432,6 +2434,7 @@ def do_push(state: dict) -> None:
             return
 
     git("push", "origin", state["branch"])
+    state["delivered_sha"] = git("rev-parse", "HEAD")
     _notify_architecture(state, update=True)
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
