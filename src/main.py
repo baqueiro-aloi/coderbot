@@ -18,6 +18,7 @@ from pathlib import Path
 import agent_runner
 import activity
 import phase_checkpoint
+import operations
 import architecture_report
 import config
 import drive_client
@@ -3611,6 +3612,8 @@ def _status_supervisor_once() -> bool:
     state = dict(_current_state) if _current_state is not None else load_state()
     working = _work_active.is_set() and state.get("state") in PHASES
     turn = agent_runner.turn_snapshot()
+    if operations.snapshot():
+        turn["active"] = True
     thread = state.get("thread_id") if _work_active.is_set() and turn.get("active") else None
     with _status_command_lock:
         kick = gmail_client.poll_kick(thread) if turn.get("active") or config.COMM_CHANNEL == "slack" else None

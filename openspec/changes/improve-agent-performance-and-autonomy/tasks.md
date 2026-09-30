@@ -23,7 +23,7 @@
 - [x] 3.3 Clasificar espera de proveedor, herramienta, subagente y proceso muerto; detectar lectura bloqueada sin matar tests silenciosos dentro de presupuesto.
 - [x] 3.4 Implementar cancelación TERM/gracia/KILL/reap y callbacks de cleanup sobre procesos y recursos propios; probar nietos y puertos residuales.
 - [x] 3.5 Integrar runners Claude/OpenCode con supervisor y recuperación acotada desde checkpoint, conservando compatibilidad de resultados.
-- [ ] 3.6 Extender KICK a checks, E2E, grabación y conversión ejecutados por Python, conservando tarea, rama y aprobaciones.
+- [x] 3.6 Extender KICK a checks, E2E, grabación y conversión ejecutados por Python, conservando tarea, rama y aprobaciones.
 - [ ] 3.7 Unificar shutdown y timeout de todas las operaciones y evitar reintentos sobre cleanup incompleto o locks ocupados.
 - [ ] 3.8 Actualizar config/setup de presupuestos y healthcheck basado en supervisor; probar bloqueo, progreso legítimo y reinicio sin esperas acumuladas excesivas.
 

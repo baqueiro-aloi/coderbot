@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import config
+import operations
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +84,8 @@ def run_suite() -> tuple[bool, str]:
     """Run the full e2e suite via run.sh. Returns (passed, output tail)."""
     log.info("running full e2e suite in %s", E2E_DIR)
     try:
-        proc = subprocess.run(
-            ["./run.sh"], cwd=E2E_DIR, capture_output=True, text=True,
+        proc = operations.run(
+            ["./run.sh"], cwd=E2E_DIR,
             timeout=config.E2E_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
@@ -118,8 +119,8 @@ def _run_recording(specs: list[str], extra_args: list[str]) -> str:
     """One run.sh invocation with video forced on; best-effort (clips are harvested
     after). Returns the run's output tail for diagnostics."""
     try:
-        proc = subprocess.run(
-            ["./run.sh", *specs, *extra_args], cwd=E2E_DIR, capture_output=True, text=True,
+        proc = operations.run(
+            ["./run.sh", *specs, *extra_args], cwd=E2E_DIR,
             timeout=config.E2E_TIMEOUT_SECONDS,
             # The target harness exposes a documented opt-in to Playwright's `video: "on"`
             # setting. Both spellings: PICA_E2E_VIDEO for harnesses built against this
@@ -221,7 +222,7 @@ def _stitch_to_mp4(clips: list[Path]) -> Path | None:
              len(clips), out.name, scratch_dir)
     returned_from_tmp = False  # the scratch dir only survives if we return its file
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = operations.run(cmd,
                               timeout=config.E2E_TIMEOUT_SECONDS)
         if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             log.warning("ffmpeg stitch failed rc=%d; stderr tail:\n%s",

@@ -24,7 +24,7 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             e2e_dir = Path(tmp)
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
-                 patch("evidence.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+                 patch("evidence.operations.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
                 evidence._record_playwright_video(["dynamic-page-title.spec.ts"])
 
         # @evidence demo test first, then the full spec when no clip appeared.
@@ -46,7 +46,7 @@ class EvidenceTests(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
-                 patch("evidence.subprocess.run", side_effect=fake_run) as run, \
+                 patch("evidence.operations.run", side_effect=fake_run) as run, \
                  patch("evidence._stitch_to_mp4", return_value=None):
                 clips = evidence._record_playwright_video(["a.spec.ts"])
 
@@ -67,7 +67,8 @@ class EvidenceTests(unittest.TestCase):
 
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
                  patch.object(evidence.config, "E2E_TIMEOUT_SECONDS", 1), \
-                 patch("evidence.subprocess.run", side_effect=fake_run):
+                 patch("evidence.subprocess.run", side_effect=fake_run), \
+                 patch("evidence.operations.run", side_effect=fake_run):
                 passed, output = evidence.run_suite()
 
         self.assertFalse(passed)
@@ -95,7 +96,7 @@ class EvidenceTests(unittest.TestCase):
 
             with patch.object(evidence.config, "DATA_DIR", data_dir), \
                  patch("evidence.shutil.which", return_value="/usr/bin/ffmpeg"), \
-                 patch("evidence.subprocess.run", side_effect=fake_ffmpeg):
+                 patch("evidence.operations.run", side_effect=fake_ffmpeg):
                 out = evidence._stitch_to_mp4([clip])
 
             self.assertEqual(out, data_dir / "evidence.mp4")
