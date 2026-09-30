@@ -15,7 +15,7 @@ with patch.dict(sys.modules, {"googleapiclient": MagicMock(),
                               "google_auth": MagicMock()}):
     import drive_client
 
-import config
+config = drive_client.config
 
 LINK = "https://drive.google.com/file/d/f1/view"
 
@@ -53,9 +53,11 @@ class DriveClientTests(unittest.TestCase):
             link = drive_client.upload_evidence(self.video, "task-1.mp4")
 
         self.assertEqual(link, LINK)
-        self.files.list.assert_not_called()
+        self.files.list.assert_called_once()
         body = self.files.create.call_args.kwargs["body"]
-        self.assertEqual(body, {"name": "task-1.mp4", "parents": ["folder-42"]})
+        self.assertEqual(body["name"], "task-1.mp4")
+        self.assertEqual(body["parents"], ["folder-42"])
+        self.assertIn("codebotEvidence", body["appProperties"])
         perm = self.service.permissions.return_value.create
         perm.assert_called_once()
         self.assertEqual(perm.call_args.kwargs["fileId"], "f1")
@@ -71,8 +73,8 @@ class DriveClientTests(unittest.TestCase):
         second = drive_client.upload_evidence(self.video, "b.mp4")
 
         self.assertEqual((first, second), (LINK, LINK + "2"))
-        self.files.list.assert_called_once()
-        query = self.files.list.call_args.kwargs["q"]
+        self.assertEqual(self.files.list.call_count, 3)
+        query = self.files.list.call_args_list[0].kwargs["q"]
         self.assertIn("name = 'Codebot evidence'", query)
         self.assertIn("'root' in parents", query)
         bodies = self._create_bodies()
@@ -82,16 +84,16 @@ class DriveClientTests(unittest.TestCase):
         self.assertEqual(bodies[2]["parents"], ["folder-new"])
 
     def test_existing_auto_folder_is_reused(self):
-        self.files.list.return_value.execute.return_value = {"files": [{"id": "folder-old"}]}
+        self.files.list.return_value.execute.side_effect = [{"files": [{"id": "folder-old"}]}, {"files": []}]
         link = drive_client.upload_evidence(self.video, "a.mp4")
 
         self.assertEqual(link, LINK)
-        self.assertEqual(self._create_bodies(), [{"name": "a.mp4", "parents": ["folder-old"]}])
+        self.assertEqual(self._create_bodies()[0]["parents"], ["folder-old"])
 
     def test_folder_name_quotes_are_escaped_in_query(self):
         with patch.object(config, "DRIVE_FOLDER_NAME", "Bot's clips"):
             drive_client.upload_evidence(self.video, "a.mp4")
-        self.assertIn("name = 'Bot\\'s clips'", self.files.list.call_args.kwargs["q"])
+        self.assertIn("name = 'Bot\\'s clips'", self.files.list.call_args_list[0].kwargs["q"])
 
     def test_upload_failure_returns_none_and_clears_cache(self):
         self.files.list.return_value.execute.return_value = {"files": [{"id": "folder-old"}]}

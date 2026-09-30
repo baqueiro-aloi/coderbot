@@ -10,6 +10,7 @@ The Google client libraries are imported lazily: main.py imports this module at
 startup and the FSM tests run without googleapiclient installed.
 """
 import logging
+import hashlib
 from pathlib import Path
 
 import config
@@ -81,9 +82,16 @@ def upload_evidence(path: Path, name: str) -> str | None:
         from googleapiclient.http import MediaFileUpload
         service = _drive_service()
         folder = _folder_id(service)
+        identity = hashlib.sha256(path.read_bytes()).hexdigest()
+        existing = service.files().list(
+            q=f"'{_escape(folder)}' in parents and trashed = false and appProperties has {{ key='codebotEvidence' and value='{identity}' }}",
+            fields="files(id,webViewLink)", pageSize=1, supportsAllDrives=True,
+            includeItemsFromAllDrives=True).execute(num_retries=3).get("files", [])
+        if existing:
+            return existing[0]["webViewLink"]
         media = MediaFileUpload(str(path), mimetype="video/mp4", resumable=True)
         created = service.files().create(
-            body={"name": name, "parents": [folder]}, media_body=media,
+            body={"name": name, "parents": [folder], "appProperties": {"codebotEvidence": identity}}, media_body=media,
             fields="id,webViewLink", supportsAllDrives=True).execute(num_retries=3)
         link = created["webViewLink"]
         try:
