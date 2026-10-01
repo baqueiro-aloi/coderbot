@@ -57,6 +57,7 @@ try {
   const stream = await request('/event');
   const messageIDs = new Set();
   const completedParts = new Set();
+  const startedParts = new Set();
   let failure;
   const consume = (async () => {
     let buffer = '';
@@ -81,10 +82,12 @@ try {
         if (event.type === 'message.part.updated' && family.has(p.part?.sessionID)) {
           const part = p.part;
           if (part.type === 'tool') {
+            const identity = part.id || `${part.sessionID}:${part.callID}`;
             const done = ['completed', 'error'].includes(part.state.status);
-            if (!done || !completedParts.has(part.id)) {
-              if (done) completedParts.add(part.id);
-              emit(done ? 'tool_use' : 'tool_start', {part, sourceSessionID: part.sessionID});
+            if ((done && !completedParts.has(identity)) || (!done && !startedParts.has(identity))) {
+              if (done) completedParts.add(identity);
+              else startedParts.add(identity);
+              emit(done ? 'tool_use' : 'tool_start', {part: {...part, id: identity}, sourceSessionID: part.sessionID});
             }
           }
           if (part.type === 'step-finish') emit('step_finish', {part, sourceSessionID: part.sessionID});
