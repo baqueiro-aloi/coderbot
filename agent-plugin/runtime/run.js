@@ -57,6 +57,15 @@ try {
     root = (await (await request('/session', 'POST', {permission: TRUSTED_PERMISSION})).json()).id;
   }
   family.add(root);
+  async function addChildren(sessionID) {
+    const children = await (await request(`/session/${sessionID}/children`)).json();
+    for (const child of children) {
+      if (family.has(child.id)) continue;
+      family.add(child.id);
+      await addChildren(child.id);
+    }
+  }
+  if (input.sessionID) await addChildren(root);
   emit('session_start');
   const stream = await request('/event');
   const completedParts = new Set();
@@ -84,9 +93,11 @@ try {
         if (event.type === 'message.part.updated' && family.has(p.part?.sessionID)) {
           const part = p.part;
           if (part.type === 'tool') {
+            const child = part.state.metadata?.sessionId;
+            if (child) family.add(child);
             const identity = part.id || `${part.sessionID}:${part.callID}`;
             const done = ['completed', 'error'].includes(part.state.status);
-            if ((done && !completedParts.has(identity)) || (!done && !startedParts.has(identity))) {
+            if ((done && !completedParts.has(identity)) || (!done && (!startedParts.has(identity) || child))) {
               if (done) completedParts.add(identity);
               else startedParts.add(identity);
               emit(done ? 'tool_use' : 'tool_start', {part: {...part, id: identity}, sourceSessionID: part.sessionID});

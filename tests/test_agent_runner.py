@@ -12,6 +12,17 @@ import claude_runner
 
 
 class StreamingTests(unittest.TestCase):
+    def test_operation_timeout_reports_operation_limit_and_keeps_partial_output(self):
+        import operations
+        expired = {"id": "child", "kind": "subagent", "label": "task", "timeout": 600}
+        with patch.object(operations, "expired", return_value=[expired]):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                agent_runner._run_streaming([sys.executable, "-c",
+                    "import time; print('partial', flush=True); time.sleep(30)"],
+                    cwd=None, env=dict(os.environ), timeout=1800, on_line=lambda _: None)
+        self.assertEqual(caught.exception.timeout, 600)
+        self.assertIn("subagent task", caught.exception.stderr)
+        self.assertIn("partial", caught.exception.output)
     def test_summarize_events(self):
         cases = [
             ({"type": "text", "part": {"text": "  Running lint now.\n"}}, "[agent] Running lint now."),

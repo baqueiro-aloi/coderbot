@@ -9,6 +9,24 @@ from pathlib import Path
 
 
 class BudgetTests(unittest.TestCase):
+    def test_child_progress_refreshes_idle_limit_without_refreshing_other_children(self):
+        from unittest.mock import patch
+        now = [100.0]
+        operations.clear()
+        try:
+            with patch.object(operations.time, "monotonic", side_effect=lambda: now[0]):
+                for id in ("first", "second"):
+                    operations.observe({"type": "tool_start", "sourceSessionID": "parent",
+                        "part": {"id": id, "tool": "task", "state": {"metadata": {"sessionId": id}}}})
+                now[0] += 590
+                operations.observe({"type": "step_finish", "sourceSessionID": "first"})
+                now[0] += 20
+                self.assertEqual([entry["id"] for entry in operations.expired()], ["second"])
+                operations.observe({"type": "tool_use", "part": {"id": "second"}})
+                now[0] += 580
+                self.assertEqual([entry["id"] for entry in operations.expired()], ["first"])
+        finally:
+            operations.clear()
     def test_shutdown_exception_still_cleans_resource(self):
         from unittest.mock import patch
         cleaned = []

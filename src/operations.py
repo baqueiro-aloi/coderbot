@@ -62,6 +62,7 @@ def begin(kind, label, seconds, *, id=None):
     with _lock:
         _active[id] = {"id": id, "kind": kind, "label": label[:140],
                        "started_at": time.time(), "deadline": time.monotonic() + remaining(seconds),
+                       "timeout": seconds,
                        "last_progress": time.time()}
     return id
 
@@ -85,14 +86,31 @@ def observe(event):
     """Only observable state, never commands, output or reasoning."""
     kind = event.get("type")
     part = event.get("part") or {}
+    session = event.get("sourceSessionID") or event.get("sessionID")
+    progress = kind in ("tool_start", "tool_use", "step_finish", "text", "reasoning")
+    if progress and session:
+        with _lock:
+            for entry in _active.values():
+                if entry["kind"] == "subagent" and session == entry.get("session_id"):
+                    entry["deadline"] = time.monotonic() + entry["timeout"]
+                    entry["last_progress"] = time.time()
     id = part.get("id")
     if kind == "tool_start" and id:
         tool = part.get("tool", "tool")
         if any(entry["id"] == id for entry in snapshot()):
+            metadata = part.get("state", {}).get("metadata") or {}
+            if metadata.get("sessionId"):
+                with _lock:
+                    _active[id]["session_id"] = metadata["sessionId"]
             return
         limit = (config.SUBAGENT_TIMEOUT_SECONDS if tool == "task" else
                  config.E2E_TIMEOUT_SECONDS if tool == "bash" else config.LOCAL_TOOL_TIMEOUT_SECONDS)
         begin("subagent" if tool == "task" else "tool", tool, limit, id=id)
+        if tool == "task":
+            metadata = part.get("state", {}).get("metadata") or {}
+            with _lock:
+                _active[id]["session_id"] = metadata.get("sessionId")
+                _active[id]["parent_session_id"] = session
     elif kind == "tool_use" and id:
         finish(id)
     elif kind == "session_status":

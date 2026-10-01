@@ -379,6 +379,8 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
         target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
     stderr_reader.start()
     timed_out = threading.Event()
+    expired_operation = []
+    started = time.monotonic()
 
     def _kill_on_timeout() -> None:
         timed_out.set()
@@ -393,7 +395,8 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     stop_watch = threading.Event()
     def watch():
         while not stop_watch.wait(.5):
-            if operations.expired():
+            if expired := operations.expired():
+                expired_operation.extend(expired[:1])
                 _kill_on_timeout()
                 return
     watchdog = threading.Thread(target=watch, daemon=True)
@@ -423,6 +426,13 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     if kicked:
         raise turn_control.TurnKicked("user requested KICK")
     if timed_out.is_set():
+        if expired_operation:
+            entry = expired_operation[0]
+            detail = (f"{entry['kind']} {entry['label']} ({entry['id']}) exceeded "
+                      f"its {entry['timeout']}s operation limit; turn elapsed {time.monotonic() - started:.1f}s")
+            log.warning("agent interrupted: %s", detail)
+            raise subprocess.TimeoutExpired(cmd, entry["timeout"], output=stdout,
+                                            stderr=stderr + "\n" + detail)
         raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 

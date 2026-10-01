@@ -44,6 +44,10 @@ The ordinary backlog poll interval does not delay a retry that is due sooner.
 The HTTP bridge submits turns through `prompt_async` and polls session status
 with short requests while streaming tool events. Long turns therefore do not
 depend on a single HTTP response surviving Node's five-minute headers timeout.
+Resumed sessions register existing child sessions for event tracking. Subagent
+limits measure inactivity and refresh on that child's progress; the aggregate
+agent-turn deadline remains fixed. Operation timeouts report the actual expired
+operation and its limit instead of always reporting the global agent timeout.
 
 Each task state entry sends a lifecycle banner in the task thread, including
 returns to earlier states. States within a lifecycle step share its illustration
