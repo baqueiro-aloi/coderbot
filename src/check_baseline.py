@@ -4,10 +4,37 @@ from dataclasses import replace
 from pathlib import Path
 import re
 import uuid
+import json
 
 import operations
 from checks import execute
 from execution_identity import digest, environment_identity, snapshot
+
+
+def dependency_snapshot(repo):
+    repo = Path(repo)
+    files = operations.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+                           cwd=repo, timeout=30).stdout.split('\0')
+    entries = []
+    for name in sorted(set(files) - {''}):
+        path = repo / name
+        if path.name not in ('package.json', 'package-lock.json') and not (
+                path.name.startswith('requirements') and path.suffix == '.txt'):
+            continue
+        if any(p in ('node_modules', '.venv', 'venv') for p in Path(name).parts):
+            continue
+        if not path.is_file():
+            entries.append((name, 'missing'))
+            continue
+        if path.suffix == '.json':
+            value = json.loads(path.read_text())
+            value.pop('version', None)
+            if isinstance(value.get('packages', {}).get(''), dict):
+                value['packages'][''].pop('version', None)
+            entries.append((name, value))
+        else:
+            entries.append((name, path.read_text()))
+    return digest(entries)
 
 
 def signature(error, roots=()):
@@ -46,8 +73,7 @@ def baseline_result(check, repo, sha, store):
         return saved["data"]["result"]
     with worktree(repo, sha, store.path.parent) as path:
         # Absolute executables may be reused only with identical dependency inputs.
-        dependency_inputs = ["requirements*.txt", "**/requirements*.txt", "package*.json", "**/package*.json"]
-        if snapshot(repo, dependency_inputs) != snapshot(path, dependency_inputs):
+        if dependency_snapshot(repo) != dependency_snapshot(path):
             return {"status": "indeterminate", "failures": {}, "reason": "dependency_inputs_differ"}
         # Git worktrees omit ignored installed dependencies. Reuse the verified
         # installations only when dependency manifests match; create links solely

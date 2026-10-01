@@ -24,6 +24,8 @@ def run(state, repo, store):
         elif result["status"] == "fail" and state.get("base_sha"):
             baseline = baseline_result(check, repo, state["base_sha"], store)
             gate = compare(result, baseline, roots=(Path(repo).resolve(),))
+            if baseline.get('reason'):
+                gate['reason'] = baseline['reason']
         else:
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})

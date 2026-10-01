@@ -7,6 +7,19 @@ from check_baseline import compare, worktree, baseline_result
 
 
 class BaselineTests(unittest.TestCase):
+    def test_dependency_comparison_ignores_app_version_not_dependency_versions(self):
+        from check_baseline import dependency_snapshot
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root)
+            subprocess.run(['git', 'init', '-q', root], check=True)
+            file = repo / 'package-lock.json'
+            value = {'version': '1', 'packages': {'': {'version': '1'}, 'node_modules/x': {'version': '2', 'integrity': 'hash'}}}
+            file.write_text(json.dumps(value)); before = dependency_snapshot(repo)
+            value['version'] = '3'; value['packages']['']['version'] = '3'
+            file.write_text(json.dumps(value)); self.assertEqual(before, dependency_snapshot(repo))
+            value['packages']['node_modules/x']['version'] = '4'
+            file.write_text(json.dumps(value)); self.assertNotEqual(before, dependency_snapshot(repo))
     def test_baseline_links_matching_installed_dependencies_only_in_scratch(self):
         from check_plan import Check
         from execution_store import ExecutionStore
@@ -39,7 +52,7 @@ class BaselineTests(unittest.TestCase):
             check = Check("unit", ["python", "test"])
             with patch("check_baseline.worktree") as work, \
                  patch("checks.tool_versions", return_value={"python": "fixture"}), \
-                 patch("check_baseline.snapshot", return_value="same"), \
+                 patch("check_baseline.dependency_snapshot", return_value="same"), \
                  patch("check_baseline.execute", return_value={"status": "pass", "failures": {}}) as run:
                 work.return_value.__enter__.return_value = Path(root) / "baseline"
                 baseline_result(check, root, "a" * 40, store)
