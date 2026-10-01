@@ -310,13 +310,13 @@ class ActivityTrail(unittest.TestCase):
 
     def test_email_is_mirrored_to_the_trail_with_attachment_names(self):
         state = {"item": "task", "slug": "s"}
-        with patch.object(main.gmail_client, "send", return_value="t1"), \
+        with patch.object(main.gmail_client, "deliver", return_value={"thread_id": "t1", "complete": True}), \
              patch.object(main, "trail") as trail:
             main.email(state, "proposal for review", "body", [pathlib.Path("/x/video.webm")])
         trail.assert_called_once_with(state, "proposal for review",
                                       "Your decision: approve the attached proposal to start "
                                       "implementation, or reply with requested changes.\n\n"
-                                      "body\n\nAttachments (emailed): video.webm")
+                                  "body\n\nFiles (delivery receipts tracked separately): video.webm")
 
 
 class FinishTask(unittest.TestCase):
@@ -380,8 +380,8 @@ class Commands(unittest.TestCase):
             self.assertFalse(main.check_commands(state))
         self.assertEqual(state["state"], "EXPLORING")
         body = send.call_args.args[1]
-        self.assertIn("State: EXPLORING", body)
-        self.assertIn("Last email sent", body)
+        self.assertIn("Phase: EXPLORING", body)
+        self.assertNotIn("Last email sent", body)
 
     def test_abort_resets(self):
         state = {"state": "EXPLORING", "item": "task"}

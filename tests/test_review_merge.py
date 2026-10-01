@@ -381,7 +381,7 @@ class MergeWait(unittest.TestCase):
         with patch.object(main, "unresolved_review_threads", return_value=[human()]), \
              patch.object(main, "handle_wait") as wait:
             main.handle_merge_wait(state)
-        wait.assert_not_called()
+            wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
         self.assertEqual(state["pr_threads"][0]["id"], "H1")
 
@@ -398,7 +398,7 @@ class MergeWait(unittest.TestCase):
         with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
              patch.object(main, "handle_wait") as wait:
             main.handle_merge_wait(state)
-        wait.assert_not_called()
+            wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
 
 

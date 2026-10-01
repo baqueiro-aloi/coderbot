@@ -14,6 +14,8 @@ import activity
 import config
 import turn_control
 import phase_checkpoint
+import repo_provenance
+from agent_errors import AgentTransportError
 import operations
 import handoff_context
 import package_registry
@@ -431,7 +433,9 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             errors.append(str(event.get("error", "unknown OpenCode error")))
 
     if proc.returncode != 0 or errors:
-        detail = "\n".join(errors) or proc.stderr[-2000:] or proc.stdout[-2000:]
+        detail = "\n".join(errors) or proc.stderr or proc.stdout
+        if errors and any("fetch failed" in error.casefold() for error in errors):
+            raise AgentTransportError("OpenCode connection failed", proc)
         raise RuntimeError(f"opencode exited {proc.returncode}: {detail}")
     if not observed_session:
         raise RuntimeError(f"opencode output missing sessionID: {proc.stdout[:2000]!r}")
@@ -448,8 +452,17 @@ def run(prompt: str, contract: bool = True):
     classifiers) whose only output instruction must be their own JSON contract."""
     _begin_turn()
     utility_token = _utility.set(not contract)
+    context = None
+    before = None
     try:
         context = _task_context.get() if contract else None
+        before = None
+        if context:
+            try:
+                before = repo_provenance.inspect(config.REPO_PATH)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             return OpenCodeResult(saved["session_id"], saved["output"])
@@ -465,8 +478,16 @@ def run(prompt: str, contract: bool = True):
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
             phase_checkpoint.record(context, original_prompt, result)
+            _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         return result
     finally:
+        if context and before is not None:
+            try:
+                after = repo_provenance.inspect(config.REPO_PATH)
+                _persist(repo_provenance.record_turn, phase_checkpoint.store(), context,
+                         config.REPO_PATH, before, after)
+            except (OSError, subprocess.SubprocessError):
+                pass
         _utility.reset(utility_token)
         _end_turn()
 
@@ -474,8 +495,17 @@ def run(prompt: str, contract: bool = True):
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def resume(session_id: str, prompt: str):
     _begin_turn(session_id)
+    context = None
+    before = None
     try:
         context = _task_context.get()
+        before = None
+        if context:
+            try:
+                before = repo_provenance.inspect(config.REPO_PATH)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             return OpenCodeResult(saved["session_id"], saved["output"])
@@ -506,7 +536,15 @@ def resume(session_id: str, prompt: str):
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
             phase_checkpoint.record(context, original_prompt, result)
+            _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
             context.setdefault("phase_sessions", {})[context["state"]] = result.session_id
         return result
     finally:
+        if context and before is not None:
+            try:
+                after = repo_provenance.inspect(config.REPO_PATH)
+                _persist(repo_provenance.record_turn, phase_checkpoint.store(), context,
+                         config.REPO_PATH, before, after)
+            except (OSError, subprocess.SubprocessError):
+                pass
         _end_turn()

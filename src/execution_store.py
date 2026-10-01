@@ -9,7 +9,8 @@ import uuid
 
 
 ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
-            "checkpoint", "artifact", "delivery_step")
+            "checkpoint", "artifact", "delivery_step", "feedback", "recovery",
+            "incident", "delivery_receipt", "contact", "provenance")
 
 
 class ExecutionStore:
@@ -31,6 +32,8 @@ class ExecutionStore:
 
     def task_identity(self, state, repo):
         """Derivable for legacy state even if its new cursor was never saved."""
+        if state.get("execution_task_id"):
+            return state["execution_task_id"]
         raw = json.dumps([str(Path(repo).resolve()), state.get("branch"),
                           state.get("item_id") or state.get("item"), state.get("base_sha")])
         return hashlib.sha256(raw.encode()).hexdigest()
@@ -128,3 +131,20 @@ class ExecutionStore:
             rows = db.execute(f"SELECT * FROM {self._entity(entity)} WHERE "
                               + " AND ".join(conditions) + " ORDER BY updated DESC", args).fetchall()
         return [self._decode(row) for row in rows]
+
+    def record(self, entity, state, repo, identity, data, *, status="pending"):
+        """Idempotent versioned event; additive tables keep v1 readers compatible."""
+        task_id = self.task_identity(state, repo)
+        id = hashlib.sha256(json.dumps([entity, task_id, identity]).encode()).hexdigest()
+        entity = self._entity(entity)
+        now = time.time()
+        with self.connection() as db:
+            db.execute(f"INSERT OR IGNORE INTO {entity} VALUES(?,?,?,?,?,?,?,?)",
+                (id, task_id, None, status, identity, now, now,
+                 json.dumps({"version": 1, **data}, ensure_ascii=False, sort_keys=True)))
+        return self.get(entity, id)
+
+    def update(self, entity, row, *, status=None, **data):
+        self.put(entity, task_id=row["task_id"], id=row["id"], identity=row["identity"],
+                 status=status or row["status"], data={**row["data"], **data})
+        return self.get(entity, row["id"])

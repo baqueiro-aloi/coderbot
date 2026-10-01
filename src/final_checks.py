@@ -9,11 +9,16 @@ from execution_identity import snapshot
 
 def run(state, repo, store):
     plan = [c for c in check_plan.discover(repo) if c.scope == "full"]
+    waived = any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+    if waived:
+        plan = [c for c in plan if not c.id.startswith("e2e")]
     # A reported full check supplements discovery; focused checks never replace it.
     known = {c.id for c in plan}
     for entry in state.get("reported_check_plan", []):
         check = check_plan.Check(**entry)
         if check.scope == "full" and check.id not in known:
+            if waived and check.id.startswith("e2e"):
+                continue
             plan.append(check)
     task_id = store.task_identity(state, repo)
     results = checks.execute_plan(plan, repo, store, task_id)

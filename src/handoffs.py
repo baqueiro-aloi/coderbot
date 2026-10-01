@@ -32,7 +32,8 @@ def verification(state: dict) -> str:
     final = state.get("final_check_report") or {}
     for check in final.get("checks", []):
         result = check.get("gate", {}).get("status", check.get("status", "unavailable"))
-        lines.append(f"- Final {check.get('check', 'check')}: {result}")
+        raw = check.get("status", "unavailable")
+        lines.append(f"- Final {check.get('check', 'check')}: {result}; raw outcome: {raw}")
         if check.get("gate", {}).get("preexisting"):
             lines.append("  Pre-existing: " + "; ".join(check["gate"]["preexisting"]))
         if check.get("status") in ("unknown", "infrastructure"):
@@ -41,7 +42,9 @@ def verification(state: dict) -> str:
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"
                  else "- Internal review: outcome unavailable")
-    if not state.get("has_e2e_harness"):
+    if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
+        lines.append("- E2E general collection: waived by user; not reported as passed")
+    elif not state.get("has_e2e_harness"):
         lines.append("- E2E: not applicable (no harness)")
     else:
         lines.append("- E2E: " + ("passed" if state.get("e2e_passed") is True
@@ -61,3 +64,17 @@ def evidence_index(files, url: str | None) -> str:
                        "Supporting evidence")
         items.append(f"- {description}: attached {file.name}")
     return "Evidence:\n" + ("\n".join(items) if items else "- No artifact available.")
+
+
+def concise_verification(state):
+    final = state.get("final_check_report") or {}
+    checks = final.get("checks", [])
+    accepted = sum(check.get("gate", {}).get("status") == "pass" for check in checks)
+    preexisting = sum(len(check.get("gate", {}).get("preexisting", [])) for check in checks)
+    waived = state.get("check_waivers", [])
+    e2e = "waived" if any(w.get("scope") == "e2e:general" for w in waived) else (
+        "not applicable" if not state.get("has_e2e_harness") else
+        "passed" if state.get("e2e_passed") else "outcome unavailable")
+    return (f"Verification: {accepted}/{len(checks)} final checks accepted; "
+            f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
+            "Detailed outcomes and exceptions are in the verification report.")

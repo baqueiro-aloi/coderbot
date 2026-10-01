@@ -1,0 +1,53 @@
+"""Channel-independent attachment descriptors and lossless transport preparation."""
+import gzip
+import hashlib
+import json
+import mimetypes
+from pathlib import Path
+
+
+def describe(path, *, role="supporting"):
+    path = Path(path)
+    size = path.stat().st_size
+    return {"id": hashlib.sha256(path.read_bytes()).hexdigest(), "path": str(path),
+            "filename": path.name, "media_type": mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream", "size": size, "role": role}
+
+
+def encoded_size(size):
+    """Base64 plus MIME line wrapping, rounded up."""
+    base64 = 4 * ((size + 2) // 3)
+    return base64 + 2 * ((base64 + 75) // 76) + 1024
+
+
+def prepare(artifact, limit, directory, *, mime=False):
+    size_of = encoded_size if mime else lambda n: n
+    if size_of(artifact["size"]) <= limit:
+        return [artifact]
+    if limit < 4096:
+        raise ValueError("attachment limit too small for a diagnostic manifest")
+    directory = Path(directory) / artifact["id"]
+    directory.mkdir(parents=True, exist_ok=True)
+    data = gzip.compress(Path(artifact["path"]).read_bytes(), mtime=0)
+    compressed = directory / (artifact["filename"] + ".gz")
+    compressed.write_bytes(data)
+    if size_of(len(data)) <= limit:
+        return [describe(compressed, role=artifact["role"])]
+    part_size = (limit - 2048) * 3 // 4 if mime else limit
+    count = (len(data) + part_size - 1) // part_size
+    parts = []
+    for index in range(count):
+        path = directory / f"{compressed.name}.part-{index + 1:04d}-of-{count:04d}"
+        path.write_bytes(data[index * part_size:(index + 1) * part_size])
+        parts.append(describe(path, role=artifact["role"]))
+    manifest = directory / "manifest.json"
+    manifest.write_text(json.dumps({"original": artifact["filename"], "sha256": artifact["id"],
+        "encoding": "concatenate numbered parts then gzip decompress",
+        "parts": [{"filename": p["filename"], "sha256": p["id"]} for p in parts]}, indent=2))
+    descriptor = describe(manifest, role=artifact["role"])
+    if size_of(descriptor["size"]) > limit:
+        # A huge list can exceed limits too; omit hashes in the compact manifest.
+        manifest.write_text(json.dumps({"original": artifact["filename"], "sha256": artifact["id"],
+            "parts": count, "encoding": "concatenate parts in numeric order; gzip decompress"}))
+        descriptor = describe(manifest, role=artifact["role"])
+    return [descriptor, *parts]

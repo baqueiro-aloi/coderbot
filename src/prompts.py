@@ -517,6 +517,10 @@ Classify the reply's intent. Respond with ONLY a JSON object, no other text:
 # during PROPOSING) exactly on these resumes. Coderbot itself pushes, opens PRs, merges
 # and archives; no phase ever lets the agent do so.
 PHASE_RULES = {
+    "RECOVERING": "Repair task-owned code/tests and verify before committing intended paths. Preserve unrelated work; do NOT push or merge.",
+    "REPLANNING": "Revise planning artifacts only; preserve legitimate implementation and Git history. Do not implement; do NOT push or merge.",
+    "APPLY_FEEDBACK": "Apply localized approved corrections, verify and commit intended paths; do NOT push or merge.",
+    "FEEDBACK_QUESTION": "Investigate the user's concrete answer against approved requirements. Preserve work and report material changes for replanning; do NOT push or merge.",
     "EXPLORING": ("You are still in the exploration phase: investigate and conclude only "
                   "— do NOT modify files, do NOT commit, do NOT push, do NOT open PRs."),
     "PROPOSING": ("You are still in the proposal phase: create or edit ONLY the openspec "

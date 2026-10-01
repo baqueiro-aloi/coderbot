@@ -27,6 +27,27 @@ def send(subject: str, body: str, thread_id: str | None = None,
     return _backend().send(subject, body, thread_id, attachments)
 
 
+def deliver(state, subject, body, thread_id=None, attachments=()):
+    import message_delivery
+    import phase_checkpoint
+    return message_delivery.deliver(phase_checkpoint.store(), state, config.REPO_PATH,
+        config.DATA_DIR, _backend(), subject, body, thread_id, attachments)
+
+
+def retry_deliveries(state):
+    import message_delivery
+    import phase_checkpoint
+    store = phase_checkpoint.store()
+    message_delivery.retry_pending(store, state, config.REPO_PATH, _backend())
+    rows = store.list("delivery_receipt", store.task_identity(state, config.REPO_PATH), status="pending")
+    if state.get("proposal_delivery_pending") and not rows:
+        state.pop("proposal_delivery_pending", None)
+        if state.get("replan"):
+            row = store.get("feedback", state["replan"]["feedback_id"])
+            if row:
+                store.update("feedback", row, status="complete", outcome="revised proposal delivered")
+
+
 def poll_command():
     return _backend().poll_command()
 

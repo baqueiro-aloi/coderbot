@@ -155,6 +155,7 @@ class RuntimeValidationTests(unittest.TestCase):
             patch.object(main.task_source, "describe", return_value="doc"),
             patch.object(main, "load_state", return_value=state),
             patch.object(main, "save_state"),
+            patch.object(main.diagnostics, "report"),
             patch.object(main.time, "sleep"),
             patch.object(main, "handle_wait", side_effect=[
                 ssl.SSLEOFError("EOF occurred in violation of protocol"),

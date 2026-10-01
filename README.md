@@ -10,6 +10,9 @@ Several instances can share a backlog; Slack instances each use their own app.
 
 ## Repository layout
 
+Conversation and recovery contracts, diagnostic attachments and the rollout procedure
+are documented in [docs/conversation-recovery.md](docs/conversation-recovery.md).
+
 - `src/` — the bot: `main.py` (state machine), `config.py`, `prompts.py`, the
   agent runners and the Gmail/Docs clients. Flat modules, imported by name.
 - `tests/` — unit tests (`python3 -m unittest discover -s tests -t .`).
@@ -266,14 +269,10 @@ files before coderbot retries archival.
 
 ### Review-friendly task messages
 
-Each task thread gets a brief, illustrated announcement at most once for each reached
-milestone: **exploration → proposal → awaiting approval → implementation → verification
-→ archival → PR ready for human review → confirmed merge**. Review and optional e2e
-checks live within verification. Retries, questions, status replies and silence check-ins
-do not repeat the diagram. The assets are pre-rendered SVG/PNG pairs under
-`src/assets/milestones/`; outgoing mail includes an inline PNG with a plain-text stage
-label, and Slack uploads the PNG to the task thread. Completing or aborting a task
-without a confirmed GitHub merge never announces the merge milestone.
+Task conversations announce important results, blockers and decisions in concise text.
+Routine phase images and working check-ins are suppressed. STATUS reports live activity,
+the last effective progress and the next action without starting a coding turn.
+Completing or aborting without a confirmed merge never announces a merge.
 
 Proposal-review messages attach one **offline, self-contained HTML file** containing
 the actual change's `proposal.md`, `design.md`, `tasks.md` and all nested
@@ -283,7 +282,10 @@ summarizes changed sections against the last version sent. Generated files and
 snapshots are stored under git-ignored `data/review_packages/`, rather than in the
 target repo. If required artifacts are missing or the full attachment exceeds the
 configured mail limit, codebot asks for help instead of requesting approval of an
-incomplete package. Approval and merge still require the same explicit replies.
+incomplete package. Attachment failures have independent durable receipts and retries.
+Material feedback reopens planning and requires approval of the revised version; valid
+implementation and the existing PR are preserved, and archived work gets a complementary
+OpenSpec change. Localized corrections within approved intent proceed through verification.
 
 Messages awaiting input start with the decision or question. Before asking for PR
 review, codebot presents recorded verification outcomes (including skipped checks),
@@ -355,31 +357,13 @@ container) in `data/environment.md` or `CODEBOT_ENVIRONMENT_NOTES`. Untrusted te
 (e2e output, review comments, email bodies) is fenced as data inside prompts so an
 embedded instruction cannot hijack the flow.
 
-## Silence check-ins (is it stuck?)
+## Decision reminders
 
-A task can go quiet for hours — an implementation session, a slow `Code Review`
-run, or simply a question you haven't answered yet — and the thread gives no hint
-whether codebot is working or wedged. So while a task is in flight, codebot emails a
-short **check-in** on the task thread whenever the thread has been quiet (no email
-sent *or* received on it) for the next interval of a decaying back-off:
-`CODEBOT_PING_SCHEDULE`, default `30m,1h,2h,3h,5h,8h` — the first check-in 30 min
-after the last real email, the next 1 h after that check-in, then 2 h, 3 h, 5 h, and
-every 8 h from there (the last interval repeats). Any real email in either direction
-restarts the schedule; check-ins themselves don't count. Set it to `off` to disable.
-
-Every check-in says whose move it is, and is self-contained:
-
-- **Ball on codebot's side** (a working phase, or WAIT_REVIEW): what it is doing —
-  the step, when it started, and for WAIT_REVIEW the PR, how long it has waited, what
-  GitHub currently reports for the run and when it will give up — plus whether recent
-  attempts at the step have been failing.
-- **Ball on your side** (WAIT_APPROVAL / WAIT_MERGE / WAIT_REPLY / WAIT_STUCK /
-  WAIT_CLEAN): exactly what it needs from you, spelled out in full (the pending
-  question, the PR link and the accepted replies, the stuck step and its error), with
-  its last email quoted for reference — never "see above".
-
-Check-ins go out from the tick loop, so one can lag while a single long agent call is
-running (bounded by `CODEBOT_AGENT_TIMEOUT`); it is sent as soon as that call returns.
+Working phases and automated review do not generate periodic reminders. An unchanged
+pending decision gets at most one short reminder after 24 hours of no contact, stating
+the decision and valid response without quoting prior messages or uploading the same
+diagnostics again. `CODEBOT_PING_SCHEDULE=24h` enables this policy; `off` disables it.
+STATUS/KICK contacts refresh the quiet clock without resetting the once-per-decision rule.
 STATUS reports the last real email on the thread and how many check-ins followed it.
 
 During an in-flight phase, `status?` (or `STATUS`) gets an independent, **brief**

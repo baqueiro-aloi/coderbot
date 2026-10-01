@@ -294,9 +294,9 @@ class LifecycleGateTests(unittest.TestCase):
         body = email.call_args.args[2]
         self.assertIn("Latest reason: quality gate status is not pass "
                       "(failing: npm run lint: fail (100 errors))", body)
-        self.assertIn("Checks the agent reported (failing first):\n- npm run lint: fail (100 errors)",
-                      body)
-        self.assertIn("Agent's notes:\nRan everything.", body)
+        self.assertIn("diagnostic file", body)
+        self.assertNotIn("Checks the agent reported (failing first)", body)
+        self.assertNotIn("Agent's notes:\nRan everything.", body)
         self.assertIn("pre-existing on the base branch", body)
 
     def test_passing_gate_clears_feedback_and_first_round_gets_no_feedback(self):

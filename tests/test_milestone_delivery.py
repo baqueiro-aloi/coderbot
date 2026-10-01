@@ -23,12 +23,8 @@ class MilestoneDelivery(unittest.TestCase):
              patch.object(main.gmail_client, "send", return_value="thread") as send:
             main.announce_milestone(state, "proposing", "Working on the proposal")
             main.announce_milestone(state, "proposing", "Working on the proposal")
-        send.assert_called_once()
-        self.assertEqual(send.call_args.kwargs["progress"], milestones.image("proposing"))
-        self.assertIn("Stage: Proposal", send.call_args.args[1])
-        self.assertEqual(state["milestones_announced"], ["proposing"])
-        self.assertEqual(state["thread_id"], "thread")
-        persist.assert_called_once_with(state)
+        send.assert_not_called()
+        persist.assert_not_called()
         self.assertIn("milestones_announced", main.RESET_KEYS)
 
     def test_restart_and_hold_resume_do_not_reannounce_same_stage(self):
@@ -39,9 +35,10 @@ class MilestoneDelivery(unittest.TestCase):
             state = {"state": "PROPOSING", "item": "task", "slug": "task",
                      "branch": "bot-task"}
             main.announce_milestone(state, "proposing", "Writing the proposal")
+            main.save_state(state)
             reloaded = main.load_state()
             main.announce_milestone(reloaded, "proposing", "Writing the proposal")
-            self.assertEqual(send.call_count, 1)
+            self.assertEqual(send.call_count, 0)
             saved_holds = []
             with patch.object(main, "_commit_pending_work", return_value=[]), \
                  patch.object(main.task_source, "hold_task", return_value=True), \
@@ -50,13 +47,13 @@ class MilestoneDelivery(unittest.TestCase):
                  patch.object(main, "_reset_to_base_branch", return_value=[]), \
                  patch.object(main, "email"):
                 main._hold_task(reloaded, "thread")
-            self.assertEqual(saved_holds[0]["saved"]["milestones_announced"], ["proposing"])
+            self.assertNotIn("milestones_announced", saved_holds[0]["saved"])
             with patch.object(main.task_source, "unhold_task"), \
                  patch.object(main.task_source, "claim_task", return_value=True), \
                  patch.object(main, "git"), patch.object(main, "_load_holds", return_value=saved_holds), \
                  patch.object(main, "_save_holds"), patch.object(main, "email"):
                 main._resume_held_task(reloaded, saved_holds[0])
-            self.assertEqual(reloaded["milestones_announced"], ["proposing"])
+            self.assertNotIn("milestones_announced", reloaded)
 
     def test_email_progress_is_inline_and_plain_text_stays_readable(self):
         with patch.dict(sys.modules, {"googleapiclient": MagicMock(),
@@ -122,8 +119,8 @@ class MilestoneDelivery(unittest.TestCase):
             main.do_explore(state)
             main._continue_exploring(state, result)
         self.assertEqual(state["state"], "PROPOSING")
-        self.assertEqual(send.call_count, 1)
-        self.assertEqual(state["milestones_announced"], ["proposing"])
+        self.assertEqual(send.call_count, 0)
+        self.assertNotIn("milestones_announced", state)
 
     def test_only_confirmed_merge_gets_the_merge_diagram(self):
         for merged in (False, True):

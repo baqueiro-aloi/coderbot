@@ -284,7 +284,8 @@ def _parse_durations(spec: str) -> list[int]:
 
 
 PING_SCHEDULE_SECONDS = _parse_durations(
-    os.environ.get("CODEBOT_PING_SCHEDULE") or "30m,1h,2h,3h,5h,8h")
+    os.environ.get("CODEBOT_PING_SCHEDULE") or "24h")
+SLACK_MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_SLACK_MAX_ATTACH_BYTES", str(100 * 1024 * 1024)))
 
 # Gmail hard-caps messages around 25 MB; leave headroom for MIME overhead.
 MAX_ATTACHMENT_BYTES = int(os.environ.get("CODEBOT_MAX_ATTACH_BYTES", str(22 * 1024 * 1024)))

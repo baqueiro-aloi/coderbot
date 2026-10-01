@@ -93,7 +93,7 @@ class FinalizePrTests(unittest.TestCase):
         self.assertEqual(args[1], "PR ready for review")
         self.assertIn(f"Video: {LINK}", args[2])
         self.assertNotIn("Attached:", args[2])
-        self.assertEqual(args[3], [])
+        self.assertEqual([p.suffix for p in args[3]], [".txt"])
         self.assertEqual(self.state["evidence_url"], LINK)
         self.assertEqual(self.state["state"], "WAIT_MERGE")
 
@@ -102,26 +102,28 @@ class FinalizePrTests(unittest.TestCase):
         with patch.object(main.config, "COMM_CHANNEL", "slack"), \
              patch.object(main.evidence, "record_evidence", return_value=[MP4]), \
              patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
-             patch.object(main.gmail_client, "send", return_value="C123:100.000001") as send, \
+             patch.object(main.gmail_client, "deliver", return_value={"thread_id": "C123:100.000001", "complete": True}) as send, \
              patch.object(main, "trail"):
             main.finalize_pr(self.state)
-        self.assertEqual(send.call_args.args[2], "C123:100.000001")
-        self.assertIn(f"Video: {LINK}", send.call_args.args[1])
-        self.assertEqual(send.call_args.args[3], [])
+        self.assertEqual(send.call_args.args[3], "C123:100.000001")
+        self.assertIn(LINK, send.call_args.args[2])
+        self.assertEqual(send.call_args.args[4][0].suffix, ".txt")
 
     def test_failed_upload_attaches_as_before(self):
         args, _ = self._finalize([self.mp4], None)
-        self.assertIn("Attached: a Playwright video (mp4)", args[2])
+        self.assertIn("Evidence: a Playwright video (mp4) queued for delivery", args[2])
         self.assertNotIn("Video:", args[2])
-        self.assertEqual(args[3], [self.mp4])
+        self.assertEqual(args[3][0], self.mp4)
+        self.assertEqual(args[3][-1].suffix, ".txt")
 
     def test_newman_report_is_not_uploaded(self):
         self.state["e2e_kind"] = "newman"
         report = self.report
         args, upload = self._finalize([report], LINK)
         upload.assert_not_called()
-        self.assertIn("Attached: a Newman run report (html)", args[2])
-        self.assertEqual(args[3], [report])
+        self.assertIn("Evidence: a Newman run report (html) queued for delivery", args[2])
+        self.assertEqual(args[3][0], report)
+        self.assertEqual(args[3][-1].suffix, ".txt")
 
     def test_reset_keys_forget_the_link_between_tasks(self):
         self.assertIn("evidence_url", main.RESET_KEYS)
@@ -144,7 +146,8 @@ class FeedbackPushTests(unittest.TestCase):
         self.assertEqual(args[1], "PR updated")
         self.assertIn("fixed details", args[2])
         self.assertTrue(args[2].endswith(f"Video: {LINK}"))
-        self.assertEqual(args[3], [Path("/tmp/evidence.txt")])
+        self.assertEqual(args[3][0], Path("/tmp/evidence.txt"))
+        self.assertEqual(args[3][-1].suffix, ".txt")
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("push_context", state)
 

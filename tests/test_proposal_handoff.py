@@ -76,9 +76,9 @@ class ProposalHandoff(unittest.TestCase):
                  patch.object(main.config, "COMM_CHANNEL", channel), \
                  patch.object(main, "save_state"), \
                  patch.object(main, "trail"), \
-                 patch.object(main.gmail_client, "send", return_value=thread) as send:
+                  patch.object(main.gmail_client, "deliver", return_value={"thread_id": thread, "complete": True}) as send:
                 state = dict(self.state, thread_id=thread)
                 main._send_proposal_review(state, "Summary")
-                self.assertEqual(send.call_args.args[3][0].suffix, ".html")
-                self.assertIn("specs/api/spec.md", send.call_args.args[3][0].read_text())
+                self.assertEqual(send.call_args.args[4][0].suffix, ".html")
+                self.assertIn("specs/api/spec.md", send.call_args.args[4][0].read_text())
                 self.assertEqual(state["state"], "WAIT_APPROVAL")

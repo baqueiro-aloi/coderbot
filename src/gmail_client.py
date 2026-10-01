@@ -73,7 +73,8 @@ def _extract_body(payload: dict) -> str:
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
-         attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
+         attachments: list[Path] | None = None, *, progress: Path | None = None,
+         delivery_id: str | None = None) -> str:
     """Send an email to the user; returns the Gmail thread id."""
     service = _gmail()
     msg = EmailMessage()
@@ -84,6 +85,8 @@ def send(subject: str, body: str, thread_id: str | None = None,
     msg["From"] = primary
     # Same account sends and receives; this header lets poll_reply skip our own mail.
     msg["X-Codebot"] = "1"
+    if delivery_id:
+        msg["Message-ID"] = f"<{delivery_id}@coderbot.local>"
     skipped = []
 
     if thread_id:
@@ -99,7 +102,6 @@ def send(subject: str, body: str, thread_id: str | None = None,
         # everything on this id). Only replies have it: a brand-new thread's id is
         # assigned by Gmail on send, after the body is fixed, so its first message can't
         # carry it — every later message in the thread does.
-        body = f"Thread: {thread_id}\n\n{body}"
     else:
         msg["Subject"] = subject
 
@@ -147,6 +149,56 @@ def send(subject: str, body: str, thread_id: str | None = None,
     log.info("sent message id=%s thread=%s (%d attachment(s), %d bytes total)",
              sent["id"], sent["threadId"], len(files), total)
     return sent["threadId"]
+
+
+def attachment_limits():
+    return {"file": config.MAX_ATTACHMENT_BYTES - 65536, "mime": True}
+
+
+def send_envelope(envelope, receipts, confirm):
+    """Separate file messages make failed attachments independently retryable."""
+    thread = envelope.get("thread_id")
+    if receipts.get("body", {}).get("status") == "uncertain":
+        return thread
+    if receipts.get("body", {}).get("status") != "confirmed":
+        confirm("body", {"status": "uncertain"})
+        try:
+            body = envelope["body"]
+            for artifact in envelope["attachments"]:
+                body = body.replace(f": attached {artifact['filename']}",
+                                    f": delivery queued ({artifact['filename']})")
+            thread = send(envelope["subject"], body, thread, delivery_id=envelope["id"] + "-body")
+            confirm("body", {"status": "confirmed", "thread_id": thread})
+        except Exception as error:
+            confirm("body", {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                             "error": type(error).__name__})
+            return thread
+    else:
+        thread = receipts["body"].get("thread_id", thread)
+    for artifact in envelope["attachments"]:
+        key = artifact["id"]
+        if receipts.get(key, {}).get("status") in ("confirmed", "uncertain"):
+            continue
+        confirm(key, {"status": "uncertain"})
+        try:
+            thread = send(envelope["subject"], "Diagnostic/supporting file: " + artifact["filename"],
+                          thread, [Path(artifact["path"])], delivery_id=envelope["id"] + "-" + key)
+            confirm(key, {"status": "confirmed", "thread_id": thread})
+        except Exception as error:
+            confirm(key, {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                          "error": type(error).__name__})
+    return thread
+
+
+def reconcile_delivery(envelope, key, receipt):
+    identity = envelope["id"] + "-" + key
+    result = _gmail().users().messages().list(userId="me",
+        q=f"in:sent rfc822msgid:{identity}@coderbot.local", maxResults=1).execute()
+    messages = result.get("messages", [])
+    if messages:
+        return {"status": "confirmed", "thread_id": messages[0].get("threadId"),
+                "provider_ids": [messages[0]["id"]]}
+    return None
 
 
 def _processed_path():

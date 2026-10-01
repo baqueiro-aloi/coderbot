@@ -369,6 +369,73 @@ def send(subject: str, body: str, thread_id: str | None = None,
     return thread_id
 
 
+def send_envelope(envelope, receipts, confirm):
+    """Upload each file once; the caller persists receipts before the next send."""
+    channel, root = _split_thread(envelope["thread_id"])
+    for artifact in envelope["attachments"]:
+        key = artifact["id"]
+        if receipts.get(key, {}).get("status") in ("confirmed", "uncertain"):
+            continue
+        confirm(key, {"status": "uncertain"})
+        try:
+            result = web().files_upload_v2(channel=channel, thread_ts=root,
+                file=artifact["path"], filename=artifact["filename"])
+            ids = [file.get("id") for file in result.get("files", [])]
+            confirm(key, {"status": "confirmed", "provider_ids": ids})
+        except Exception as error:
+            confirm(key, {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                          "error": type(error).__name__})
+    if receipts.get("body", {}).get("status") not in ("confirmed", "uncertain"):
+        pending = [a["filename"] for a in envelope["attachments"]
+                   if receipts.get(a["id"], {}).get("status") != "confirmed"]
+        body = envelope["body"]
+        if pending:
+            for filename in pending:
+                body = body.replace(f": attached {filename}", f": pending delivery ({filename})")
+            body += "\nFiles pending delivery: " + ", ".join(pending)
+        confirm("body", {"status": "uncertain"})
+        ids = []
+        try:
+            for part in _chunks(_to_mrkdwn(body)):
+                result = web().chat_postMessage(channel=channel, thread_ts=root, text=part,
+                    client_msg_id=envelope["id"], mrkdwn=True, unfurl_links=False)
+                ids.append(result.get("ts"))
+            confirm("body", {"status": "confirmed", "provider_ids": ids})
+        except Exception as error:
+            confirm("body", {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                             "error": type(error).__name__})
+    return envelope["thread_id"]
+
+
+def attachment_limits():
+    return {"file": getattr(config, "SLACK_MAX_ATTACHMENT_BYTES", 100 * 1024 * 1024),
+            "mime": False}
+
+
+def reconcile_delivery(envelope, key, receipt):
+    channel, root = _split_thread(envelope["thread_id"])
+    try:
+        cursor = None
+        while True:
+            args = {"channel": channel, "ts": root, "limit": 100}
+            if cursor:
+                args["cursor"] = cursor
+            page = web().conversations_replies(**args)
+            artifact = next((a for a in envelope["attachments"] if a["id"] == key), None)
+            for message in page.get("messages", []):
+                if key == "body" and message.get("client_msg_id") == envelope["id"]:
+                    return {"status": "confirmed", "provider_ids": [message["ts"]]}
+                for file in message.get("files", []):
+                    if artifact and file.get("name") == artifact["filename"] and file.get("size") == artifact["size"]:
+                        return {"status": "confirmed", "provider_ids": [file["id"]]}
+            cursor = page.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception:
+        log.warning("could not reconcile uncertain Slack delivery")
+    return None
+
+
 def _pending(thread_id: str | None = None):
     clause, args = "", []
     if thread_id:

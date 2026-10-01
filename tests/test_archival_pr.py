@@ -254,12 +254,13 @@ class ArchivalTests(unittest.TestCase):
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
              patch.object(main, "git", return_value=" M app.py"), \
+             patch.object(main.recovery, "begin", side_effect=lambda db, state, repo, reason, resume: state.update(state="RECOVERING")) as recover, \
              patch.object(main.subprocess, "run") as process:
             main.do_archive(self.state)
 
         process.assert_not_called()
-        self.assertEqual(self.state["state"], "ARCHIVING")
-        self.assertEqual(self.state["archive_round"], 1)
+        self.assertEqual(self.state["state"], "RECOVERING")
+        recover.assert_called_once()
 
     def test_untracked_openspec_file_blocks_first_archive(self):
         def git(*args):
@@ -881,7 +882,8 @@ class PushPhaseTests(unittest.TestCase):
 
         args = email.call_args.args
         self.assertIn("fixed details", args[2])
-        self.assertEqual(args[3], [Path("/tmp/evidence.txt")])
+        self.assertEqual(args[3][0], Path("/tmp/evidence.txt"))
+        self.assertEqual(args[3][-1].suffix, ".txt")
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("push_context", state)
 
