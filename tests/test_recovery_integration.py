@@ -64,7 +64,7 @@ class RecoveryIntegration(unittest.TestCase):
             commit("other")
             git("checkout", "-b", "feature", "HEAD~1")
             commit("feature")
-            git("merge", "other", check=False)
+            git("-c", "user.name=Test", "-c", "user.email=test@example.com", "merge", "other", check=False)
             state = repo_provenance.inspect(root)
             self.assertIn("MERGE_HEAD", state["operations"])
             self.assertEqual(state["files"]["file.txt"]["status"], "UU")
