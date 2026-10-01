@@ -4656,10 +4656,13 @@ def _run_loop() -> None:
                     retry["notified"] = True
                     state["stuck_return"] = prev
                     state["state"] = "WAIT_STUCK"
-                # A network blip is not a fault of this state: one line, no traceback,
-                # and no progress toward the WAIT_STUCK escalation.
-                log.warning("cycle failed in %s on a transient network error (%s: %s); "
-                            "retrying in %ss", prev, type(error).__name__, error, backoff)
+                if state["state"] == "WAIT_STUCK":
+                    log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                                "automatic retries paused after %d attempts; waiting for user reply",
+                                prev, type(error).__name__, error, retry["attempts"])
+                else:
+                    log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                                "retrying in %ss", prev, type(error).__name__, error, backoff)
             else:
                 failures = state.setdefault("failures", {})
                 failures[prev] = failures.get(prev, 0) + 1
@@ -4677,7 +4680,7 @@ def _run_loop() -> None:
             save_state(state)
             _announce_state(state)
             if _is_transient_network_error(error):
-                gmail_client.wait(backoff)
+                gmail_client.wait(config.POLL_INTERVAL_SECONDS if state["state"] == "WAIT_STUCK" else backoff)
             else:
                 time.sleep(backoff)
             backoff = min(backoff * 2, 3600)

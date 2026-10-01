@@ -1,6 +1,7 @@
 // Managed OpenCode HTTP bridge: all session events, including children, are visible.
 import {spawn} from 'node:child_process';
 import {TRUSTED_PERMISSION} from './protocol.js';
+import {runAsyncTurn} from './async-turn.js';
 
 const input = JSON.parse(await new Promise((resolve, reject) => {
   let text = '';
@@ -58,7 +59,6 @@ try {
   family.add(root);
   emit('session_start');
   const stream = await request('/event');
-  const messageIDs = new Set();
   const completedParts = new Set();
   const startedParts = new Set();
   let failure;
@@ -81,7 +81,6 @@ try {
         if (event.type === 'session.error' && family.has(p.sessionID)) {
           failure = p.error; emit('error', {error: p.error, sourceSessionID: p.sessionID});
         }
-        if (event.type === 'message.updated' && p.info?.sessionID === root && p.info.role === 'assistant') messageIDs.add(p.info.id);
         if (event.type === 'message.part.updated' && family.has(p.part?.sessionID)) {
           const part = p.part;
           if (part.type === 'tool') {
@@ -100,23 +99,21 @@ try {
     }
   })().catch(error => {if (!controller.signal.aborted) failure = {message: error.message};});
   const [providerID, ...model] = input.model.split('/');
-  const result = await (await request(`/session/${root}/message`, 'POST', {
+   const history = await runAsyncTurn(request, root, {
     model: {providerID, modelID: model.join('/')}, variant: input.variant,
     ...(input.utility ? {tools: {read:false, write:false, edit:false, apply_patch:false,
       bash:false, task:false, grep:false, glob:false, webfetch:false, skill:false}} : {}),
     agent: input.agent || 'build', parts: [{type: 'text', text: input.prompt}],
-  })).json();
-  messageIDs.add(result.info.id);
-  const history = await (await request(`/session/${root}/message`)).json();
-  for (const message of history) {
-    if (message.info.role !== 'assistant' || !messageIDs.has(message.info.id)) continue;
+   }, {failure: () => failure});
+   for (const message of history) {
+     if (message.info.role !== 'assistant') continue;
     for (const part of message.parts) if (part.type === 'text') emit('text', {part});
   }
   if (failure) throw new Error('OpenCode session failed');
   controller.abort();
   await consume;
 } catch (error) {
-  emit('error', {error: {message: error.message}});
+   emit('error', {error: {message: error.message, cause: error.cause?.code || error.cause?.message}});
   process.exitCode = 1;
 } finally {
   await shutdown();

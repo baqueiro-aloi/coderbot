@@ -41,6 +41,9 @@ Retry delays start at 1 second and double (2, 4, 8, …), capped at 3600 seconds
 and subject to the existing consecutive-failure limit. The task's network retry
 counter and next retry time survive restarts; a successful phase resets them.
 The ordinary backlog poll interval does not delay a retry that is due sooner.
+The HTTP bridge submits turns through `prompt_async` and polls session status
+with short requests while streaming tool events. Long turns therefore do not
+depend on a single HTTP response surviving Node's five-minute headers timeout.
 
 Each task state entry sends a lifecycle banner in the task thread, including
 returns to earlier states. States within a lifecycle step share its illustration

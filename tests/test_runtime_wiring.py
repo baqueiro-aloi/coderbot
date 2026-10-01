@@ -18,6 +18,27 @@ main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_exhausted_network_retry_logs_pause_instead_of_another_retry(self):
+        state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
+        with patch.object(main, "load_state", return_value=state), \
+             patch.object(main, "save_state"), patch.object(main, "_ensure_task_language"), \
+             patch.object(main, "_announce_state"), patch.object(main, "email"), \
+             patch.object(main, "check_commands", return_value=False), \
+             patch.object(main, "_dispatch_feedback", return_value=False), \
+             patch.object(main, "_receive_feedback"), patch.object(main, "_maybe_ping"), \
+             patch.object(main.diagnostics, "report"), patch.object(main.task_records, "apply_contacts"), \
+             patch.object(main.gmail_client, "retry_deliveries"), \
+             patch.object(main.gmail_client, "wait", side_effect=SystemExit("stop")) as wait, \
+             patch.object(main.config, "MAX_STATE_FAILURES", 1), \
+             patch.dict(main.PHASES, {"EXPLORING": MagicMock(side_effect=ConnectionError("fetch failed"))}), \
+             self.assertLogs(main.log, level="WARNING") as logs:
+            with self.assertRaisesRegex(SystemExit, "stop"):
+                main._run_loop()
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertIn("automatic retries paused", "\n".join(logs.output))
+        self.assertNotIn("retrying in", "\n".join(logs.output))
+        wait.assert_called_once_with(main.config.POLL_INTERVAL_SECONDS)
+
     def test_network_retry_delays_start_at_one_and_survive_restart(self):
         state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
         clock = [100.0]
