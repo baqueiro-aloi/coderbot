@@ -7,6 +7,8 @@ import attachments
 
 
 def deliver(store, state, repo, directory, backend, subject, body, thread_id, files=(), *, identity=None):
+    for file in files:
+        body = body.replace(Path(file).name, attachments.delivery_name(file))
     descriptors = [attachments.describe(file, role="diagnostic" if Path(file).suffix == ".txt"
                                         else "supporting") for file in files]
     identity = identity or hashlib.sha256(json.dumps([backend.__name__, subject, body, thread_id,

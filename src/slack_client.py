@@ -347,8 +347,10 @@ def send(subject: str, body: str, thread_id: str | None = None,
     failed = []
     for path in attachments or []:
         try:
+            from attachments import delivery_name
+            body = body.replace(path.name, delivery_name(path))
             web().files_upload_v2(channel=channel, thread_ts=root_ts,
-                                  file=str(path), filename=path.name)
+                                  file=str(path), filename=delivery_name(path))
         except Exception:
             log.exception("could not share %s in Slack thread", path.name)
             failed.append(path)

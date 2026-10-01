@@ -51,6 +51,11 @@ and name the exact FSM state in the notice. Pending banners retry on the next ti
 restarts and retries within the same state do not repeat delivered banners. Email
 renders the banner inline; Slack shares the PNG in the thread. Review packages keep
 their delivery receipts and share their banner in a separate threaded message.
+Questions remain visible in the message even when the investigation is moved to
+a diagnostic attachment. The full pending question is retained for reply context;
+state banners do not replace the substantive last message used by STATUS.
+Attached `.log` reports are delivered as `.txt` with `text/plain` MIME type so
+Slack and email can preview them; the original file and full bytes are preserved.
 Routine working check-ins are suppressed. Decision reminders are short and due after 24 hours;
 `CODEBOT_PING_SCHEDULE=off` disables them.
 `CODEBOT_SLACK_MAX_ATTACH_BYTES` defaults to 104857600. Email uses the existing

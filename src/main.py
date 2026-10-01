@@ -179,7 +179,8 @@ def _contact_name() -> str:
 
 
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
-          new_thread: bool = False, *, milestone: str | None = None) -> None:
+          new_thread: bool = False, *, milestone: str | None = None,
+          visible_question: str | None = None) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
     if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
@@ -195,6 +196,11 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         decisions = [line for line in lines if line.startswith(("Reply", "Decision", "Your", "Responde", "¿"))]
         if decisions:
             body += "\n" + decisions[-1][:400]
+        if visible_question:
+            # The report may contain a long investigation; the actionable ask
+            # belongs in the message itself, never only in an attachment.
+            body = (f"{card}\n\nTask: {state.get('item', '?')}\nPhase: {state['state']}\n\n"
+                    f"{visible_question}\n\n{_reply_here()}")
         links = list(dict.fromkeys(re.findall(r"https?://[^\s<>]+", "\n".join(lines))))
         body += "".join("\n" + url for url in links[:3])
         body += "\nFull details: " + report.name
@@ -242,7 +248,10 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
 def announce_milestone(state: dict, stage: str, body: str) -> None:
     """Announce each state entry, including returns to a previously visited step."""
     if state.get("banner_state") != state["state"] or state.get("banner_stage") != stage:
+        previous_email = state.get("last_email")
         email(state, milestones.label(stage), body, milestone=stage)
+        if previous_email is not None:
+            state["last_email"] = previous_email
         state["banner_state"] = state["state"]
         save_state(state)
 
@@ -404,13 +413,13 @@ def handle_result(state: dict, result, phase: str) -> bool:
     if preamble:
         body += f"{preamble}\n\n---\n\n"
     body += f"{question}\n\n{_reply_here()}"
-    email(state, f"question during {phase}", body, attachments)
+    email(state, f"question during {phase}", body, attachments, visible_question=question)
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
     _transcript_note(state, f"sent this question to the user via {config.COMM_CHANNEL} "
                             f"({len(attachments)} attachment(s)); waiting for a reply")
-    state["pending_question"] = question[:2000]
+    state["pending_question"] = question
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
     return True

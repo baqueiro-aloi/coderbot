@@ -14,6 +14,11 @@ def describe(path, *, role="supporting"):
             or "application/octet-stream", "size": size, "role": role}
 
 
+def delivery_name(path):
+    path = Path(path)
+    return path.with_suffix(".txt").name if path.suffix.lower() == ".log" else path.name
+
+
 def encoded_size(size):
     """Base64 plus MIME line wrapping, rounded up."""
     base64 = 4 * ((size + 2) // 3)
@@ -21,6 +26,13 @@ def encoded_size(size):
 
 
 def prepare(artifact, limit, directory, *, mime=False):
+    if Path(artifact["path"]).suffix.lower() == ".log":
+        # Copy into the durable transport area: keep the source log intact and
+        # give both providers a real .txt path for MIME/preview detection.
+        text = Path(directory) / artifact["id"] / delivery_name(artifact["path"])
+        text.parent.mkdir(parents=True, exist_ok=True)
+        text.write_bytes(Path(artifact["path"]).read_bytes())
+        artifact = describe(text, role=artifact["role"])
     size_of = encoded_size if mime else lambda n: n
     if size_of(artifact["size"]) <= limit:
         return [artifact]

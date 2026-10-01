@@ -136,10 +136,11 @@ def send(subject: str, body: str, thread_id: str | None = None,
                                   subtype="png", cid="<codebot-progress>",
                                   filename=progress.name)
     for path in files:
-        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        from attachments import delivery_name
+        ctype = mimetypes.guess_type(delivery_name(path))[0] or "application/octet-stream"
         maintype, subtype = ctype.split("/", 1)
         log.debug("attaching %s (%s, %d bytes)", path.name, ctype, path.stat().st_size)
-        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
+        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=delivery_name(path))
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     payload = {"raw": raw}

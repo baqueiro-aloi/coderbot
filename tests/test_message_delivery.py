@@ -10,6 +10,27 @@ import gmail_client
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_log_delivery_uses_txt_name_and_preserves_contents_in_both_channels(self):
+        for backend in (slack_client, gmail_client):
+            with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "baseline.log"
+                path.write_text("Resultado completo\n")
+                store = ExecutionStore(Path(root) / "db")
+                def send(envelope, receipts, confirm):
+                    artifact = envelope["attachments"][0]
+                    self.assertEqual(artifact["filename"], "baseline.txt")
+                    self.assertEqual(artifact["media_type"], "text/plain")
+                    self.assertEqual(Path(artifact["path"]).read_bytes(), path.read_bytes())
+                    self.assertIn("baseline.txt", envelope["body"])
+                    confirm("body", {"status": "confirmed"})
+                    confirm(artifact["id"], {"status": "confirmed"})
+                    return "thread"
+                with patch.object(backend, "send_envelope", side_effect=send):
+                    result = message_delivery.deliver(store, {"item": "task"}, root, root,
+                        backend, "Results", "Evidence: attached baseline.log", "C:1", [path])
+                self.assertTrue(result["complete"])
+                self.assertTrue(path.is_file())
+
     def test_slack_partial_delivery_retries_only_failed_file_after_restart(self):
         with tempfile.TemporaryDirectory() as root:
             paths = [Path(root) / name for name in ("one.txt", "two.txt")]
@@ -57,7 +78,7 @@ class DeliveryTests(unittest.TestCase):
         from email.parser import BytesParser
         from email.policy import default
         with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "diagnostic.txt"
+            path = Path(root) / "diagnostic.log"
             path.write_text("Full traceback\n" + "frame\n" * 1000)
             service = Mock()
             service.users.return_value.messages.return_value.send.return_value.execute.return_value = {
@@ -68,6 +89,8 @@ class DeliveryTests(unittest.TestCase):
             message = BytesParser(policy=default).parsebytes(base64.urlsafe_b64decode(raw))
             file = next(message.iter_attachments())
             self.assertEqual(file.get_payload(decode=True), path.read_bytes())
+            self.assertEqual(file.get_filename(), "diagnostic.txt")
+            self.assertEqual(file.get_content_type(), "text/plain")
             self.assertEqual(message["Message-ID"], "<stable@coderbot.local>")
 
     def test_pending_attachment_content_cannot_be_silently_replaced(self):

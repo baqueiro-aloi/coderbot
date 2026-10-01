@@ -16,6 +16,30 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def test_long_investigation_keeps_complete_question_visible_after_wait_banner(self):
+        for channel in ("email", "slack"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as temp, \
+                 patch.object(config, "COMM_CHANNEL", channel), \
+                 patch.object(main, "save_state"), patch.object(main, "trail"), \
+                 patch.object(main, "_transcript_append"), patch.object(main, "_transcript_note"), \
+                 patch.object(main.diagnostics, "report", return_value=Path(temp) / "details.txt"), \
+                 patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread", "complete": True}) as deliver, \
+                 patch.object(main.gmail_client, "send", return_value="thread"):
+                question = "¿Aprobamos este enfoque?\n" + "- Opción y consecuencias.\n" * 110
+                result = SimpleNamespace(session_id="sid", output="Investigation\n" * 100,
+                    preamble="Investigation\n" * 100, question=question, attachments=[])
+                state = {"state": "EXPLORING", "item": "task", "slug": "task", "thread_id": "thread"}
+                self.assertTrue(main.handle_result(state, result, "EXPLORING"))
+                sent_body = deliver.call_args.args[2]
+                self.assertIn(question, sent_body)
+                self.assertNotIn("Investigation", sent_body)
+                self.assertIn("details.txt", sent_body)
+                self.assertEqual(state["pending_question"], question)
+                original = dict(state["last_email"])
+                main._announce_state(state)
+                self.assertEqual(state["last_email"], original)
+                self.assertIn(question, state["last_email"]["body"])
+
     def test_exploration_notice_survives_restart_and_agent_failures(self):
         for channel in ("email", "slack"):
             for language in ("English", "Spanish"):
