@@ -123,11 +123,17 @@ def _localized_pair(state, phase, body):
     if key in cache:
         return tuple(cache[key])
     # One text-only utility handles both fields; reuse its output for trail.
-    result = agent_runner.run("Translate subject and body to " + state["task_language"]
-        + '. Return ONLY JSON with keys subject and body. Preserve commands, URLs and code.\n'
-        + json.dumps({"subject": phase, "body": body}, ensure_ascii=False), contract=False)
-    value = parse_json_reply(result.output)
-    pair = (value["subject"], value["body"])
+    try:
+        result = agent_runner.run("Translate subject and body to " + state["task_language"]
+            + '. Return ONLY JSON with keys subject and body. Preserve commands, URLs and code.\n'
+            + json.dumps({"subject": phase, "body": body}, ensure_ascii=False), contract=False)
+        value = parse_json_reply(result.output)
+        pair = (value["subject"], value["body"])
+        if not all(isinstance(text, str) and text.strip() for text in pair):
+            raise ValueError('Invalid localized message fields')
+    except (RuntimeError, ValueError, KeyError, TimeoutError, subprocess.TimeoutExpired):
+        log.warning('localization unavailable; delivering original report without retrying coding work')
+        pair = (message_templates.translate(phase, state['task_language']) or phase, body)
     cache[key] = list(pair)
     if len(cache) > 30:
         cache.pop(next(iter(cache)))
@@ -2902,7 +2908,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
               "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
-              "post_review_check_round")
+              "post_review_check_round", "architecture_attempt_head")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:

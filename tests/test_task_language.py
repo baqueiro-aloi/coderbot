@@ -14,6 +14,14 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class TaskLanguageTests(unittest.TestCase):
+    def test_translation_timeout_preserves_report_and_uses_cached_fallback(self):
+        state = {'task_language': 'Spanish'}
+        with patch.object(main.agent_runner, 'run', side_effect=TimeoutError('slow')) as run:
+            first = main._localized_pair(state, 'PR ready for review', 'Original verified report')
+            second = main._localized_pair(state, 'PR ready for review', 'Original verified report')
+        self.assertEqual(first, ('PR listo para revisión', 'Original verified report'))
+        self.assertEqual(second, first)
+        self.assertEqual(run.call_count, 1)
     def tearDown(self):
         agent_runner.set_task_language(None)
 
