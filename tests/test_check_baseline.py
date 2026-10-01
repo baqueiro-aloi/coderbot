@@ -7,6 +7,15 @@ from check_baseline import compare, worktree, baseline_result
 
 
 class BaselineTests(unittest.TestCase):
+    def test_random_fixture_paths_match_but_commit_ids_remain_indeterminate(self):
+        f = {'status':'fail', 'failures':{'test':'Missing worktree (/tmp/tmpAb12/worktrees/demo)'}}
+        b = {'status':'fail', 'failures':{'test':'Missing worktree (/tmp/tmpCd34/worktrees/demo)'}}
+        self.assertEqual(compare(f,b)['status'], 'pass')
+        f['failures']['test'] = "AssertionError: None != '" + 'a'*40 + "'"
+        b['failures']['test'] = "AssertionError: None != '" + 'b'*40 + "'"
+        result=compare(f,b)
+        self.assertEqual(result['status'],'indeterminate')
+        self.assertEqual(result['regressions'],[])
     def test_dependency_comparison_ignores_app_version_not_dependency_versions(self):
         from check_baseline import dependency_snapshot
         import json

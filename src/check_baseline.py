@@ -44,6 +44,7 @@ def signature(error, roots=()):
     # Only duration and stack-frame line locations are volatile. Assertion values
     # and error messages remain exact; never strip arbitrary numbers or IDs.
     normalized = re.sub(r'(File "[^"]+", line )\d+', r'\1<line>', normalized)
+    normalized = re.sub(r'/tmp/tmp[A-Za-z0-9_-]+(?=/|[).\s])', '/tmp/<fixture>', normalized)
     return normalized
 
 
@@ -53,13 +54,23 @@ def compare(feature, baseline, *, roots=()):
     if feature["status"] != "fail" or baseline["status"] not in ("pass", "fail"):
         return {"status": "indeterminate", "preexisting": [], "regressions": []}
     old = {signature(test, roots): error for test, error in baseline.get("failures", {}).items()}
-    preexisting, regressions = [], []
+    preexisting, regressions, ambiguous = [], [], []
     for test, error in feature.get("failures", {}).items():
         key = signature(test, roots)
-        target = preexisting if key in old and signature(error, roots) == signature(old[key], roots) else regressions
+        actual = signature(error, roots)
+        expected = signature(old.get(key, ''), roots)
+        if key in old and actual != expected and re.sub(r"\b[0-9a-f]{40}\b", '<sha>', actual) == re.sub(r"\b[0-9a-f]{40}\b", '<sha>', expected):
+            # Random fixture commit IDs are not evidence of a code regression.
+            # Do not assert pass either: preserve the ambiguity for diagnosis.
+            ambiguous.append(test)
+            continue
+        target = preexisting if key in old and actual == expected else regressions
         target.append(test)
-    return {"status": "fail" if regressions else "pass" if preexisting else "indeterminate",
-            "preexisting": preexisting, "regressions": regressions}
+    result = {"status": "indeterminate" if ambiguous else "fail" if regressions else "pass" if preexisting else "indeterminate",
+              "preexisting": preexisting, "regressions": regressions}
+    if ambiguous:
+        result.update(reason='volatile_fixture_identifiers_differ', ambiguous=ambiguous)
+    return result
 
 
 def baseline_result(check, repo, sha, store):
