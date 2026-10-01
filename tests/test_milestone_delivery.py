@@ -16,6 +16,52 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def test_exploration_notice_survives_restart_and_agent_failures(self):
+        for channel in ("email", "slack"):
+            for language in ("English", "Spanish"):
+                with self.subTest(channel=channel, language=language), \
+                     tempfile.TemporaryDirectory() as temp, \
+                     patch.object(config, "STATE_PATH", Path(temp) / "state.json"), \
+                     patch.object(config, "COMM_CHANNEL", channel), \
+                     patch.object(main, "trail"), \
+                     patch.object(main.gmail_client, "send", return_value="thread") as send, \
+                     patch.object(main.agent_runner, "run") as run:
+                    state = {"state": "EXPLORING", "item": "task", "slug": "task",
+                             "branch": "bot-task", "task_language": language,
+                             "thread_id": "thread"}
+                    def delivered_before_agent(*args, **kwargs):
+                        send.assert_called_once()
+                        self.assertTrue(milestones.announced(main.load_state(), "exploring"))
+                        raise ConnectionError("fetch failed")
+                    run.side_effect = delivered_before_agent
+                    with self.assertRaisesRegex(ConnectionError, "fetch failed"):
+                        main.do_explore(state)
+                    reloaded = main.load_state()
+                    with self.assertRaisesRegex(ConnectionError, "fetch failed"):
+                        main.do_explore(reloaded)
+                    send.assert_called_once()
+                    self.assertEqual(run.call_count, 2)
+                    self.assertEqual(send.call_args.args[2], "thread")
+                    expected = ("Estoy explorando el código del repositorio." if language == "Spanish"
+                                else "I'm exploring the codebase.")
+                    self.assertEqual(send.call_args.args[1], expected)
+                    self.assertIn("Exploración" if language == "Spanish" else "Exploration",
+                                  send.call_args.args[0])
+
+    def test_failed_exploration_notice_is_retried_before_agent_work(self):
+        state = {"state": "EXPLORING", "item": "task", "slug": "task", "branch": "bot-task"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "send", side_effect=[ConnectionError("send failed"), "thread"]) as send, \
+             patch.object(main.agent_runner, "run", side_effect=ConnectionError("fetch failed")) as run:
+            with self.assertRaisesRegex(ConnectionError, "send failed"):
+                main.do_explore(state)
+            run.assert_not_called()
+            self.assertFalse(milestones.announced(state, "exploring"))
+            with self.assertRaisesRegex(ConnectionError, "fetch failed"):
+                main.do_explore(state)
+            self.assertTrue(milestones.announced(state, "exploring"))
+            self.assertEqual(send.call_count, 2)
+
     def test_announcement_is_recorded_and_survives_state_roundtrip(self):
         state = {"state": "PROPOSING", "item": "task", "slug": "task"}
         with patch.object(main, "save_state") as persist, \
@@ -23,8 +69,10 @@ class MilestoneDelivery(unittest.TestCase):
              patch.object(main.gmail_client, "send", return_value="thread") as send:
             main.announce_milestone(state, "proposing", "Working on the proposal")
             main.announce_milestone(state, "proposing", "Working on the proposal")
-        send.assert_not_called()
-        persist.assert_not_called()
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["progress"], milestones.image("proposing"))
+        self.assertEqual(state["banner_state"], "PROPOSING")
+        self.assertTrue(persist.called)
         self.assertIn("milestones_announced", main.RESET_KEYS)
 
     def test_restart_and_hold_resume_do_not_reannounce_same_stage(self):
@@ -38,7 +86,7 @@ class MilestoneDelivery(unittest.TestCase):
             main.save_state(state)
             reloaded = main.load_state()
             main.announce_milestone(reloaded, "proposing", "Writing the proposal")
-            self.assertEqual(send.call_count, 0)
+            self.assertEqual(send.call_count, 1)
             saved_holds = []
             with patch.object(main, "_commit_pending_work", return_value=[]), \
                  patch.object(main.task_source, "hold_task", return_value=True), \
@@ -47,13 +95,13 @@ class MilestoneDelivery(unittest.TestCase):
                  patch.object(main, "_reset_to_base_branch", return_value=[]), \
                  patch.object(main, "email"):
                 main._hold_task(reloaded, "thread")
-            self.assertNotIn("milestones_announced", saved_holds[0]["saved"])
+            self.assertEqual(saved_holds[0]["saved"]["milestones_announced"], ["proposing"])
             with patch.object(main.task_source, "unhold_task"), \
                  patch.object(main.task_source, "claim_task", return_value=True), \
                  patch.object(main, "git"), patch.object(main, "_load_holds", return_value=saved_holds), \
                  patch.object(main, "_save_holds"), patch.object(main, "email"):
                 main._resume_held_task(reloaded, saved_holds[0])
-            self.assertNotIn("milestones_announced", reloaded)
+            self.assertEqual(reloaded["milestones_announced"], ["proposing"])
 
     def test_email_progress_is_inline_and_plain_text_stays_readable(self):
         with patch.dict(sys.modules, {"googleapiclient": MagicMock(),
@@ -119,8 +167,45 @@ class MilestoneDelivery(unittest.TestCase):
             main.do_explore(state)
             main._continue_exploring(state, result)
         self.assertEqual(state["state"], "PROPOSING")
-        self.assertEqual(send.call_count, 0)
-        self.assertNotIn("milestones_announced", state)
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(state["milestones_announced"], ["exploring", "proposing"])
+
+    def test_every_state_entry_gets_banner_even_within_same_step_and_on_return(self):
+        for channel in ("email", "slack"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as temp, \
+                 patch.object(config, "STATE_PATH", Path(temp) / "state.json"), \
+                 patch.object(config, "COMM_CHANNEL", channel), patch.object(main, "trail"), \
+                 patch.object(main.agent_runner, "run") as run, \
+                 patch.object(main.gmail_client, "send", return_value="thread") as send:
+                state = {"item": "task", "slug": "task", "task_language": "Spanish",
+                         "thread_id": "thread"}
+                phases = ["VERIFYING", "INTERNAL_REVIEW", "E2E", "WAIT_REPLY", "E2E",
+                          "ARCHIVING", "OPEN_PR", "WAIT_REVIEW", "WAIT_MERGE",
+                          "ADDRESS_PR_THREADS", "WAIT_MERGE", "WAIT_STUCK", "RECOVERING",
+                          "REPLANNING", "WAIT_APPROVAL", "IMPLEMENTING", "APPLY_FEEDBACK"]
+                for index, phase in enumerate(phases, 1):
+                    state["state"] = phase
+                    main._announce_state(state)
+                    self.assertEqual(send.call_count, index)
+                    self.assertIn(phase, send.call_args.args[1])
+                    self.assertTrue(send.call_args.kwargs["progress"].is_file())
+                    state = main.load_state()
+                    main._announce_state(state)
+                    self.assertEqual(send.call_count, index)
+                run.assert_not_called()
+                state["state"] = "IDLE"
+                main._announce_state(state)
+                self.assertEqual(send.call_count, len(phases))
+
+    def test_pending_banner_failure_does_not_fail_phase_and_retries(self):
+        state = {"state": "E2E", "item": "task", "slug": "task"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "send", side_effect=[ConnectionError("down"), "thread"]) as send:
+            main._announce_state(state)
+            self.assertNotIn("banner_state", state)
+            main._announce_state(state)
+            self.assertEqual(state["banner_state"], "E2E")
+            self.assertEqual(send.call_count, 2)
 
     def test_only_confirmed_merge_gets_the_merge_diagram(self):
         for merged in (False, True):

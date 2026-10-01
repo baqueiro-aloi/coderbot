@@ -36,6 +36,7 @@ EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 _task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
 _task_context: ContextVar[dict | None] = ContextVar("task_context", default=None)
 _utility: ContextVar[bool] = ContextVar("utility", default=False)
+_invocation: ContextVar[dict | None] = ContextVar("invocation", default=None)
 _turn_lock = threading.Lock()
 _turn: dict = {"active": False}
 
@@ -87,10 +88,19 @@ def _end_turn() -> None:
 
 
 def _observe(event: dict) -> None:
+    invocation = _invocation.get()
+    root = event.get("sessionID")
+    # HTTP bridge events carry the root in sessionID and the child in
+    # sourceSessionID. Never replace the recovery session with a child session.
+    if (invocation is not None and isinstance(root, str) and root
+            and event.get("sourceSessionID", root) == root
+            and root != invocation.get("session_id")):
+        phase_checkpoint.remember_session(invocation["state"], invocation["prompt"], root)
+        invocation["session_id"] = root
     kind = event.get("type")
     part = event.get("part") if isinstance(event.get("part"), dict) else {}
     is_tool = kind == "tool_use" or part.get("type") == "tool"
-    if kind not in ("tool_use", "step_finish", "step_start", "text", "reasoning") and not is_tool:
+    if kind not in ("session_start", "tool_use", "step_finish", "step_start", "text", "reasoning") and not is_tool:
         return
     observed = time.time()
     with _turn_lock:
@@ -174,6 +184,29 @@ OpenSpec artifacts and completed tasks first; preserve partial valid work, repai
 unfinished edits and continue from the last verified checkpoint. Do not blindly
 repeat completed tasks or skip tests/reviews because of this interruption.
 """
+
+_TRANSPORT_RECOVERY_CONTEXT = """The previous turn was interrupted by a connection failure.
+Continue the SAME task and phase from this session's existing history. Preserve
+valid partial work. Reuse findings, completed tool results and subagent results;
+inspect unfinished subagent sessions and resume those by task_id when available
+instead of dispatching the same investigations again. Check whether pending
+commands completed before rerunning them. Finish the original request below;
+do not restart exploration or repeat completed work.
+"""
+
+
+def _working_opencode(prompt, session_id=None, *, interrupted=False):
+    if interrupted:
+        prompt = _TRANSPORT_RECOVERY_CONTEXT + "\n\n" + prompt
+        log.info("recovering interrupted OpenCode turn in session=%s", session_id)
+    try:
+        return _opencode(prompt, session_id)
+    except RuntimeError as error:
+        if not session_id or "Session not found" not in str(error):
+            raise
+        log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
+        return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
+                         _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
 
 
 def _after_kick(prompt: str) -> str:
@@ -423,7 +456,9 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             event = json.loads(line)
         except json.JSONDecodeError as err:
             raise RuntimeError(f"opencode returned invalid JSON event: {line[:500]!r}") from err
-        observed_session = event.get("sessionID") or observed_session
+        if not observed_session and event.get("sourceSessionID", event.get("sessionID")) == event.get("sessionID"):
+            observed_session = event.get("sessionID")
+            _observe(event)
         if event.get("type") == "text":
             part = event.get("part", {})
             text = part.get("text")
@@ -454,6 +489,7 @@ def run(prompt: str, contract: bool = True):
     utility_token = _utility.set(not contract)
     context = None
     before = None
+    invocation_token = _invocation.set(None)
     try:
         context = _task_context.get() if contract else None
         before = None
@@ -466,6 +502,9 @@ def run(prompt: str, contract: bool = True):
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             return OpenCodeResult(saved["session_id"], saved["output"])
+        recovering = phase_checkpoint.interrupted(context, original_prompt) if context and config.AGENT == "opencode" else None
+        if context and config.AGENT == "opencode":
+            _invocation.set({"state": context, "prompt": original_prompt})
         if contract:
             prompt = _language_prompt(_after_kick(prompt))
         if config.AGENT == "claude":
@@ -473,7 +512,8 @@ def run(prompt: str, contract: bool = True):
         elif config.AGENT == "opencode":
             full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
             with operations.budget(config.UTILITY_TIMEOUT_SECONDS if not contract else config.AGENT_TIMEOUT_SECONDS):
-                result = _opencode(full)
+                result = (_working_opencode(full, recovering, interrupted=True) if recovering
+                          else _opencode(full))
         else:
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
@@ -489,6 +529,7 @@ def run(prompt: str, contract: bool = True):
             except (OSError, subprocess.SubprocessError):
                 pass
         _utility.reset(utility_token)
+        _invocation.reset(invocation_token)
         _end_turn()
 
 
@@ -497,6 +538,7 @@ def resume(session_id: str, prompt: str):
     _begin_turn(session_id)
     context = None
     before = None
+    invocation_token = _invocation.set(None)
     try:
         context = _task_context.get()
         before = None
@@ -509,29 +551,28 @@ def resume(session_id: str, prompt: str):
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             return OpenCodeResult(saved["session_id"], saved["output"])
+        recovering = phase_checkpoint.interrupted(context, original_prompt) if context and config.AGENT == "opencode" else None
+        if context and config.AGENT == "opencode":
+            _invocation.set({"state": context, "prompt": original_prompt})
         if context:
             phase = context.get("state")
             sessions = context.setdefault("phase_sessions", {})
             fresh = (phase == "INTERNAL_REVIEW" and phase not in sessions) or (
                 context.get("session_context_tokens", 0) > config.CONTEXT_TOKEN_BUDGET)
-            if fresh:
+            if recovering:
+                session_id = recovering
+            elif fresh:
                 prompt = handoff_context.render(context, phase) + "\n\n" + prompt
                 session_id = None
                 context["session_context_tokens"] = 0
         prompt = _language_prompt(_after_kick(prompt))
+        if context and config.AGENT == "opencode" and session_id:
+            phase_checkpoint.remember_session(context, original_prompt, session_id)
         if config.AGENT == "claude":
             result = claude_runner.resume(session_id, prompt) if session_id else claude_runner.run(prompt)
         elif config.AGENT == "opencode":
-            try:
-                result = _opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt, session_id)
-            except RuntimeError as err:
-                if "Session not found" not in str(err):
-                    raise
-                # Sessions can be lost when an in-flight task changes agents or OpenCode's
-                # local store is reset. The task artifacts and branch remain authoritative.
-                log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
-                result = _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
-                                  _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
+            result = _working_opencode(claude_runner.EVIDENCE_CONTRACT + "\n\n" + prompt,
+                                       session_id, interrupted=bool(recovering))
         else:
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
@@ -547,4 +588,5 @@ def resume(session_id: str, prompt: str):
                          config.REPO_PATH, before, after)
             except (OSError, subprocess.SubprocessError):
                 pass
+        _invocation.reset(invocation_token)
         _end_turn()

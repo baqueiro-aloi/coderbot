@@ -42,7 +42,10 @@ try {
     }
     const response = await fetch(address + route, {method, headers,
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal});
-    if (!response.ok) throw new Error(`OpenCode HTTP ${response.status} on ${route}`);
+    if (!response.ok) {
+      if (response.status === 404 && route === '/session/' + input.sessionID) throw new Error('Session not found');
+      throw new Error(`OpenCode HTTP ${response.status} on ${route}`);
+    }
     return response;
   }
   if (input.sessionID) {

@@ -79,6 +79,7 @@ class StateRecovery(unittest.TestCase):
         with patch.object(main, "load_state", side_effect=[dict(checkpoint), dict(checkpoint),
                                                           dict(checkpoint, kick_pending=True)]), \
              patch.object(main, "save_state", side_effect=lambda state: saved.append(dict(state))), \
+             patch.object(main, "_announce_state"), \
              patch.object(main, "check_commands", return_value=False), \
              patch.object(main, "_maybe_ping"), \
              patch.object(main.agent_runner, "set_task_context"), \

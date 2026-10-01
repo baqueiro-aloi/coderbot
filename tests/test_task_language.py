@@ -61,6 +61,7 @@ class TaskLanguageTests(unittest.TestCase):
         state = {"state": "WAIT_REPLY", "item": "Seleccionar modelo",
                  "task_language": "Spanish", "thread_id": "C123:1.0"}
         with patch.object(main, "load_state", return_value=state), \
+             patch.object(main, "_announce_state"), \
              patch.object(main, "_ensure_task_language") as classify, \
              patch.object(main, "check_commands", side_effect=SystemExit("tick intercepted")):
             with self.assertRaisesRegex(SystemExit, "tick intercepted"):

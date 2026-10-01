@@ -1,8 +1,10 @@
 """Static task language copy avoids programming sessions for boilerplate."""
 SPANISH = {
     "Exploration": "Exploración", "Proposal": "Propuesta", "Implementation": "Implementación",
+    "I'm exploring the codebase.": "Estoy explorando el código del repositorio.",
     "Verification": "Verificación", "Archiving": "Archivado", "Approval": "Aprobación",
     "PR ready for review": "PR listo para revisión", "PR updated": "PR actualizado",
+    "Awaiting approval": "Esperando aprobación", "PR merged": "PR fusionado",
     "Exploration is complete; I'm preparing the OpenSpec proposal.": "La exploración terminó; estoy preparando la propuesta OpenSpec.",
     "Proposal approved; implementation is starting.": "Propuesta aprobada; comienza la implementación.",
     "Implementation is complete; I'm running checks and review.": "La implementación terminó; estoy ejecutando checks y revisión.",
@@ -33,5 +35,9 @@ def translate(message, language):
     if language.casefold() == "english":
         return message
     if language.casefold() == "spanish":
+        if " · " in message:
+            label, phase = message.split(" · ", 1)
+            if label in SPANISH:
+                return f"{SPANISH[label]} · {phase}"
         return SPANISH.get(message)
     return None

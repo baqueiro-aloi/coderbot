@@ -37,6 +37,7 @@ class ReplanningLifecycle(unittest.TestCase):
                  patch.object(main.config, "DATA_DIR", repo / "data"), \
                  patch.object(main.phase_checkpoint, "store", return_value=database), \
                  patch.object(main.agent_runner, "resume", side_effect=replan), \
+                 patch.object(main.gmail_client, "send", return_value="thread"), \
                  patch.object(main, "git", return_value=""), patch.object(main, "_run_checked"), patch.object(main, "save_state"), patch.object(main, "trail"), \
                  patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread", "complete": True}) as deliver:
                 main.do_replan(state)

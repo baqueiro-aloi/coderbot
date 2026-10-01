@@ -102,12 +102,14 @@ class FinalizePrTests(unittest.TestCase):
         with patch.object(main.config, "COMM_CHANNEL", "slack"), \
              patch.object(main.evidence, "record_evidence", return_value=[MP4]), \
              patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
+             patch.object(main.gmail_client, "send", return_value="C123:100.000001") as banner, \
              patch.object(main.gmail_client, "deliver", return_value={"thread_id": "C123:100.000001", "complete": True}) as send, \
              patch.object(main, "trail"):
             main.finalize_pr(self.state)
         self.assertEqual(send.call_args.args[3], "C123:100.000001")
         self.assertIn(LINK, send.call_args.args[2])
         self.assertEqual(send.call_args.args[4][0].suffix, ".txt")
+        self.assertEqual(banner.call_args.kwargs["progress"].stem, "pr_review")
 
     def test_failed_upload_attaches_as_before(self):
         args, _ = self._finalize([self.mp4], None)

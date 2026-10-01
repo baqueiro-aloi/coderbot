@@ -132,6 +132,10 @@ def _send_localized(state: dict, subj: str, body: str, thread_id: str) -> None:
 def _localized_pair(state, phase, body):
     if state.get("task_language", "English").casefold() == "english":
         return phase, body
+    static_phase = message_templates.translate(phase, state["task_language"])
+    static_body = message_templates.translate(body, state["task_language"])
+    if static_phase is not None and static_body is not None:
+        return static_phase, static_body
     if phase == "service unavailable":
         return (message_templates.translate(phase, state.get("task_language", "English")) or phase,
                 message_templates.operational("unavailable", state.get("task_language", "English")))
@@ -178,7 +182,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
           new_thread: bool = False, *, milestone: str | None = None) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
-    if card := handoffs.decision_card(state, phase):
+    if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
         body = f"{card}\n\n{body}"
     if len(body) > 1600 or len(body.splitlines()) > 12 or "Traceback (most recent call last)" in body:
         report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
@@ -207,8 +211,19 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         state["thread_id"] = delivery["thread_id"] or thread_id
         state["last_delivery"] = delivery
     else:
-        state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
+        kwargs = {"progress": milestones.image(milestone)} if milestone else {}
+        state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments, **kwargs)
         state.pop("last_delivery", None)
+    if milestone:
+        # Artifact delivery has its own receipts; share the banner in the same
+        # thread without changing or bypassing the artifact delivery contract.
+        if attachments:
+            gmail_client.send(subject(state, milestones.label(milestone)),
+                              _localized(state, milestones.label(milestone)), state["thread_id"],
+                              progress=milestones.image(milestone))
+        state["banner_stage"] = milestone
+        state["banner_state"] = {"approval": "WAIT_APPROVAL", "pr_review": "WAIT_MERGE",
+                                 "merged": "IDLE"}.get(milestone, state["state"])
     if fresh_stage:
         milestones.mark(state, fresh_stage)
         save_state(state)
@@ -225,9 +240,22 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
 
 
 def announce_milestone(state: dict, stage: str, body: str) -> None:
-    """A one-time stand-alone announcement where no existing handoff can carry it."""
-    if stage in ("merged",) and not milestones.announced(state, stage):
+    """Announce each state entry, including returns to a previously visited step."""
+    if state.get("banner_state") != state["state"] or state.get("banner_stage") != stage:
         email(state, milestones.label(stage), body, milestone=stage)
+        state["banner_state"] = state["state"]
+        save_state(state)
+
+
+def _announce_state(state: dict) -> None:
+    """Recover pending state banners without replaying the completed phase."""
+    if not state.get("item") or state["state"] == "IDLE" or state.get("banner_state") == state["state"]:
+        return
+    try:
+        stage = milestones.state_stage(state)
+        announce_milestone(state, stage, f"{milestones.label(stage)} · {state['state']}")
+    except Exception:  # A notification failure must not rerun coding work.
+        log.exception("could not send state banner for %s; will retry next tick", state["state"])
 
 
 def trail(state: dict, headline: str, body: str = "", *, localized: bool = False) -> None:
@@ -824,7 +852,7 @@ def do_pick(state: dict) -> None:
         save_state(state)
     log.info("picked %r -> %s", choice["item"], branch)
     trail(state, f"Picked this item; working on branch {branch}", choice.get("reason", ""))
-    announce_milestone(state, "exploring", f"Task: {state['item']}\nI'm exploring the codebase.")
+    announce_milestone(state, "exploring", "I'm exploring the codebase.")
 
 
 def prioritize_items(items: list[dict]) -> list[dict]:
@@ -867,6 +895,9 @@ def render_images(paths: list[str]) -> str:
 
 
 def do_explore(state: dict) -> None:
+    # Picking persists EXPLORING before sending the notice. Recover a missing
+    # notice on restart/retry, and record delivery before beginning agent work.
+    announce_milestone(state, "exploring", "I'm exploring the codebase.")
     result = agent_runner.run(prompts.render(
         prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"],
         detail=state.get("item_detail", ""),
@@ -3436,7 +3467,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
               "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url", "milestones_announced", "proposal_snapshot", "proposal_sent_key",
+              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "proposal_snapshot", "proposal_sent_key",
               "quality_report", "internal_review_report", "e2e_passed",
               "implementation_summary", "pending_feedback", "architecture_report",
               "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
@@ -4492,7 +4523,7 @@ def main() -> None:
 
 def _run_loop() -> None:
     global _current_state
-    backoff = config.POLL_INTERVAL_SECONDS
+    backoff = 1
     while True:
         _liveness["tick_started"] = time.time()
         try:
@@ -4524,6 +4555,7 @@ def _run_loop() -> None:
                 state["thread_id"] = gmail_client.open_thread(state)
                 save_state(state)
             log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
+            _announce_state(state)
             with _status_command_lock:
                 handled_command = check_commands(state)
             task_records.apply_contacts(phase_checkpoint.store(), state, config.REPO_PATH)
@@ -4543,15 +4575,17 @@ def _run_loop() -> None:
                     dispatched_feedback = _dispatch_feedback(state)
                 finally:
                     _work_active.clear()
-            retry_due = (state["state"] not in WAITS and state.get("technical_retry", {}).get("phase") == state["state"]
+            retry_due = (state["state"] != "WAIT_STUCK" and state.get("technical_retry", {}).get("phase") == state["state"]
                          and state.get("technical_retry", {}).get("next_at", 0) > time.time())
             if handled_command or dispatched_feedback:
                 pass  # reset to IDLE; skip normal dispatch this tick
             elif retry_due:
                 save_state(state)
-                gmail_client.wait(config.POLL_INTERVAL_SECONDS)
+                remaining = state["technical_retry"]["next_at"] - time.time()
+                gmail_client.wait(max(0, min(config.POLL_INTERVAL_SECONDS, remaining)))
                 continue
             else:
+                _announce_state(state)
                 _work_active.set()
                 try:
                     if state["state"] == "WAIT_REVIEW" and check_pr_status(state):
@@ -4572,7 +4606,7 @@ def _run_loop() -> None:
                 finally:
                     _work_active.clear()
             # Success: clear this state's consecutive-failure counter.
-            if prev not in WAITS and not dispatched_feedback:
+            if not dispatched_feedback:
                 state.pop("technical_retry", None)
             if state.get("failures", {}).get(prev):
                 state["failures"][prev] = 0
@@ -4583,13 +4617,14 @@ def _run_loop() -> None:
                 state["last_transition"] = time.time()
             _maybe_ping(state)
             save_state(state)
+            _announce_state(state)
             if state.get("item") and state["state"] != prev:
                 phase_checkpoint.retire(state, prev)
             if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
                 gmail_client.close_thread(state["retire_thread_id"])
                 state.pop("retire_thread_id")
                 save_state(state)
-            backoff = config.POLL_INTERVAL_SECONDS
+            backoff = 1
         except turn_control.TurnKicked:
             # Discard only this tick's in-memory state. Last completed checkpoint
             # and actual files remain authoritative; retry the same phase.
@@ -4601,15 +4636,18 @@ def _run_loop() -> None:
             _current_state = state
             log.info("user kicked agent turn; resuming %s without consuming failure budget",
                      state.get("state"))
-            backoff = config.POLL_INTERVAL_SECONDS
+            backoff = 1
             continue
         except Exception as error:
             if state.get("item"):
                 diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
                     config.DATA_DIR, prev, error=error)
             if _is_transient_network_error(error):
-                retry = state.setdefault("technical_retry", {"attempts": 0, "phase": prev})
+                if state.get("technical_retry", {}).get("phase") != prev:
+                    state["technical_retry"] = {"attempts": 0, "phase": prev}
+                retry = state["technical_retry"]
                 retry["attempts"] += 1
+                backoff = min(2 ** min(retry["attempts"] - 1, 12), 3600)
                 retry["next_at"] = time.time() + backoff
                 if retry["attempts"] >= config.MAX_STATE_FAILURES and not retry.get("notified"):
                     path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
@@ -4631,13 +4669,15 @@ def _run_loop() -> None:
                     if state["state"] != prev:
                         state["last_transition"] = time.time()
                     save_state(state)
-                    backoff = config.POLL_INTERVAL_SECONDS
+                    _announce_state(state)
+                    backoff = 1
                     time.sleep(config.POLL_INTERVAL_SECONDS)
                     continue
             _maybe_ping(state)  # a failing step is exactly when "is it stuck?" gets asked
             save_state(state)
+            _announce_state(state)
             if _is_transient_network_error(error):
-                gmail_client.wait(config.POLL_INTERVAL_SECONDS)
+                gmail_client.wait(backoff)
             else:
                 time.sleep(backoff)
             backoff = min(backoff * 2, 3600)

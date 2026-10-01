@@ -18,6 +18,39 @@ main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_network_retry_delays_start_at_one_and_survive_restart(self):
+        state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
+        clock = [100.0]
+        delays = []
+        def wait(seconds):
+            delays.append(seconds)
+            clock[0] += seconds
+        def run_failures(count):
+            with patch.object(main, "load_state", side_effect=lambda: dict(state)), \
+                 patch.object(main, "save_state", side_effect=lambda current: state.update(current)), \
+                 patch.object(main, "_ensure_task_language"), patch.object(main, "_announce_state"), \
+                 patch.object(main, "check_commands", return_value=False), \
+                 patch.object(main, "_dispatch_feedback", return_value=False), \
+                 patch.object(main, "_receive_feedback"), patch.object(main, "_maybe_ping"), \
+                 patch.object(main.diagnostics, "report"), patch.object(main.task_records, "apply_contacts"), \
+                 patch.object(main.gmail_client, "retry_deliveries"), \
+                 patch.object(main.gmail_client, "wait", side_effect=wait), \
+                 patch.object(main.time, "time", side_effect=lambda: clock[0]), \
+                 patch.object(main.config, "MAX_STATE_FAILURES", 10), \
+                 patch.object(main.config, "POLL_INTERVAL_SECONDS", 60), \
+                 patch.dict(main.PHASES, {"EXPLORING": MagicMock(side_effect=[
+                     *[ConnectionError("fetch failed") for _ in range(count)], SystemExit("stop")])}):
+                with self.assertRaisesRegex(SystemExit, "stop"):
+                    main._run_loop()
+        run_failures(2)
+        self.assertEqual(delays, [1, 2])
+        self.assertEqual(state["technical_retry"]["attempts"], 2)
+        # Restart before the persisted retry time; ordinary polling must not
+        # turn the remaining one second into a sixty-second wait.
+        clock[0] -= 1
+        run_failures(2)
+        self.assertEqual(delays, [1, 2, 1, 4, 8])
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         root = Path(self.temporary_directory.name)

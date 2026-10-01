@@ -59,12 +59,14 @@ class CommunicationLifecycle(unittest.TestCase):
                     self.assertEqual(state["state"], "WAIT_MERGE")
                     main._finish_task(state, "PR merged.", reset_repo=False, merged=True)
                 bodies = [call.args[1] for call in send.call_args_list]
+                self.assertEqual(bodies.count("Exploring"), 1)
                 self.assertTrue(any("Separate production RDS" in body for body in bodies))
                 self.assertTrue(any("Review cover:" in body for body in bodies))
                 self.assertTrue(any(call.args[3] and call.args[3][0].suffix == ".html"
                                     for call in send.call_args_list))
                 stages = [call.kwargs["progress"].stem for call in send.call_args_list
                           if call.kwargs.get("progress")]
-                self.assertEqual(stages, [])
+                self.assertEqual(stages, ["exploring", "proposing", "approval", "implementing",
+                                          "verifying", "archiving", "pr_review", "merged"])
                 self.assertEqual(state["state"], "IDLE")
                 self.assertNotIn("milestones_announced", state)

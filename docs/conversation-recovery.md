@@ -30,8 +30,26 @@ with credential/token redaction; failed executions do not disqualify diagnostics
 
 ## Defaults
 
-Routine milestone images and working check-ins are suppressed. Decision reminders
-are short and due after 24 hours; `CODEBOT_PING_SCHEDULE=off` disables them.
+OpenCode persists the root session ID as soon as the invocation emits it. A
+connection failure, timeout or process restart resumes that session for the same
+task, phase and request, preserving history and partial repository work. Recovery
+asks the agent to reuse completed findings and subagent results and check pending
+commands before repeating them. Completed outcomes still replay without invoking
+the agent. Only a missing OpenCode session falls back to reconstructing context
+from the repository and OpenSpec artifacts.
+Retry delays start at 1 second and double (2, 4, 8, …), capped at 3600 seconds
+and subject to the existing consecutive-failure limit. The task's network retry
+counter and next retry time survive restarts; a successful phase resets them.
+The ordinary backlog poll interval does not delay a retry that is due sooner.
+
+Each task state entry sends a lifecycle banner in the task thread, including
+returns to earlier states. States within a lifecycle step share its illustration
+and name the exact FSM state in the notice. Pending banners retry on the next tick;
+restarts and retries within the same state do not repeat delivered banners. Email
+renders the banner inline; Slack shares the PNG in the thread. Review packages keep
+their delivery receipts and share their banner in a separate threaded message.
+Routine working check-ins are suppressed. Decision reminders are short and due after 24 hours;
+`CODEBOT_PING_SCHEDULE=off` disables them.
 `CODEBOT_SLACK_MAX_ATTACH_BYTES` defaults to 104857600. Email uses the existing
 `CODEBOT_MAX_ATTACH_BYTES` with encoding headroom. STATUS records contact events
 which the FSM owner applies without supervisor state overwrites.
