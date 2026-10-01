@@ -64,6 +64,11 @@ Pending ordinary OpenSpec tasks return verification to implementation. Only task
 explicitly tagged `[codebot:final-checks]` may remain pending through focused
 verification/internal review; the controller marks them complete after its final
 suite passes. They must not be used to defer implementation or focused checks.
+Both normal implementation turns and question continuations validate OpenSpec
+apply counts against `tasks.md` before announcing or entering verification. Partial
+turns stay in implementation, preserve accumulated evidence, and persist a new
+continuation identity. Repeated turns with unchanged checklist and repository
+snapshot pause with an actionable report; observable progress resets that counter.
 Attached `.log` reports are delivered as `.txt` with `text/plain` MIME type so
 Slack and email can preview them; the original file and full bytes are preserved.
 Routine working check-ins are suppressed. Decision reminders are short and due after 24 hours;

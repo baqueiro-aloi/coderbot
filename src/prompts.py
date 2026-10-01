@@ -199,6 +199,9 @@ IMPLEMENT = ENVIRONMENT + """
 The user approved the proposal. Invoke `coderbot-openspec-workflow`,
 `openspec-apply-change`, and `test-driven-development` to implement change $slug.
 Work through every task in tasks.md, marking each complete only after its test passes.
+Finishing a turn does not finish implementation: coderbot checks the real OpenSpec
+checklist before advancing. If work remains, report concrete progress, evidence
+and remaining tasks; continue within the approved scope on the next turn.
 Leave tasks explicitly tagged [codebot:final-checks] unchecked for the controller's
 complete final suite after review. This tag is only for executing that suite,
 never for implementation, test creation, or focused validation.

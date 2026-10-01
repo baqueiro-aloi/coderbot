@@ -1113,21 +1113,68 @@ def do_implement(state: dict) -> None:
     feedback = state.get("implementation_feedback", "")
     result = agent_runner.resume(
         state["session_id"],
-        feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
+        f"Implementation continuation: {state.get('implementation_turn', 0)}\n" + feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
     if handle_result(state, result, "IMPLEMENTING"):
         return
+    _complete_implementation(state, result)
+
+
+def _complete_implementation(state: dict, result) -> None:
+    """A completed agent turn is not a completed plan. Both entry paths use this gate."""
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
     state["implementation_summary"] = "\n".join(
         line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
-    state["e2e_specs"] = evidence.reported_specs(result.output)
+    state["e2e_specs"] = list(dict.fromkeys([
+        *state.get("e2e_specs", []), *evidence.reported_specs(result.output)]))
+    state["implementation_attachments"] = list(dict.fromkeys([
+        *state.get("implementation_attachments", []),
+        *[str(path) for path in getattr(result, "attachments", []) if Path(path).is_file()]]))
     log.info("implementation reported %d e2e spec(s): %s",
              len(state["e2e_specs"]), state["e2e_specs"])
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
+    try:
+        slug = _validated_slug(state.get("slug"))
+        instructions = json.loads(_run_checked([
+            "openspec", "instructions", "apply", "--change", slug, "--json"]))
+        plan = task_phases.validate_progress(config.REPO_PATH, slug, instructions)
+        if plan["final_checks"] and not config.DETERMINISTIC_CHECKS:
+            raise ValueError("Pending controller final-suite tasks require deterministic checks")
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        _enter_stuck(state, "IMPLEMENTING", "Cannot confirm implementation completion: " + str(error))
+        return
+    if plan["implementation"]:
+        progress = {"pending": plan["implementation"], "complete": plan["complete"],
+                    "snapshot": content_snapshot(config.REPO_PATH)}
+        previous = state.get("implementation_progress")
+        advanced = (previous is None or plan["complete"] > previous["complete"]
+                    or progress["pending"] != previous["pending"]
+                    or progress["snapshot"] != previous["snapshot"])
+        state["implementation_no_progress"] = 0 if advanced else state.get("implementation_no_progress", 0) + 1
+        state["implementation_progress"] = progress
+        state["implementation_feedback"] = (
+            "Continue the approved implementation; the plan is NOT complete. Reuse valid work and evidence.\n"
+            f"Checked tasks: {plan['complete']}/{plan['total']}. Pending implementation tasks:\n"
+            + "\n".join(plan["implementation"]))
+        state["state"] = "IMPLEMENTING"
+        state["implementation_turn"] = state.get("implementation_turn", 0) + 1
+        save_state(state)
+        if state["implementation_no_progress"] >= config.QUALITY_GATE_MAX_ROUNDS:
+            state["implementation_stall_round"] = config.QUALITY_GATE_MAX_ROUNDS - 1
+            _gate_failed(state, "IMPLEMENTING", "implementation_stall_round",
+                         "Repeated implementation turns made no observable progress",
+                         state["implementation_feedback"],
+                         [Path(path) for path in state["implementation_attachments"]])
+            return
+        log.info("implementation partial: %d/%d checked; %d task(s) still pending; continuing turn %d",
+                 plan["complete"], plan["total"], len(plan["implementation"]), state["implementation_turn"])
+        return
+    state["implementation_ready"] = plan
     state["e2e_round"] = 0
     state.pop("implementation_feedback", None)
+    state.pop("implementation_no_progress", None)
     state["verify_round"] = 0
     state.pop("e2e_passed", None)
     state["state"] = "VERIFYING"
@@ -3530,7 +3577,9 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
               "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
-              "implementation_return_round")
+              "implementation_return_round", "implementation_turn", "implementation_progress",
+              "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
+              "implementation_attachments", "implementation_ready")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4152,22 +4201,8 @@ def _continue_proposing(state: dict, result) -> None:
 
 
 def _continue_implementing(state: dict, result) -> None:
-    if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
-        return
-    state["implementation_summary"] = "\n".join(
-        line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
-    # The direct path parses the spec list from the final output; an answer that
-    # completes the phase carries the same contract, so parse it here too.
-    specs = evidence.reported_specs(result.output)
-    if specs:
-        state["e2e_specs"] = specs
-        log.info("implementation (via reply) reported %d e2e spec(s): %s", len(specs), specs)
-    state["e2e_round"] = 0
-    state["verify_round"] = 0
-    state.pop("e2e_passed", None)
-    state["state"] = "VERIFYING"
-    trail(state, "Implementation complete; verifying")
-    announce_milestone(state, "verifying", "Implementation is complete; I'm running checks and review.")
+    state.pop("implementation_no_progress", None)
+    _complete_implementation(state, result)
 
 
 def _continue_verifying(state: dict, result) -> None:

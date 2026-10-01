@@ -9,6 +9,10 @@ set -euo pipefail
 # can initialize. Reset it on each start and let the bot's thread keep it fresh.
 data_dir="${CODEBOT_DATA_DIR:-/app/data}"
 mkdir -p "$data_dir"
+mkdir -p "$data_dir/transport"
+# Manual recovery uploads and host-side tooling can leave root-owned staging
+# files. Delivery runs as bot and must be able to prepare its attachments.
+chown -R bot:bot "$data_dir/transport"
 install -m 0600 -o bot -g bot /dev/null "$data_dir/heartbeat"
 
 # Keep OpenCode credentials and resumable sessions in Codebot's bind-mounted data

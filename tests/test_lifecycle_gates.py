@@ -167,6 +167,9 @@ class LifecycleGateTests(unittest.TestCase):
     def test_implementation_advances_to_verification(self):
         state = self.base_state()
         with patch.object(main.agent_runner, "resume", return_value=result("implemented")), \
+             patch.object(main, "_run_checked", return_value="{}"), \
+             patch.object(main.task_phases, "validate_progress", return_value={
+                 "total": 7, "complete": 7, "implementation": [], "final_checks": []}), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]):
             main.do_implement(state)
 

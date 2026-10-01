@@ -173,7 +173,7 @@ class PromptContractTests(unittest.TestCase):
             rendered.replace("\n", " "),
         )
         self.assertIn(
-            "Strictly validate the active OpenSpec change and confirm all OpenSpec apply tasks "
+        "Strictly validate the active OpenSpec change and confirm all implementation tasks "
             "are complete.",
             rendered.replace("\n", " "),
         )
