@@ -7,6 +7,29 @@ from check_baseline import compare, worktree, baseline_result
 
 
 class BaselineTests(unittest.TestCase):
+    def test_baseline_links_matching_installed_dependencies_only_in_scratch(self):
+        from check_plan import Check
+        from execution_store import ExecutionStore
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / "frontend").mkdir()
+            (repo / "frontend/package.json").write_text('{"scripts":{}}')
+            (repo / ".gitignore").write_text("node_modules/\n")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "base"], cwd=repo, check=True)
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True).stdout.strip()
+            (repo / "frontend/node_modules").mkdir()
+            (repo / "frontend/node_modules/fixture").write_text("installed")
+            import sys
+            check = Check("dependency", [sys.executable, "-c", "from pathlib import Path; assert Path('node_modules/fixture').read_text() == 'installed'"], cwd="frontend")
+            result = baseline_result(check, repo, sha, ExecutionStore(Path(root) / "data/db"))
+            self.assertEqual(result["status"], "pass")
+            self.assertFalse((repo / "frontend/node_modules").is_symlink())
+    def test_lint_paths_are_compared_relative_to_each_worktree(self):
+        feature = {"status": "fail", "failures": {"/feature/src/a.ts:2:4:rule": "Bad regex"}}
+        baseline = {"status": "fail", "failures": {"<repo>/src/a.ts:2:4:rule": "Bad regex"}}
+        self.assertEqual(compare(feature, baseline, roots=("/feature",))["status"], "pass")
     def test_baseline_cached_without_second_worktree_execution(self):
         from check_plan import Check
         from execution_store import ExecutionStore

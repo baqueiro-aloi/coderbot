@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 import uuid
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 
@@ -11,6 +12,7 @@ import operations
 import preparation
 from check_results import parse_output
 from execution_identity import digest, environment_identity, snapshot
+log = logging.getLogger(__name__)
 
 
 def execute_plan(plan, repo, store, task_id, *, workers=3):
@@ -32,6 +34,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(), "version": 1})
     previous = store.reusable_check(task_id, identity) if reuse else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
+        log.info("check reused: %s status=%s report=%s", check.id,
+                 previous["data"]["result"]["status"], previous["data"]["result"].get("report"))
         return {**previous["data"]["result"], "reused": True}
     candidates = store.list("check_run", task_id)
     previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
@@ -47,6 +51,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
     report_dir.mkdir(parents=True)
     started = time.time()
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, data={"check": check.id})
+    log.info("check started: %s cwd=%s timeout=%ss reason=%s", check.id, cwd, check.timeout, reason)
     try:
         process = operations.run(check.argv, cwd=cwd, timeout=check.timeout,
                                  exclusive=check.resources)
@@ -66,6 +71,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
                   repetition_reason=reason)
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, status="complete",
               data={"check": check.to_dict(), "result": result})
+    log.info("check finished: %s status=%s exit=%s duration=%.1fs report=%s", check.id,
+             result["status"], result["exit_code"], result["finished"] - started, report)
     return result
 
 

@@ -25,10 +25,11 @@ def compare(feature, baseline, *, roots=()):
         return {"status": "pass", "preexisting": [], "regressions": []}
     if feature["status"] != "fail" or baseline["status"] not in ("pass", "fail"):
         return {"status": "indeterminate", "preexisting": [], "regressions": []}
-    old = baseline.get("failures", {})
+    old = {signature(test, roots): error for test, error in baseline.get("failures", {}).items()}
     preexisting, regressions = [], []
     for test, error in feature.get("failures", {}).items():
-        target = preexisting if test in old and signature(error, roots) == signature(old[test], roots) else regressions
+        key = signature(test, roots)
+        target = preexisting if key in old and signature(error, roots) == signature(old[key], roots) else regressions
         target.append(test)
     return {"status": "fail" if regressions else "pass" if preexisting else "indeterminate",
             "preexisting": preexisting, "regressions": regressions}
@@ -48,11 +49,21 @@ def baseline_result(check, repo, sha, store):
         dependency_inputs = ["requirements*.txt", "**/requirements*.txt", "package*.json", "**/package*.json"]
         if snapshot(repo, dependency_inputs) != snapshot(path, dependency_inputs):
             return {"status": "indeterminate", "failures": {}, "reason": "dependency_inputs_differ"}
+        # Git worktrees omit ignored installed dependencies. Reuse the verified
+        # installations only when dependency manifests match; create links solely
+        # in the disposable baseline, never edit the target checkout.
+        for area in (".", "backend", "PICAv1/backend", "frontend", "e2e"):
+            for directory in ("node_modules", ".venv", "venv"):
+                source = Path(repo) / area / directory
+                destination = path / area / directory
+                if source.is_dir() and destination.parent.is_dir() and not destination.exists():
+                    destination.symlink_to(source.resolve(), target_is_directory=True)
         argv = [str(path / Path(arg).relative_to(Path(repo).resolve()))
                 if arg.startswith(str(Path(repo).resolve()) + "/") and not ".venv/" in arg
                 else arg for arg in check.argv]
         result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False)
-        result["failures"] = {test: signature(error, (path, repo)) for test, error in result.get("failures", {}).items()}
+        result["failures"] = {signature(test, (path, repo)): signature(error, (path, repo))
+                              for test, error in result.get("failures", {}).items()}
     store.record_check(cache_task, identity, result=result)
     return result
 

@@ -60,9 +60,14 @@ def discover(repo):
     for directory in (".", "backend", "PICAv1/backend"):
         area = repo / directory
         if (area / "tests").is_dir() and (directory != "." or (area / "requirements.txt").exists()):
-            python = area / ".venv/bin/python"
+            # Preserve the venv launcher path: resolving its symlink runs the base
+            # interpreter without pyvenv.cfg and loses all installed dependencies.
+            candidates = [area / name / "bin/python" for name in (".venv", "venv")]
+            if directory != ".":
+                candidates.extend(repo / "backend" / name / "bin/python" for name in (".venv", "venv"))
+            python = next((p for p in candidates if p.is_file()), None)
             checks.append(Check("unit:" + directory,
-                [str(python.resolve()) if python.exists() else sys.executable,
+                [str(python.absolute()) if python else sys.executable,
                  "-m", "unittest", "discover", "-s", "tests", "-v", *(["-t", "."] if directory == "." else [])], cwd=directory,
                 inputs=[directory] if directory != "." else ["src", "tests", "requirements.txt"],
                 reporter="unittest"))
@@ -75,7 +80,8 @@ def discover(repo):
             if name in scripts:
                 checks.append(Check(f"{name}:{directory}", ["npm", "test"] if name == "test"
                     else ["npm", "run", name], cwd=directory, inputs=[directory],
-                    reporter="node" if name == "test" and "node --test" in scripts[name] else "text"))
+                    reporter="node" if name == "test" and "node --test" in scripts[name] else
+                    "eslint" if name == "lint" and "eslint" in scripts[name] else "text"))
     if (repo / "e2e/run.sh").exists():
         import harness_contract
         managed = harness_contract.load(repo)

@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 
 
 def parse_output(output, exit_code, reporter="text"):
+    if exit_code and re.search(r"ModuleNotFoundError: No module named|ImportError: Failed to import test module", output):
+        return {"status": "infrastructure", "failures": {}, "exit_code": exit_code}
     failures = {}
     recognized = exit_code == 0
     if reporter == "unittest":
@@ -15,6 +17,20 @@ def parse_output(output, exit_code, reporter="text"):
         recognized = bool(re.search(r"# (?:tests|pass) \d+", output))
         for match in re.finditer(r"not ok \d+ - (.+?)\n(.*?)(?=\n(?:ok |not ok |#)|\Z)", output, re.S):
             failures[match[1].strip()] = match[2].strip()
+    elif reporter == "eslint":
+        # ESLint's default stylish format. Require a complete summary and account
+        # for every error; a truncated/unfamiliar format remains unknown.
+        text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        summary = re.search(r"\d+ problems? \((\d+) errors?, \d+ warnings?\)", text)
+        current = None
+        for line in text.splitlines():
+            if line.startswith("/"):
+                current = line.strip()
+            match = re.match(r"\s+(\d+):(\d+)\s+error\s+(.+?)\s{2,}(\S+)\s*$", line)
+            if current and match:
+                identity = f"{current}:{match[1]}:{match[2]}:{match[4]}"
+                failures[identity] = match[3]
+        recognized = bool(summary and int(summary[1]) == len(failures))
     elif reporter == "junit":
         try:
             root = ET.fromstring(output)
