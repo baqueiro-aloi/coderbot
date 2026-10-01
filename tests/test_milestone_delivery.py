@@ -16,6 +16,22 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def test_return_to_implementation_explains_pending_work_with_banner(self):
+        state = {"state": "IMPLEMENTING", "item": "task", "slug": "task",
+                 "banner_state": "VERIFYING", "thread_id": "thread",
+                 "implementation_feedback": "Complete pending work:\n1. Verify cancellation\n2. Finish harness cleanup"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "send", return_value="thread") as send:
+            main._announce_state(state)
+            main._announce_state(state)
+        send.assert_called_once()
+        body = send.call_args.args[1]
+        self.assertIn("returning to implementation", body)
+        self.assertIn("no new approval is needed", body)
+        self.assertIn("Verify cancellation", body)
+        self.assertIn("Finish harness cleanup", body)
+        self.assertEqual(send.call_args.kwargs["progress"], milestones.image("implementing"))
+
     def test_verification_block_includes_results_and_agent_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             evidence = Path(temp) / "playwright.log"

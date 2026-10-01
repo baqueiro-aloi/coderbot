@@ -263,7 +263,12 @@ def _announce_state(state: dict) -> None:
         return
     try:
         stage = milestones.state_stage(state)
-        announce_milestone(state, stage, f"{milestones.label(stage)} · {state['state']}")
+        body = f"{milestones.label(stage)} · {state['state']}"
+        if state["state"] == "IMPLEMENTING" and state.get("implementation_feedback"):
+            body += ("\n\nVerification found approved work still incomplete. "
+                     "I'm returning to implementation to finish it; no new approval is needed.\n\n"
+                     + state["implementation_feedback"])
+        announce_milestone(state, stage, body)
     except Exception:  # A notification failure must not rerun coding work.
         log.exception("could not send state banner for %s; will retry next tick", state["state"])
 
