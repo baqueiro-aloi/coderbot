@@ -43,6 +43,7 @@ import drive_client
 import evidence
 import handoffs
 import milestones
+import task_phases
 import proposal_package
 import task_source
 import turn_control
@@ -470,7 +471,7 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     if reason:
         return None, reason
     required = {"status", "commands", "openspec", "tasks"}
-    if not required <= set(value) or set(value) - required - {"preexisting"}:
+    if not required <= set(value) or set(value) - required - {"preexisting", "deferred"}:
         return None, "quality gate has unexpected or missing fields"
     if value.get("status") != "pass":
         return None, "quality gate status is not pass" + _failing_summary(value.get("commands"))
@@ -484,7 +485,10 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     if value.get("openspec") != "pass":
         return None, "OpenSpec validation did not pass"
     match = re.fullmatch(r"(\d+)/(\d+)", value.get("tasks", ""))
-    if not match or int(match.group(1)) != int(match.group(2)):
+    deferred = value.get("deferred", 0)
+    if type(deferred) is not int or deferred < 0:
+        return None, "invalid deferred task count"
+    if not match or int(match.group(1)) + deferred != int(match.group(2)):
         return None, "OpenSpec tasks are incomplete"
     return value, None
 
@@ -1101,9 +1105,10 @@ def do_approval_reply(state: dict, reply: str) -> None:
 
 
 def do_implement(state: dict) -> None:
+    feedback = state.get("implementation_feedback", "")
     result = agent_runner.resume(
         state["session_id"],
-        prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
+        feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
     if handle_result(state, result, "IMPLEMENTING"):
         return
@@ -1117,6 +1122,7 @@ def do_implement(state: dict) -> None:
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
     state["e2e_round"] = 0
+    state.pop("implementation_feedback", None)
     state["verify_round"] = 0
     state.pop("e2e_passed", None)
     state["state"] = "VERIFYING"
@@ -1177,7 +1183,8 @@ def _gate_report(output: str, marker: str) -> str:
     return "\n\n".join(parts)[:GATE_REPORT_MAX_CHARS + GATE_NOTES_MAX_CHARS]
 
 
-def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "") -> None:
+def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "",
+                 attachments: list[Path] | None = None) -> None:
     diagnostic = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
         config.DATA_DIR, phase, detail=f"{reason}\n\n{report}")
     state[counter] = state.get(counter, 0) + 1
@@ -1193,11 +1200,18 @@ def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str
     body = (f"Task: {state['item']}\n\nThe {label} gate has failed {state[counter]} times. "
             f"Latest reason: {reason}\n\n")
     if report:
-        body += "Full details are in the diagnostic file.\n\n"
+        body += f"Reported results:\n{report[:1200]}\n\nFull details are in the diagnostic file: {diagnostic.name}\n\n"
     body += ("Reply with guidance to continue — e.g. tell the agent to fix a failure, or that a "
              "failure is pre-existing on the base branch (it will confirm that there and "
              "report it as pre-existing).")
-    email(state, f"{label} stuck - needs your help", body, [diagnostic])
+    files = [diagnostic, *(path for path in (attachments or []) if path.is_file())]
+    decision = (f"The {label} gate is blocked: {reason}.\n\n"
+                + (f"Reported results:\n{report[:1200]}\n\n" if report else "")
+                + "Should I return to implementation to complete or repair the pending work, "
+                "or investigate whether this is pre-existing on the base branch? "
+                "Reply with guidance; full results and supporting files are attached.")
+    email(state, f"{label} stuck - needs your help", body, files, visible_question=decision)
+    state["pending_question"] = decision
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
 
@@ -1225,10 +1239,26 @@ def _internal_review_prompt(state: dict) -> str:
 def _complete_verify(state: dict, result) -> None:
     if handle_result(state, result, "VERIFYING"):
         return
+    task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if task_path.is_file():
+        pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+        if pending["implementation"]:
+            state["implementation_return_round"] = state.get("implementation_return_round", 0) + 1
+            if state["implementation_return_round"] > config.QUALITY_GATE_MAX_ROUNDS:
+                _gate_failed(state, "VERIFYING", "verify_round", "Implementation remains incomplete",
+                             "\n".join(pending["implementation"]),
+                             [Path(path) for path in getattr(result, "attachments", [])])
+                return
+            state["implementation_feedback"] = "Complete these approved implementation tasks before verification:\n" + "\n".join(pending["implementation"])
+            state["state"] = "IMPLEMENTING"
+            trail(state, "Verification returned to implementation: approved tasks remain incomplete",
+                  state["implementation_feedback"])
+            return
     parsed, reason = parse_quality_gate(result.output)
     if parsed is None:
         _gate_failed(state, "VERIFYING", "verify_round", reason,
-                     _gate_report(result.output, "QUALITY_GATE"))
+                     _gate_report(result.output, "QUALITY_GATE"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     try:
         slug = _validated_slug(state.get("slug"))
@@ -1237,17 +1267,25 @@ def _complete_verify(state: dict, result) -> None:
             "openspec", "instructions", "apply", "--change", slug, "--json",
         ]))
         progress = instructions.get("progress") if isinstance(instructions, dict) else None
-        if not isinstance(progress, dict) or instructions.get("state") != "all_done":
+        deferred = parsed.get("deferred", 0)
+        if deferred:
+            if not config.DETERMINISTIC_CHECKS:
+                raise ValueError("Deferred final-suite tasks require deterministic controller checks")
+            owned = task_phases.inspect(config.REPO_PATH, slug)
+            if owned["implementation"] or len(owned["final_checks"]) != deferred:
+                raise ValueError("Deferred tasks must be explicitly owned by codebot final checks")
+        if not isinstance(progress, dict) or instructions.get("state") not in (("all_done", "ready") if deferred else ("all_done",)):
             raise ValueError("OpenSpec apply state is not all_done")
         total = progress.get("total")
         complete = progress.get("complete")
         remaining = progress.get("remaining")
         if any(type(value) is not int for value in (total, complete, remaining)) or \
-                remaining != 0 or complete != total:
+                remaining != deferred or complete + deferred != total:
             raise ValueError("OpenSpec apply progress is incomplete")
     except Exception as error:
         _gate_failed(state, "VERIFYING", "verify_round", str(error),
-                     _gate_report(result.output, "QUALITY_GATE"))
+                     _gate_report(result.output, "QUALITY_GATE"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     state.pop("verify_round", None)
     state.pop("verify_round_feedback", None)
@@ -1268,7 +1306,8 @@ def _complete_internal_review(state: dict, result) -> None:
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
         _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
-                     _gate_report(result.output, "INTERNAL_REVIEW"))
+                     _gate_report(result.output, "INTERNAL_REVIEW"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
@@ -1326,6 +1365,8 @@ def do_e2e(state: dict) -> None:
             return
         state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
             w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+        if state.get("quality_report", {}).get("deferred"):
+            task_phases.complete_final_checks(config.REPO_PATH, _validated_slug(state["slug"]))
         if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
             _queue_push(state, "feedback", "Requested corrections verified.",
                         feedback=state.get("pending_feedback", ""))
@@ -3483,7 +3524,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
               "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
-              "post_review_check_round", "architecture_attempt_head")
+              "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
+              "implementation_return_round")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:

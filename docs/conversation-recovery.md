@@ -58,6 +58,12 @@ their delivery receipts and share their banner in a separate threaded message.
 Questions remain visible in the message even when the investigation is moved to
 a diagnostic attachment. The full pending question is retained for reply context;
 state banners do not replace the substantive last message used by STATUS.
+Verification/review blocks include reported results in the decision message and
+deliver the agent's supporting attachments alongside the full diagnostic report.
+Pending ordinary OpenSpec tasks return verification to implementation. Only tasks
+explicitly tagged `[codebot:final-checks]` may remain pending through focused
+verification/internal review; the controller marks them complete after its final
+suite passes. They must not be used to defer implementation or focused checks.
 Attached `.log` reports are delivered as `.txt` with `text/plain` MIME type so
 Slack and email can preview them; the original file and full bytes are preserved.
 Routine working check-ins are suppressed. Decision reminders are short and due after 24 hours;

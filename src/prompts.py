@@ -153,6 +153,9 @@ a proposal.
 PROPOSE = """Invoke `coderbot-openspec-workflow` and `openspec-propose` to formalize
 the exploration as change $slug. Create only OpenSpec artifacts: proposal.md,
 design.md, specs, and tasks.md. Requirements:
+Explicitly tag tasks that only execute the controller's complete final suite
+with [codebot:final-checks]. Keep implementation and focused validation tasks
+untagged; the controller completes final-suite tasks after independent review.
 $e2e_note
 When done, output the full text of proposal.md and a summary of the tasks so it can
 be sent for review through the configured conversation channel. Do not implement, commit, push, create a PR, merge, or archive;
@@ -196,6 +199,9 @@ IMPLEMENT = ENVIRONMENT + """
 The user approved the proposal. Invoke `coderbot-openspec-workflow`,
 `openspec-apply-change`, and `test-driven-development` to implement change $slug.
 Work through every task in tasks.md, marking each complete only after its test passes.
+Leave tasks explicitly tagged [codebot:final-checks] unchecked for the controller's
+complete final suite after review. This tag is only for executing that suite,
+never for implementation, test creation, or focused validation.
 Tasks that do not depend on each other (e.g. touching different modules or layers)
 MUST be implemented concurrently by multiple subagents, each following strict TDD for
 its task; serialise only the tasks that build on another task's output. Run focused
@@ -220,7 +226,13 @@ controller-run checks with CHECK_PLAN. Do not rerun full suites or baseline suit
 the controller owns a complete final verification after independent review and
 reuses only content/environment-bound valid results. Report each actual command
 and result. Strictly validate the active OpenSpec
-change and confirm all OpenSpec apply tasks are complete.
+change and confirm all implementation tasks are complete. Tasks explicitly tagged
+[codebot:final-checks] remain unchecked until the controller executes its final
+suite after internal review. Report their count in optional "deferred" and the
+actual checked/total count in "tasks". For example, tasks="24/25", deferred=1.
+Never use this tag to defer unfinished implementation or focused checks.
+If ordinary tasks remain, report them for a return to implementation instead of
+repeating already-green checks.
 A failing check never passes by being re-run or re-reported. For every failure:
 - If the change introduced or worsened it, fix it, commit the fix on the task branch,
   and rerun the check.

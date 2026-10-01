@@ -16,6 +16,23 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def test_verification_block_includes_results_and_agent_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            evidence = Path(temp) / "playwright.log"
+            evidence.write_text("2 tests passed")
+            diagnostic = Path(temp) / "diagnostic.txt"
+            diagnostic.write_text("Full results")
+            state = {"state": "VERIFYING", "item": "task", "verify_round": 2}
+            report = "14/25 tasks complete; 11 pending.\n" + "Details\n" * 200
+            with patch.object(main.diagnostics, "report", return_value=diagnostic), \
+                 patch.object(main, "email") as send:
+                main._gate_failed(state, "VERIFYING", "verify_round", "incomplete tasks",
+                                  report, [evidence])
+            self.assertEqual(send.call_args.args[3], [diagnostic, evidence])
+            self.assertIn("14/25 tasks", send.call_args.kwargs["visible_question"])
+            self.assertIn("return to implementation", state["pending_question"])
+            self.assertEqual(state["state"], "WAIT_REPLY")
+
     def test_long_investigation_keeps_complete_question_visible_after_wait_banner(self):
         for channel in ("email", "slack"):
             with self.subTest(channel=channel), tempfile.TemporaryDirectory() as temp, \
