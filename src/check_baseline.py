@@ -5,18 +5,23 @@ from pathlib import Path
 import re
 import uuid
 import json
+import fnmatch
 
 import operations
 from checks import execute
 from execution_identity import digest, environment_identity, snapshot
 
 
-def dependency_snapshot(repo):
+def dependency_snapshot(repo, inputs=None):
     repo = Path(repo)
     files = operations.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
                            cwd=repo, timeout=30).stdout.split('\0')
     entries = []
     for name in sorted(set(files) - {''}):
+        if inputs is not None and not any(p in ("*", ".", "./") or
+                fnmatch.fnmatch(name, p) or name == p or name.startswith(p.rstrip('/') + '/')
+                for p in inputs):
+            continue
         path = repo / name
         if path.name not in ('package.json', 'package-lock.json') and not (
                 path.name.startswith('requirements') and path.suffix == '.txt'):
@@ -29,12 +34,28 @@ def dependency_snapshot(repo):
         if path.suffix == '.json':
             value = json.loads(path.read_text())
             value.pop('version', None)
+            # Package scripts change the command, not the installed dependency graph.
+            # The baseline still executes its own script under the runner timeout.
+            if path.name == 'package.json':
+                scripts = value.get('scripts', {})
+                value['scripts'] = {name: command for name, command in scripts.items()
+                                    if name in ('preinstall', 'install', 'postinstall',
+                                                'prepublish', 'preprepare', 'prepare', 'postprepare')}
             if isinstance(value.get('packages', {}).get(''), dict):
                 value['packages'][''].pop('version', None)
             entries.append((name, value))
         else:
             entries.append((name, path.read_text()))
     return digest(entries)
+
+
+def dependency_inputs(check, repo):
+    """Scope installs to the check's area; explicit cross-area inputs take priority."""
+    if check.dependency_inputs is not None:
+        return check.dependency_inputs
+    if check.cwd not in (".", "./"):
+        return [check.cwd]
+    return ["*"]  # Root commands can delegate to any package; stay conservative.
 
 
 def signature(error, roots=()):
@@ -78,18 +99,26 @@ def baseline_result(check, repo, sha, store):
     from checks import tool_versions
     environment = environment_identity(check.argv, repo, env_keys=check.env_keys, tools=tool_versions(check.argv, Path(repo) / check.cwd),
                                        key_path=store.path.parent / "identity.key")
-    identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment})
+    dependencies = dependency_inputs(check, repo)
+    current_dependencies = dependency_snapshot(repo, dependencies)
+    identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment,
+                       "dependencies": current_dependencies, "version": 2})
     saved = store.reusable_check(cache_task, identity)
     if saved and saved["data"]["result"]["status"] in ("pass", "fail"):
         return saved["data"]["result"]
     with worktree(repo, sha, store.path.parent) as path:
         # Absolute executables may be reused only with identical dependency inputs.
-        if dependency_snapshot(repo) != dependency_snapshot(path):
-            return {"status": "indeterminate", "failures": {}, "reason": "dependency_inputs_differ"}
+        if current_dependencies != dependency_snapshot(path, dependencies):
+            return {"status": "indeterminate", "failures": {}, "reason": "dependency_inputs_differ",
+                    "dependency_inputs": dependencies,
+                    "detail": "Prepare baseline dependencies separately before comparing this check; incompatible installs were not reused."}
         # Git worktrees omit ignored installed dependencies. Reuse the verified
         # installations only when dependency manifests match; create links solely
         # in the disposable baseline, never edit the target checkout.
         for area in (".", "backend", "PICAv1/backend", "frontend", "e2e"):
+            if not any(p in ("*", ".", "./") or p == area or p.startswith(area + "/")
+                       for p in dependencies):
+                continue
             for directory in ("node_modules", ".venv", "venv"):
                 source = Path(repo) / area / directory
                 destination = path / area / directory

@@ -40,7 +40,7 @@ def snapshot(repo, inputs=None):
     files = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=repo, capture_output=True, timeout=30, check=True).stdout.decode().split("\0")
     selected = []
-    patterns = inputs or ["*"]
+    patterns = ["*" if p in (".", "./") else p.removeprefix("./") for p in (inputs or ["*"])]
     for name in sorted(set(files) - {""}):
         path = Path(name)
         if any(part in EXCLUDED_DIRS for part in path.parts):

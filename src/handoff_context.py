@@ -5,6 +5,7 @@ import json
 def render(state, phase, *, max_chars=16000):
     values = {"phase": phase, "task": state.get("item"), "requirements": state.get("item_detail", "")[:5000],
               "branch": state.get("branch"), "base_sha": state.get("base_sha"),
+              "verification_scope": state.get("verification_guidance", "")[-5000:],
               "change": state.get("slug"), "implementation": state.get("implementation_summary", "")[:2000],
               "checks": [{"check": r.get("check"), "status": r.get("status"), "report": r.get("report"),
                            "gate": r.get("gate")} for r in state.get("final_check_report", {}).get("checks", [])],

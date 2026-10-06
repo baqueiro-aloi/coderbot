@@ -17,6 +17,7 @@ class Check:
     reporter: str = "text"
     scope: str = "full"
     preparation: dict | None = None
+    dependency_inputs: list[str] | None = None
 
     def __post_init__(self):
         if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
@@ -26,6 +27,9 @@ class Check:
         for values in (self.inputs, self.env_keys, self.resources):
             if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
                 raise ValueError("Check list fields must contain strings")
+        if self.dependency_inputs is not None and (not isinstance(self.dependency_inputs, list) or
+                not all(isinstance(p, str) and p for p in self.dependency_inputs)):
+            raise ValueError("Check dependency inputs must be nonempty strings")
 
     def to_dict(self):
         return asdict(self)

@@ -31,7 +31,10 @@ def execute(check, repo, store, task_id, *, reuse=True):
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
         tools=tool_versions(check.argv, cwd), key_path=store.path.parent / "identity.key")
-    identity = digest({"content": content, "environment": environment, "check": check.to_dict(), "version": 1})
+    from check_baseline import dependency_snapshot, dependency_inputs
+    dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))
+    identity = digest({"content": content, "environment": environment, "check": check.to_dict(),
+                       "dependencies": dependencies, "version": 2})
     previous = store.reusable_check(task_id, identity) if reuse else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
         log.info("check reused: %s status=%s report=%s", check.id,

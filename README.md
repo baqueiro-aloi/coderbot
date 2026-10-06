@@ -992,3 +992,18 @@ trap; codebot then tears down the harness's compose stack itself
 (`docker compose -f $CODEBOT_E2E_COMPOSE_FILE down -v`, default
 `docker-compose.e2e.yaml`, skipped when the file doesn't exist) so leaked containers
 don't collide with the next run.
+## Explicit verification scope
+
+Targets can define `.codebot/checks.json` (version 1) to replace automatic check
+discovery with an explicit list of active suites. `inputs` selects source inputs;
+`dependency_inputs` optionally selects dependency manifests relevant to each
+check (for example `backend/requirements*.txt`). Historical trees omitted from
+those lists do not affect these checks. Document their exclusion in the target's
+OpenSpec so exploration, review and recovery preserve the same scope. This is a
+scope decision, not a passing result for excluded tests.
+
+Baseline comparisons reuse installed dependencies only when the relevant
+manifests match. Incompatible baseline dependencies remain a diagnosed blocker;
+they are never silently linked or reported as preexisting failures. Controller
+final-task completion commits only its exact checkbox delta, with provenance,
+before archival; unrelated edits remain protected.

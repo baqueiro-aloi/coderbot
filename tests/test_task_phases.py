@@ -259,6 +259,16 @@ class TaskPhaseTests(unittest.TestCase):
             path = Path(root) / "openspec/changes/task/tasks.md"
             path.parent.mkdir(parents=True)
             path.write_text("- [x] 1. Implement\n- [ ] 2. [codebot:final-checks] Run suite\n")
+            import subprocess
+            from execution_store import ExecutionStore
+            subprocess.run(["git", "init", "-q", root], check=True)
+            for key, value in (("user.name", "Fixture"), ("user.email", "fixture@local.invalid")):
+                subprocess.run(["git", "config", key, value], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+            ledger = tempfile.TemporaryDirectory()
+            self.addCleanup(ledger.cleanup)
+            database = ExecutionStore(Path(ledger.name) / "db")
             state = {"state": "VERIFYING", "slug": "task", "item": "task"}
             output = 'QUALITY_GATE: ' + json.dumps({"status": "pass", "openspec": "pass",
                 "commands": ["focused: pass"], "tasks": "1/2", "deferred": 1})
@@ -281,6 +291,7 @@ class TaskPhaseTests(unittest.TestCase):
             with patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main.config, "DETERMINISTIC_CHECKS", True), patch.object(main, "save_state"), \
                  patch.object(main, "announce_milestone"), \
+                 patch.object(main.phase_checkpoint, "store", return_value=database), \
                  patch.object(main.final_checks, "run", return_value={"status": "pass", "checks": []}):
                 main.do_e2e(state)
             self.assertEqual(task_phases.inspect(root, "task")["complete"], 2)

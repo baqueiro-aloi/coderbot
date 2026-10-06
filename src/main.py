@@ -1304,6 +1304,8 @@ def _verify_prompt(state: dict) -> str:
 
 def _internal_review_prompt(state: dict) -> str:
     return (_gate_feedback(state, "review_gate_round")
+            + (prompts.fenced_authoritative("verification scope", state["verification_guidance"]) + "\n"
+               if state.get("verification_guidance") else "")
             + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
 
 
@@ -1466,6 +1468,12 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     if handle_result(state, result, "INTERNAL_REVIEW"):
         return
+    if check_plan.reported(result.output):
+        failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+        if failed:
+            _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round",
+                         "Controller-run review checks failed", json.dumps(failed, ensure_ascii=False))
+            return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
         _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
@@ -1523,7 +1531,11 @@ def do_e2e(state: dict) -> None:
                         output=json.dumps(regressions, ensure_ascii=False)))
                     if handle_result(state, result, "E2E"):
                         return
-                    state["state"] = "INTERNAL_REVIEW"
+                    state["verify_round"] = 0
+                    for key in ("quality_report", "quality_snapshot", "quality_controller_validated",
+                                "internal_review_report", "reviewed_snapshot", "e2e_passed"):
+                        state.pop(key, None)
+                    state["state"] = "VERIFYING"
                     return
             _gate_failed(state, "E2E", "final_check_round", "Final checks: " + report["status"],
                          json.dumps(report, ensure_ascii=False))
@@ -1531,7 +1543,7 @@ def do_e2e(state: dict) -> None:
         state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
             w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
         if state.get("quality_report", {}).get("deferred"):
-            task_phases.complete_final_checks(config.REPO_PATH, _validated_slug(state["slug"]))
+            _commit_final_check_tasks(state)
         if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
             _queue_push(state, "feedback", "Requested corrections verified.",
                         feedback=state.get("pending_feedback", ""))
@@ -1587,6 +1599,37 @@ def do_e2e(state: dict) -> None:
     state["state"] = "ARCHIVING"
     trail(state, "e2e suite passed; archiving the change")
     announce_milestone(state, "archiving", "The e2e suite passed; I'm archiving the OpenSpec change.")
+
+
+def _commit_final_check_tasks(state: dict) -> None:
+    """Commit only the controller's checkbox delta, including after interruption."""
+    if state.get("final_check_report", {}).get("status") != "pass":
+        raise RuntimeError("Final tasks require a passing controller report")
+    slug = _validated_slug(state["slug"])
+    relative = f"openspec/changes/{slug}/tasks.md"
+    path = config.REPO_PATH / relative
+    committed = git("show", "HEAD:" + relative)
+    expected = task_phases.completed_final_checks_text(committed)
+    # git() strips trailing whitespace; compare using the same normalization.
+    if path.read_text().strip() not in (committed, expected.strip()):
+        raise RuntimeError("Final-task completion found unrelated tasks.md edits; preserve them before retrying")
+    staged = git("diff", "--cached", "--name-only")
+    if staged and (staged != relative or git("show", ":" + relative) != expected.strip()):
+        raise RuntimeError("Final-task completion found unrelated staged edits")
+    if git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)" + relative):
+        raise RuntimeError("Final-task completion requires other tracked files to be committed")
+    if committed == expected.strip():
+        return  # Already committed: restart must not regenerate the same delta.
+    database = phase_checkpoint.store()
+    before = repo_provenance.inspect(config.REPO_PATH)
+    task_phases.complete_final_checks(config.REPO_PATH, slug)
+    after = repo_provenance.inspect(config.REPO_PATH)
+    repo_provenance.record_turn(database, state, config.REPO_PATH, before, after)
+    database.record("provenance", state, config.REPO_PATH, "final-tasks:" + after["fingerprint"],
+                    {"kind": "controller-final-task-completion", "files": after["files"],
+                     "verification_snapshot": state.get("final_check_report", {}).get("snapshot")}, status="complete")
+    git("add", "--", relative)
+    git("commit", "-m", "chore: complete controller final checks", "--", relative)
 
 
 def _run_checked(command: list[str]) -> str:
@@ -3444,7 +3487,7 @@ def do_recover(state: dict) -> None:
                 _enter_stuck(state, "RECOVERING", "Preserved merge needs a concrete conflict resolution; diagnostics are attached.")
                 return
             row = database.update("recovery", row, attempts=attempts)
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned) +
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
                 "\nComplete the equivalent preserved merge with these heads: " + json.dumps(merge_heads))
             if handle_result(state, result, "RECOVERING"):
                 return
@@ -3461,7 +3504,7 @@ def do_recover(state: dict) -> None:
             row = database.update("recovery", row, attempts=attempts)
             if row is None:
                 raise RuntimeError("Archive recovery update failed")
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned))
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state))
             if handle_result(state, result, "RECOVERING"):
                 return
             _complete_recovery(state, result)
@@ -3474,7 +3517,7 @@ def do_recover(state: dict) -> None:
             row = database.update("recovery", row, attempts=attempts)
             if row is None:
                 raise RuntimeError("Recovery update failed")
-            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned) +
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
                 "\nDiagnose these post-repair checks and repair the underlying issue:\n" + json.dumps(row["data"]["repair_checks"]))
             if handle_result(state, result, "RECOVERING"):
                 return
@@ -3492,7 +3535,7 @@ def do_recover(state: dict) -> None:
     if row is None:
         raise RuntimeError("Recovery update failed")
     before = current["fingerprint"]
-    prompt = recovery.prompt(row, owned)
+    prompt = recovery.prompt(row, owned, state)
     if row["data"].get("merge_heads"):
         prompt += "\nThe preserved original checkout had an interrupted merge with heads " + json.dumps(row["data"]["merge_heads"]) + ". Complete the equivalent merge in this isolated workspace, preserving both branch intents."
     if row["data"].get("diagnosis"):

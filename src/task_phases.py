@@ -47,8 +47,11 @@ def inventory(repo, slug):
     return [task[4].strip() for task in TASK.finditer(path.read_text())]
 
 
+def completed_final_checks_text(text):
+    return TASK.sub(lambda task: task[1] + "x" + task[3] + task[4]
+        if task[2] == " " and FINAL_CHECKS in task[4] else task[0], text)
+
+
 def complete_final_checks(repo, slug):
     path = Path(repo) / "openspec/changes" / slug / "tasks.md"
-    text = path.read_text()
-    path.write_text(TASK.sub(lambda task: task[1] + "x" + task[3] + task[4]
-        if task[2] == " " and FINAL_CHECKS in task[4] else task[0], text))
+    path.write_text(completed_final_checks_text(path.read_text()))

@@ -38,7 +38,9 @@ def attribution_prompt(state, current):
         "task-owned. Return ONLY JSON with owned array and evidence object mapping each owned "
         "path to a concrete commit/transcript/spec reference.\n"
         + f"Task: {state.get('item')}\nBranch: {state.get('branch')}\n"
-        + json.dumps(current["files"]))
+        + json.dumps(current["files"])
+        + ("\nCurrent user-approved scope (do not repair excluded historical paths):\n"
+           + state["verification_guidance"] if state.get("verification_guidance") else ""))
 
 
 def validate_attribution(value, current):
@@ -92,7 +94,8 @@ def isolate(state, repo, directory, owned=()):
     return destination
 
 
-def prompt(row, owned):
+def prompt(row, owned, state=None):
+    state = state or {}
     return ("Recover this task-owned repository condition. You may repair application/test "
         "code and commit ONLY the listed task-owned paths, even though the original phase "
         "was archival. Inspect incomplete Git operations before starting new operations. "
@@ -103,4 +106,6 @@ def prompt(row, owned):
         "material design change is needed report NEED_USER_INPUT for replanning.\n"
         + f"Condition: {row['data']['reason']}\nOwned paths: {json.dumps(owned)}\n"
         + "If Git is already clean, repair the stated original condition rather than "
-        "declaring success from status alone. End with a short factual summary of repairs and commands verified.")
+        "declaring success from status alone. End with a short factual summary of repairs and commands verified."
+        + ("\nCurrent user-approved scope (preserve excluded historical paths):\n"
+           + state["verification_guidance"] if state.get("verification_guidance") else ""))
