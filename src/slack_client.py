@@ -546,6 +546,18 @@ def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
     return None
 
 
+def poll_verify(thread_id: str | None = None):
+    """Find an explicit VERIFY for this active thread without consuming other commands."""
+    if not thread_id:
+        return None
+    _reconcile(thread_id)
+    for msg_id, text, channel, root_ts in _pending(thread_id):
+        parsed = parse_command(text)
+        if parsed and parsed[0] == "VERIFY" and (not parsed[1] or parsed[1] == config.INSTANCE_ID):
+            return msg_id, _thread_id(channel, root_ts), "VERIFY", bool(parsed[1]), parsed[2]
+    return None
+
+
 def poll_reply(thread_id: str):
     pending = _pending(thread_id)
     if not pending:

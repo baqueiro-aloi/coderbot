@@ -172,23 +172,23 @@ class FeedbackRecoveryTests(unittest.TestCase):
             main.do_approval_reply(state, "Revise the API behavior")
         undo.assert_not_called()
 
-    def test_missing_requirement_blocks_delivery_before_evidence_work(self):
+    def test_legacy_coverage_does_not_block_delivery_before_evidence_work(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
             state = {"item": "task", "state": "OPEN_PR", "slug": "models", "session_id": "session",
-                     "approved_proposal": "approved", "pr_url": "https://example/pr/1"}
-            inventory = [{"id": "selector", "title": "Model selector", "spec": "spec.md"}]
-            output = {"requirements": [{"id": "selector", "title": "Model selector", "status": "missing",
-                       "implementation": "", "verification": ""}]}
+                     "approved_proposal": "approved", "pr_url": "https://example/pr/1",
+                     "coverage_report": {"requirements": [{"status": "missing"}]}}
             with patch.object(main.phase_checkpoint, "store", return_value=store), \
                  patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main, "content_snapshot", return_value="head"), \
-                 patch.object(main.verification_ledger, "requirements", return_value=inventory), \
-                 patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output=json.dumps(output))), \
-                 patch.object(main, "save_state"), patch.object(main.evidence, "record_evidence") as record:
-                main.finalize_pr(state)
-            self.assertEqual(state["state"], "REPLANNING")
-            record.assert_not_called()
+                 patch.object(main.agent_runner, "run") as audit, \
+                 patch.object(main, "save_state"), \
+                 patch.object(main.evidence, "record_evidence", side_effect=RuntimeError("evidence reached")) as record:
+                with self.assertRaisesRegex(RuntimeError, "evidence reached"):
+                    main.finalize_pr(state)
+            self.assertEqual(state["state"], "OPEN_PR")
+            record.assert_called_once()
+            audit.assert_not_called()
 
     def test_stale_merge_cannot_bypass_revision(self):
         state = {"item": "task", "state": "WAIT_MERGE", "replan": {"feedback": "selector"},

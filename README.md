@@ -230,6 +230,20 @@ Completed or failed tasks release their slot even when the runtime skips the
 after-tool hook. On delegation rejection or queue timeout, the agent must finish
 that unit directly rather than retrying delegation or increasing runtime limits.
 
+There is no separate AI requirement-coverage audit before final checks or delivery.
+OpenSpec verification, independent internal review and controller-run final checks
+remain the verification gates.
+
+Reply `VERIFY` in the active task thread (or `VERIFY codebot-<id>` in email) to
+move an existing, unarchived change directly to verification. Optional guidance,
+such as `VERIFY: commit abc123 contains the fixes; verify that work`, is passed to
+the verifier. A running agent turn is interrupted first without discarding Git
+changes. Planning and implementation are not restarted by the command, but
+verification can still identify unfinished tasks or failures. No approval, pass,
+push or merge is implied. Held tasks must be resumed first with `CONTINUE`.
+Existing planning/repair continuations are superseded in the execution ledger
+(their history is retained), so reloading cannot undo the verification request.
+
 Implementation/review use focused checks; the deterministic runner owns complete
 final checks and compares identifiable failures against the immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared

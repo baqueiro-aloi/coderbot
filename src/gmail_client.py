@@ -316,13 +316,20 @@ def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
     return (found[0], found[1]) if found else None
 
 
+def poll_verify(thread_id: str | None = None):
+    found = _poll_command(only_verify=True)
+    if found and (found[3] or found[1] == thread_id):
+        return found
+    return None
+
+
 def _poll_command(*, only_status: bool = False,
-                  only_kick: bool = False) -> tuple[str, str, str, bool, str] | None:
+                  only_kick: bool = False, only_verify: bool = False) -> tuple[str, str, str, bool, str] | None:
     service = _gmail()
     processed = _load_processed()
     listing = service.users().messages().list(
-        userId="me", q=("STATUS " if only_status else "KICK " if only_kick else
-                        "(ABORT OR STATUS OR KICK OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) ")
+        userId="me", q=("STATUS " if only_status else "KICK " if only_kick else "VERIFY " if only_verify else
+                        "(ABORT OR STATUS OR KICK OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME OR VERIFY) ")
                        + "newer_than:2d -in:drafts", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
@@ -341,6 +348,8 @@ def _poll_command(*, only_status: bool = False,
         if only_status and command != "STATUS":
             continue
         if only_kick and command != "KICK":
+            continue
+        if only_verify and command != "VERIFY":
             continue
         if command:
             _cmd, target, note = parse_command(body)

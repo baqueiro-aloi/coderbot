@@ -60,6 +60,10 @@ def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
     return _backend().poll_kick(thread_id)
 
 
+def poll_verify(thread_id: str | None = None):
+    return _backend().poll_verify(thread_id)
+
+
 def poll_reply(thread_id: str):
     return _backend().poll_reply(thread_id)
 

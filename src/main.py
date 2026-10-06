@@ -1282,6 +1282,11 @@ def _gate_feedback(state: dict, counter: str) -> str:
 
 def _verify_prompt(state: dict) -> str:
     return (_gate_feedback(state, "verify_round")
+            + ("User requested verification of the existing work, not new planning. "
+               "Preserve the current implementation and inspect the cited commit before "
+               "doing any further work. Reuse valid existing results.\n"
+               + prompts.fenced_authoritative("verification guidance", state["verification_guidance"]) + "\n"
+               if state.get("verification_guidance") else "")
             + prompts.render(prompts.VERIFY, slug=state["slug"], base=state.get("base_sha") or config.BASE_BRANCH))
 
 
@@ -1395,8 +1400,6 @@ def _finish_e2e_repair(state: dict) -> None:
 
 
 def do_e2e(state: dict) -> None:
-    if state.get("approved_proposal") and not _ensure_coverage(state):
-        return
     if config.DETERMINISTIC_CHECKS:
         report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
         state["final_check_report"] = report
@@ -1975,8 +1978,6 @@ def _render_review_threads(state: dict, key: str = "review_threads") -> str:
 
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
-    if state.get("approved_proposal") and not _ensure_coverage(state):
-        return
     database = phase_checkpoint.store()
     task_id = database.task_identity(state, config.REPO_PATH)
     identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
@@ -2007,9 +2008,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
     body = (f"Review cover: {state.get('pr_title') or state['item'][:140]}\n"
             f"Task: {state['item']}\nPR: {state['pr_url']}\n"
             + (f"Source: {state['item_url']}\n" if state.get("item_url") else "")
-            + "What changed: " + ("; ".join(entry.get("title", "") for entry in
-                state.get("coverage_report", {}).get("requirements", [])[:4]) or
-                "Current implementation and verification are documented in the PR.") + "\n"
+            + "What changed: Current implementation and verification are documented in the PR.\n"
             + f"{handoffs.concise_verification(state)}\n"
             + (f"Video: {video_url}\n" if video_url else "")
             + "Files: " + ", ".join(path.name for path in evidence_files) + "\n")
@@ -2750,9 +2749,6 @@ def do_push(state: dict) -> None:
             _gate_failed(state, "PUSHING", "post_review_check_round",
                          "Post-review final checks: " + report["status"], json.dumps(report))
             return
-    if state.get("approved_proposal") and not _ensure_coverage(state):
-        return
-
     git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
         if state.get("remote_branch") else state["branch"])
     state["delivered_sha"] = git("rev-parse", "HEAD")
@@ -3267,39 +3263,6 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     return True
 
 
-def _ensure_coverage(state):
-    snapshot = content_snapshot(config.REPO_PATH)
-    inventory = verification_ledger.requirements(config.REPO_PATH, state)
-    if not inventory:
-        return True  # Spec-free tasks retain their normal verification gates.
-    report = state.get("coverage_report")
-    if not report or report.get("snapshot") != snapshot:
-        result = agent_runner.run("Read the approved requirement inventory and actual implementation. "
-            "Inspect code and recorded verification; do not edit, commit or push. "
-            "Return ONLY JSON with a requirements array containing every id, title, status "
-            "(implemented or missing), implementation references and verification references. "
-            "Passing tests for a subset do not establish completeness.\n" + json.dumps(inventory))
-        report = parse_json_reply(result.output)
-        report["snapshot"] = snapshot
-    missing = verification_ledger.validate_coverage(inventory, report, snapshot)
-    state["coverage_report"] = report
-    save_state(state)
-    if missing:
-        database = phase_checkpoint.store()
-        row = feedback.receive(database, state, config.REPO_PATH, "coverage-" + snapshot,
-            "Missing approved requirements: " + "; ".join(missing))
-        row = database.update("feedback", row, assessment={"action": "replan",
-            "answer": "Approved requirements are missing.", "reason": "; ".join(missing),
-            "references": "approved specification inventory"})
-        if row is None:
-            raise RuntimeError("Requirement mismatch could not be saved")
-        replanning.begin(state, row)
-        save_state(state)
-        database.update("feedback", row, status="planning")
-        return False
-    return True
-
-
 def do_replan(state: dict) -> None:
     prompt = replanning.prompt(state, config.REPO_PATH)
     save_state(state)
@@ -3600,7 +3563,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
               "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready")
+              "implementation_attachments", "implementation_ready",
+              "verification_guidance", "verification_requested_from")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -3974,6 +3938,36 @@ def _is_transient_network_error(error: BaseException) -> bool:
     return status in (429, 500, 502, 503, 504)
 
 
+def _request_verification(state: dict, note: str = "") -> None:
+    """Move an active change to verification without changing Git or approvals."""
+    if not state.get("item") or not state.get("session_id"):
+        raise ValueError("VERIFY requires an active task and coding session")
+    slug = _validated_slug(state.get("slug"))
+    if state.get("archive_path") or not (config.REPO_PATH / "openspec/changes" / slug / "tasks.md").is_file():
+        raise ValueError("VERIFY requires an active, unarchived OpenSpec change")
+    # Removing only the in-memory context lets task_records.migrate replay these
+    # durable transitions on the next tick. Retain their history, but explicitly
+    # supersede the old continuation before saving the new phase.
+    database = phase_checkpoint.store()
+    task_id = database.task_identity(state, config.REPO_PATH)
+    for row in database.list("feedback", task_id):
+        if row["status"] in ("planning", "repairing"):
+            database.update("feedback", row, status="superseded", outcome="verify-requested")
+    state["verification_requested_from"] = state["state"]
+    for key in ("replan", "pending_question", "return_state", "stuck_return",
+                "active_feedback_id", "pending_feedback", "feedback_origin",
+                "coverage_report", "quality_report", "internal_review_report", "reviewed_snapshot",
+                "final_check_report", "e2e_passed", "implementation_feedback",
+                "verify_round_feedback", "review_gate_round_feedback"):
+        state.pop(key, None)
+    state["verification_guidance"] = note or "Verify the existing implementation and continue the normal verification gates."
+    state["verify_round"] = 0
+    state["review_gate_round"] = 0
+    state["implementation_return_round"] = 0
+    state["state"] = "VERIFYING"
+    save_state(state)
+
+
 def check_commands(state: dict) -> bool:
     """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
     the tick should skip normal dispatch (an ABORT reset or a DONE completion).
@@ -4007,6 +4001,23 @@ def check_commands(state: dict) -> bool:
         return False
     if config.COMM_CHANNEL == "slack" and _handle_held_command(msg_id, thread_id, command, note):
         return False  # command addressed a held task, not the active one
+    if command == "VERIFY":
+        if thread_id != state.get("thread_id") and not targeted:
+            gmail_client.mark_processed(msg_id)
+            return False
+        try:
+            _request_verification(state, note)
+        except ValueError as error:
+            _send_localized(state, subject(state, "verify"), str(error), thread_id)
+            gmail_client.mark_processed(msg_id)
+            return False
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+        gmail_client.mark_processed(msg_id)
+        email(state, "Verification requested", "I will verify the existing work without repeating planning or implementation. "
+              "Verification, internal review and final checks still apply.")
+        return True
     if command == "KICK":
         # The independent supervisor interrupts live turns; here there is no
         # running agent to restart. Never fall through to ABORT.
@@ -4120,6 +4131,8 @@ def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -
                     f"Resume requested: {bool(hold.get('requested'))}")
     elif command == "HOLD":
         response = f"Task is already on hold: {item}"
+    elif command == "VERIFY":
+        response = "Resume this held task with CONTINUE before requesting VERIFY."
     elif command == "ABORT":
         task_source.unhold_task(item, item_id)
         if not task_source.unclaim_task(item, item_id):
@@ -4424,6 +4437,15 @@ def _status_supervisor_once() -> bool:
         turn["active"] = True
     thread = state.get("thread_id") if _work_active.is_set() and turn.get("active") else None
     with _status_command_lock:
+        # Interrupt only the live process; the main thread consumes VERIFY and owns
+        # the state transition on its next tick. Never mutate shared FSM state here.
+        if turn.get("active") and thread and state.get("item") and state.get("session_id"):
+            active = config.REPO_PATH / "openspec/changes" / str(state.get("slug", "")) / "tasks.md"
+            if not state.get("archive_path") and active.is_file():
+                verify = gmail_client.poll_verify(thread)
+                if isinstance(verify, tuple) and len(verify) == 5:
+                    if turn_control.request_kick():
+                        return True  # Leave the durable command queued for check_commands.
         kick = gmail_client.poll_kick(thread) if turn.get("active") or config.COMM_CHANNEL == "slack" else None
         if kick:
             msg_id, reply_thread = kick
