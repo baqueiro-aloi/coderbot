@@ -848,6 +848,13 @@ claude --version`, `… openspec --version`), edit the pin, and rebuild
 (`docker compose up -d --build`). Don't switch these to floating/`latest` — a silent
 CLI behavior change between rebuilds is exactly what the pins prevent.
 
+The image also installs Docker CLI, Compose and Buildx from Docker's apt
+repository. Buildx is required for target harnesses that prepare images using
+BuildKit secrets; it is checked during the image build, including as user `bot`.
+Rebuild the image to add these tools to an existing deployment; restarting alone
+does not update installed packages. Private registry credentials remain external
+to the image and are required only when the target harness needs preparation.
+
 ## Smoke tests
 
 Inside the container (`docker compose exec codebot bash`):
@@ -856,6 +863,7 @@ Inside the container (`docker compose exec codebot bash`):
 claude -p 'say ok' --model "$CLAUDE_MODEL" --dangerously-skip-permissions  # CODEBOT_AGENT=claude
 opencode run --auto --model "$OPENCODE_MODEL" 'say ok' # when CODEBOT_AGENT=opencode
 gh auth status                                       # GH token works
+docker buildx version                                # BuildKit secret support is installed
 git -C "$CODEBOT_REPO_PATH" fetch                    # HTTPS auth via GH_TOKEN works
 cd src && python3 -c 'import task_source; task_source.validate(); print(task_source.list_pending_items())'
 cd src && python3 -c 'import gmail_client; print(gmail_client.send("[codebot] test", "hello"))'  # email mode
