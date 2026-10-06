@@ -189,25 +189,20 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
     if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
         body = f"{card}\n\n{body}"
-    if len(body) > 1600 or len(body.splitlines()) > 12 or "Traceback (most recent call last)" in body:
+    import message_content
+    conversation_body, technical = message_content.split(body)
+    if len(body) > 1600 or len(body.splitlines()) > 12 or technical:
         report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
             config.DATA_DIR, phase, detail=body)
         attachments = [*(attachments or []), report]
-        lines = [line.strip() for line in body.splitlines() if line.strip()]
-        body = "\n".join(line for line in lines[:3] if not line.startswith(("Traceback", 'File "')))[:700]
-        if "Traceback" in body:
-            body = "Execution failed; full diagnostics are in the report."
-        decisions = [line for line in lines if line.startswith(("Reply", "Decision", "Your", "Responde", "¿"))]
-        if decisions:
-            body += "\n" + decisions[-1][:400]
-        if visible_question:
-            # The report may contain a long investigation; the actionable ask
-            # belongs in the message itself, never only in an attachment.
-            body = (f"{card}\n\nTask: {state.get('item', '?')}\nPhase: {state['state']}\n\n"
-                    f"{visible_question}\n\n{_reply_here()}")
-        links = list(dict.fromkeys(re.findall(r"https?://[^\s<>]+", "\n".join(lines))))
-        body += "".join("\n" + url for url in links[:3])
-        body += "\nFull details: " + report.name
+        body = conversation_body or "Technical results are in the attached report."
+        # Length is not a reason to hide conversational text. Slack handles its
+        # own message limits; email keeps a full plain-text/HTML body.
+        if visible_question and visible_question not in body:
+            question_body, _ = message_content.split(visible_question)
+            if question_body and question_body not in body:
+                body += "\n\n" + question_body
+        body += "\n\nSupporting details: " + report.name
     # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
     # The one-shot localizer never resumes or changes the task's coding session.
     if state.get("task_language") and not localized:
@@ -1036,7 +1031,7 @@ def _send_proposal_review(state: dict, output: str, note: str = "", *,
     if state.get("proposal_sent_key") == feedback_key:
         state["state"] = "WAIT_APPROVAL"
         return
-    summary = output.strip()[:1800]
+    summary = output.strip()
     if state.get("replan", {}).get("original_archive"):
         summary = (f"Complementary revision of {state['replan']['original_archive']}. "
                    "Existing implementation and PR are retained.\n" + summary)

@@ -994,6 +994,11 @@ trap; codebot then tears down the harness's compose stack itself
 don't collide with the next run.
 ## Explicit verification scope
 
+Questions, decisions and explanatory context stay visible in the conversation
+body in both Slack and email, even when long. Slack splits long text within the
+same thread. Raw JSON diagnostics, tracebacks and logs belong in supporting
+`.txt` reports; opening an attachment is not required to discover the question.
+
 Targets can define `.codebot/checks.json` (version 1) to replace automatic check
 discovery with an explicit list of active suites. `inputs` selects source inputs;
 `dependency_inputs` optionally selects dependency manifests relevant to each

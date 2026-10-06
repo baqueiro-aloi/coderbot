@@ -35,9 +35,12 @@ def report(store, state, repo, directory, phase, *, error=None, detail="", ident
                 value = value.decode("utf-8", errors="replace")
             if value is not None:
                 fields[key] = value
-    text = redact(json.dumps(fields, ensure_ascii=False, indent=2, default=str))
-    # Tracebacks are readable text rather than JSON-escaped lines in the attachment.
-    text = redact(f"Task: {state.get('item', '-') }\nPhase: {phase}\n\n") + text
+    # Human-readable .txt: don't wrap conversation/logs in escaped JSON strings.
+    text = redact(f"Task: {state.get('item', '-')}\nPhase: {phase}\n"
+                  f"Attempt: {state.get('execution_attempt_id') or '-'}\n\n{detail}")
+    for key in ("cmd", "returncode", "stdout", "stderr", "output"):
+        if key in fields:
+            text += "\n\n" + key + ":\n" + redact(fields[key])
     if trace:
         text += "\n\nFull exception chain:\n" + redact(trace)
     key = identity or hashlib.sha256(text.encode()).hexdigest()

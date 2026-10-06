@@ -92,7 +92,7 @@ class MilestoneDelivery(unittest.TestCase):
                 self.assertTrue(main.handle_result(state, result, "EXPLORING"))
                 sent_body = deliver.call_args.args[2]
                 self.assertIn(question, sent_body)
-                self.assertNotIn("Investigation", sent_body)
+                self.assertIn(result.preamble, sent_body)
                 self.assertIn("details.txt", sent_body)
                 self.assertEqual(state["pending_question"], question)
                 original = dict(state["last_email"])

@@ -31,6 +31,10 @@ evidence, or the user asks you to "attach" evidence, save the file(s) under
 `ATTACH: ` in your response; codebot shares them in the task's conversation thread. This
 applies in every phase (implementing, addressing review feedback, answering a
 question) — not only when you use the NEED_USER_INPUT mechanism below.
+Questions, decisions, recommendations and context needed for a reply MUST also
+appear as readable prose in your response. Never make the user open ATTACH files
+or read raw JSON to discover what you are asking. Attach logs/specs/full technical
+reports as supporting material, not as a replacement for the conversation.
 """
 
 SENTINEL_CONTRACT = f"""
@@ -40,6 +44,9 @@ Instead, END your response with a line starting exactly with `{SENTINEL}`
 followed by the full question and all context needed to answer it through the
 configured conversation channel,
 then stop working. Otherwise finish the work and summarize what you did.
+Make the question self-contained: explain the decision, available options and
+important consequences in plain language. Do not emit only 'answer the attached
+question' or put the actionable request solely in an attachment.
 {EVIDENCE_CONTRACT}
 Each of your turns is a brand-new, one-shot headless process: nothing monitors
 this session between invocations. If you start a background process (including
