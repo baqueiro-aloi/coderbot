@@ -538,7 +538,7 @@ user's reply.
 """ + fenced("user reply", "$reply") + """
 
 Classify the reply's intent. Respond with ONLY a JSON object, no other text:
-{"action": "answer" | "complete" | "abort"}
+{"action": "answer" | "complete" | "abort" | "resume_implementation"}
 
 - "complete" ONLY when the reply explicitly says the WHOLE TASK should be considered
   finished, marked done, or skipped with nothing more to do (e.g. "mark the task as
@@ -547,6 +547,13 @@ Classify the reply's intent. Respond with ONLY a JSON object, no other text:
   is an "answer", NOT "complete".
 - "abort" ONLY when the reply explicitly tells codebot to stop, abandon, or reset the
   task WITHOUT marking it done.
+- "resume_implementation" ONLY when the pending question says verification is
+  blocked by unfinished implementation tasks AND the reply explicitly authorizes
+  completing those pending tasks within the ALREADY approved spec/scope. For example:
+  "Continue the pending implementation tasks of the approved spec; preserve existing
+  work and do not replan." This is not a new scope approval or a pass claim. A bare
+  "yes", "continue", "retry", a VERIFY request, or a request only to reconcile evidence
+  is NOT this authorization. New requirements or scope changes are NOT this action.
 - "answer" for everything else: answers, guidance, or new instructions for the current
   task — even ambiguous ones. When in doubt, choose "answer".
 """

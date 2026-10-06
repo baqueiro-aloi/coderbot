@@ -155,6 +155,113 @@ class TaskPhaseTests(unittest.TestCase):
             self.assertEqual(state["verification_blocker"]["kind"], "approval")
             announce.assert_not_called()
 
+    def test_explicit_authorization_resumes_only_approved_pending_implementation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            text = "- [ ] Merge main preserving history\n- [ ] Add guardar-flujo regression\n"
+            text += "- [ ] [codebot:verification] Reconcile evidence\n"
+            path.write_text(text)
+            state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",
+                     "item": "task", "branch": "feature", "session_id": "sid",
+                     "pending_question": "Verification blocked by unfinished tasks",
+                     "verification_blocker": {"kind": "unfinished or unclassified tasks"},
+                     "approved_task_inventory": task_phases.inventory(root, "task"),
+                     "verification_guidance": "Verify existing work", "question_rounds": 2,
+                     "quality_controller_validated": True, "implementation_no_progress": 3,
+                     "implementation_attachments": ["old-evidence.txt"]}
+            reply = "Continue pending implementation of the approved spec; do not replan."
+            verdict = SimpleNamespace(output='{"action":"resume_implementation"}')
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main.agent_runner, "run", return_value=verdict), \
+                 patch.object(main.agent_runner, "resume") as resume, \
+                 patch.object(main, "save_state") as save, patch.object(main, "trail"), \
+                 patch.object(main, "git") as git:
+                main.do_question_reply(state, reply)
+                self.assertEqual(state["state"], "IMPLEMENTING")
+                self.assertIn("Merge main preserving history", state["implementation_feedback"])
+                self.assertIn(reply, state["implementation_feedback"])
+                self.assertEqual(state["session_id"], "sid")
+                self.assertEqual(state["implementation_attachments"], ["old-evidence.txt"])
+                self.assertNotIn("verification_guidance", state)
+                self.assertNotIn("return_state", state)
+                self.assertNotIn("pending_question", state)
+                self.assertNotIn("quality_controller_validated", state)
+                self.assertNotIn("implementation_no_progress", state)
+                self.assertEqual(path.read_text(), text)
+                git.assert_not_called()
+                resume.assert_not_called()
+                save.assert_called_once()
+                # Next normal dispatch must use the implementation prompt/session,
+                # not the verifier that blocked before the authorization.
+                with patch.object(main, "handle_result", return_value=True):
+                    main.do_implement(state)
+                self.assertEqual(resume.call_args.args[0], "sid")
+                self.assertIn(reply, resume.call_args.args[1])
+                self.assertIn("Implementation continuation", resume.call_args.args[1])
+
+    def test_resume_authorization_cannot_bypass_scope_or_approval(self):
+        for case in ("scope drift", "missing inventory", "approval"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "openspec/changes/task/tasks.md"
+                path.parent.mkdir(parents=True)
+                path.write_text("- [ ] Implement approved work\n")
+                state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",
+                         "item": "task", "session_id": "sid",
+                         "verification_blocker": {"kind": "unfinished or unclassified tasks"}}
+                if case != "missing inventory":
+                    state["approved_task_inventory"] = task_phases.inventory(root, "task")
+                if case == "scope drift":
+                    path.write_text(path.read_text() + "- [ ] Invent new work\n")
+                if case == "approval":
+                    path.write_text(path.read_text() + "- [ ] [codebot:approval] Approve\n")
+                    state["approved_task_inventory"] = task_phases.inventory(root, "task")
+                verdict = SimpleNamespace(output='{"action":"resume_implementation"}')
+                with patch.object(main.config, "REPO_PATH", Path(root)), \
+                     patch.object(main.agent_runner, "run", return_value=verdict), \
+                     patch.object(main.agent_runner, "resume") as resume, \
+                     patch.object(main, "save_state"), patch.object(main, "email"):
+                    main.do_question_reply(state, "Complete only the approved pending work")
+                resume.assert_not_called()
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                self.assertEqual(state["verification_blocker"]["kind"],
+                                 "approval" if case == "approval" else "scope drift")
+
+    def test_ordinary_answer_does_not_authorize_implementation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [ ] Implement approved work\n")
+            state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",
+                     "item": "task", "session_id": "sid", "verification_guidance": "Verify",
+                     "verification_blocker": {"kind": "unfinished or unclassified tasks"}}
+            verdict = SimpleNamespace(output='{"action":"answer"}')
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main.agent_runner, "run", return_value=verdict), \
+                 patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done")), \
+                 patch.object(main, "handle_result", return_value=False), \
+                 patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "trail"):
+                main.do_question_reply(state, "continue")
+            self.assertEqual(state["state"], "WAIT_REPLY")
+            self.assertEqual(state["return_state"], "VERIFYING")
+            self.assertNotIn("implementation_feedback", state)
+
+    def test_resume_verdict_for_evidence_question_does_not_change_phase(self):
+        state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",
+                 "item": "task", "session_id": "sid",
+                 "verification_blocker": {"kind": "verification evidence"}}
+        verdict = SimpleNamespace(output='{"action":"resume_implementation"}')
+        continuation = Mock()
+        with patch.object(main.agent_runner, "run", return_value=verdict), \
+             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done")), \
+             patch.object(main, "_verify_prompt", return_value="verification rules"), \
+             patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \
+             patch.dict(main.CONTINUATIONS, {"VERIFYING": continuation}):
+            main.do_question_reply(state, "Reconcile the evidence")
+        continuation.assert_called_once()
+        self.assertNotEqual(state["state"], "IMPLEMENTING")
+        self.assertNotIn("implementation_feedback", state)
+
     def test_controller_unknown_check_cannot_be_overridden_by_agent_pass(self):
         state = {"state": "VERIFYING", "slug": "task", "item": "task",
                  "focused_check_results": [{"check": "contracts", "status": "unknown", "exit_code": 137}]}

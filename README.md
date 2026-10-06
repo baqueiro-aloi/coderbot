@@ -253,7 +253,11 @@ without restarting implementation. They remain unchecked if required evidence is
 missing; the verifier asks for the specific missing result or artifact, not another
 spec approval. Historical results do not prove the integrated version passed.
 Unclassified pending tasks on an explicit `VERIFY` request pause
-for a decision rather than restarting work. Controller-run unknown/interrupted
+for a decision rather than restarting work. Replying with explicit authorization
+to complete the pending implementation tasks of the already approved spec resumes
+`IMPLEMENTING` without replanning, but only if the approved task inventory is
+unchanged and no approval tasks remain. A bare "continue" or another `VERIFY`
+does not grant this authorization. Controller-run unknown/interrupted
 checks cannot be overridden by an agent's pass report. A clean internal review is
 reused only on the exact content snapshot, including after task-state recovery.
 Successful verification is also reused only on an exact snapshot; reported task

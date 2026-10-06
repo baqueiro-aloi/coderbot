@@ -4565,6 +4565,40 @@ def do_question_reply(state: dict, reply: str) -> None:
     if action == "abort":
         _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean slate.")
         return
+    if action == "resume_implementation":
+        blocker = state.get("verification_blocker", {})
+        if (state.get("return_state") == "VERIFYING" and
+                blocker.get("kind") == "unfinished or unclassified tasks"):
+            if _scope_drift(state):
+                return
+            # Do not let an LLM verdict approve a new inventory or bypass approval.
+            inventory = task_phases.inventory(config.REPO_PATH, state["slug"])
+            approved = state.get("verified_task_inventory", state.get("approved_task_inventory"))
+            pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+            if approved is None or inventory != approved:
+                _verification_blocked(state, "scope drift",
+                                      "Cannot confirm pending tasks belong to the approved inventory.")
+                return
+            if pending["approval"]:
+                _verification_blocked(state, "approval", "\n".join(pending["approval"]))
+                return
+            if pending["implementation"]:
+                state["implementation_feedback"] = (
+                    "The user explicitly authorized completing only these pending approved "
+                    "implementation tasks. Preserve existing work and Git history; do not "
+                    "replan, expand scope, push or claim unexecuted checks. After completion, "
+                    "continue normal verification and evidence reconciliation.\n"
+                    + "\n".join(pending["implementation"]) + "\n"
+                    + prompts.fenced_authoritative("user continuation authorization", reply))
+                for key in ("verification_guidance", "verification_blocker", "pending_question",
+                            "return_state", "question_rounds", "implementation_no_progress",
+                            "implementation_progress", "quality_controller_validated"):
+                    state.pop(key, None)
+                state["state"] = "IMPLEMENTING"
+                save_state(state)
+                trail(state, "User authorized continuation of pending approved implementation",
+                      state["implementation_feedback"])
+                return
     # answer (the default): resume the working session, restating the phase rules the
     # raw reply lacks — sessions have overreached (implemented/pushed while PROPOSING)
     # exactly on these unframed resumes.
