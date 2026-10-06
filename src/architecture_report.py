@@ -2,6 +2,7 @@
 import json
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 from urllib.parse import quote
 
@@ -52,23 +53,35 @@ def parse(text: str, paths: list[str]) -> list[dict]:
         raise ValueError("architecture report must have a decisions list")
     allowed = set(paths)
     decisions = []
+    rejected = Counter()
     for raw in obj["decisions"]:
         if not isinstance(raw, dict):
+            rejected["item must be an object"] += 1
             continue
         title, impact = raw.get("title"), raw.get("impact")
         refs = raw.get("paths")
-        if (raw.get("kind") not in ("decision", "assumption") or
-                type(raw.get("planned")) is not bool or
-                not isinstance(title, str) or not 5 <= len(title.strip()) <= 120 or
-                not isinstance(impact, str) or not 5 <= len(impact.strip()) <= 300 or
-                not isinstance(refs, list) or not refs or
-                not all(isinstance(path, str) and path in allowed for path in refs)):
+        errors = [reason for valid, reason in (
+            (raw.get("kind") in ("decision", "assumption"),
+             "kind must be decision or assumption"),
+            (type(raw.get("planned")) is bool, "planned must be a JSON boolean"),
+            (isinstance(title, str) and 5 <= len(title.strip()) <= 120,
+             "title must contain 5-120 characters"),
+            (isinstance(impact, str) and 5 <= len(impact.strip()) <= 300,
+             "impact must contain 5-300 characters"),
+            (isinstance(refs, list) and bool(refs) and
+             all(isinstance(path, str) and path in allowed for path in refs),
+             "paths must be a nonempty list of exact changed-file paths"),
+        ) if not valid]
+        if errors:
+            rejected.update(errors)
             continue
         decisions.append({"kind": raw["kind"], "planned": raw["planned"],
                           "title": title.strip(), "impact": impact.strip(),
                           "paths": list(dict.fromkeys(refs))[:3]})
     if obj["decisions"] and not decisions:
-        raise ValueError("all architectural claims lacked valid changed-file evidence")
+        details = "; ".join(f"{reason} ({count} items)" for reason, count in rejected.items())
+        raise ValueError("all architectural claims lacked valid changed-file evidence "
+                         f"or schema: {details}")
     return decisions[:7]
 
 

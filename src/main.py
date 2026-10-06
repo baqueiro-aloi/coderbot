@@ -1994,11 +1994,22 @@ def _notify_architecture(state: dict, *, update: bool = False) -> None:
         previous = state.get("architecture_report")
         if isinstance(previous, dict) and previous.get("head") == context["head"]:
             return
-        reply = agent_runner.run(prompts.render(
+        prompt = prompts.render(
             prompts.ARCHITECTURE_REPORT, paths="\n".join(context["paths"]),
             plan=context["planned"], patch=context["diff"],
-            complete=str(context["complete"]).lower()), contract=False)
-        decisions = architecture_report.parse(reply.output, context["paths"])
+            complete=str(context["complete"]).lower())
+        for attempt in range(2):
+            reply = agent_runner.run(prompt, contract=False)
+            try:
+                decisions = architecture_report.parse(reply.output, context["paths"])
+                break
+            except ValueError as error:
+                if attempt:
+                    raise
+                log.warning("architecture report validation failed; retrying once: %s", error)
+                prompt += ("\nThe previous response failed validation: " + str(error) +
+                           "\nGenerate a fresh report following the schema and exact changed "
+                           "paths above. Do not invent evidence to satisfy validation.\n")
         delta = architecture_report.changed(previous.get("decisions") if isinstance(previous, dict)
                                             else None, decisions)
         if not decisions:

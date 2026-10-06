@@ -69,7 +69,53 @@ class ArchitecturalAnalysis(unittest.TestCase):
         self.assertFalse(result["complete"])
         self.assertEqual(len(result["diff"]), report.DIFF_MAX)
         self.assertNotIn("No additional significant", report.format_report(PR, HEAD, [],
-                                                                           complete=False))
+                                                                            complete=False))
+
+    def test_validation_error_identifies_schema_and_path_failures(self):
+        for changes, reason in (({"kind": "decision|assumption"}, "kind must"),
+                                ({"planned": "false"}, "JSON boolean"),
+                                ({"title": "tiny"}, "5-120"),
+                                ({"impact": "x" * 301}, "5-300"),
+                                ({"paths": ["deploy/database.tf:12"]}, "exact changed-file")):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, reason):
+                report.parse(json.dumps({"decisions": [dict(DECISION, **changes)]}),
+                             ["deploy/database.tf"])
+
+    def test_invalid_analysis_retries_once_with_validation_feedback(self):
+        state = {"slug": "example", "item": "Task", "pr_url": PR,
+                 "base_sha": SHA, "archive_path": "archive"}
+        ctx = {"head": HEAD, "paths": ["deploy/database.tf"], "diff": "+RDS",
+               "planned": "Use existing DB", "complete": True}
+        invalid = SimpleNamespace(output=json.dumps({"decisions": [
+            dict(DECISION, paths=["deploy/database.tf:12"])]}))
+        valid = SimpleNamespace(output=json.dumps({"decisions": [DECISION]}))
+        with patch.object(main.architecture_report, "collect", return_value=ctx), \
+             patch.object(main.agent_runner, "run", side_effect=[invalid, valid]) as agent, \
+             patch.object(main, "email") as send, patch.object(main, "save_state"), \
+             patch.object(main.diagnostics, "report", return_value=Path("report.txt")):
+            main._notify_architecture(state)
+        self.assertEqual(agent.call_count, 2)
+        self.assertIn("exact changed-file paths", agent.call_args.args[0])
+        send.assert_called_once()
+        self.assertEqual(state["architecture_report"]["decisions"], [DECISION])
+
+    def test_failed_retry_preserves_previous_report_and_does_not_send(self):
+        previous = {"head": "c" * 40, "decisions": [DECISION]}
+        state = {"base_sha": SHA, "archive_path": "archive", "pr_url": PR,
+                 "architecture_report": previous}
+        ctx = {"head": HEAD, "paths": ["deploy/database.tf"], "diff": "+RDS",
+               "planned": "Use existing DB", "complete": True}
+        for output in ("not json", json.dumps({"decisions": [dict(DECISION, planned="false")]})):
+            with self.subTest(output=output), \
+                 patch.object(main.architecture_report, "collect", return_value=ctx), \
+                 patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output=output)) as agent, \
+                 patch.object(main, "email") as send, patch.object(main, "save_state") as save, \
+                 self.assertLogs(main.log, level="WARNING"):
+                main._notify_architecture(state, update=True)
+            self.assertEqual(agent.call_count, 2)
+            send.assert_not_called()
+            save.assert_not_called()
+            self.assertEqual(state["architecture_report"], previous)
 
     def test_notice_is_sent_once_and_subsequent_change_is_only_delta(self):
         state = {"slug": "example", "item": "Task", "pr_url": PR,

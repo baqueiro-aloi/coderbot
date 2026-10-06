@@ -467,10 +467,15 @@ and costly or hard-to-reverse choices. Do not list routine code details, and do 
 claim an impact you cannot substantiate from the changed paths. A decision describes
 what was implemented; an assumption describes an unverified premise. "planned" is true
 only if approved OpenSpec explicitly describes the specific choice. Every item MUST
-cite at least one relative path from the changed-file list. If the diff was truncated,
+cite at least one relative path copied EXACTLY from the changed-file list: no line
+numbers, Markdown, URLs, absolute paths or a/ and b/ diff prefixes. "kind" must be
+either "decision" or "assumption" (not "decision|assumption"). "planned" must be a
+JSON boolean, not a string. Trimmed titles must contain 5-120 characters and trimmed
+impacts 5-300 characters. Omit claims without valid changed-file evidence; return
+{"decisions":[]} if no supported significant claims remain. If the diff was truncated,
 do not say there were no significant decisions. Return ONLY a JSON object with this
 exact shape, no Markdown:
-{"decisions":[{"kind":"decision|assumption","title":"...","impact":"...","planned":false,"paths":["relative/file"]}]}
+{"decisions":[{"kind":"decision","title":"Separate data storage","impact":"Adds an independent deployment boundary","planned":false,"paths":["relative/file"]}]}
 
 Changed paths:
 """ + fenced("changed paths", "$paths") + """
