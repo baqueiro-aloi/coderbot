@@ -1149,9 +1149,8 @@ def _complete_implementation(state: dict, result) -> None:
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         _enter_stuck(state, "IMPLEMENTING", "Cannot confirm implementation completion: " + str(error))
         return
-    if plan.get("approval") or plan.get("verification"):
-        _verification_blocked(state, "administrative tasks",
-                              "\n".join(plan.get("approval", []) + plan.get("verification", [])))
+    if plan.get("approval"):
+        _verification_blocked(state, "approval", "\n".join(plan["approval"]))
         return
     if plan["implementation"]:
         progress = {"pending": plan["implementation"], "complete": plan["complete"],
@@ -1288,7 +1287,13 @@ def _gate_feedback(state: dict, counter: str) -> str:
 
 
 def _verify_prompt(state: dict) -> str:
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    reconciliation = task_phases.inspect(config.REPO_PATH, state["slug"])["verification"] if path.is_file() else []
     return (_gate_feedback(state, "verify_round")
+            + ("Reconcile these approved verification tasks in this turn; they are not "
+               "new implementation or approval requests:\n"
+               + prompts.fenced("pending verification tasks", "\n".join(reconciliation)) + "\n"
+               if reconciliation else "")
             + ("User requested verification of the existing work, not new planning. "
                "Preserve the current implementation and inspect the cited commit before "
                "doing any further work. Reuse valid existing results.\n"
@@ -1307,7 +1312,11 @@ def _internal_review_prompt(state: dict) -> str:
 def _verification_blocked(state: dict, kind: str, detail: str) -> None:
     """A scope/administrative blocker is a decision, not another coding attempt."""
     guidance = ("Repair the execution environment and request VERIFY again; these results "
-                "do not establish missing implementation." if kind == "check infrastructure" else
+                 "do not establish missing implementation." if kind == "check infrastructure" else
+                "Provide or obtain the specific missing evidence identified above, then "
+                "request VERIFY again. No new spec approval is required; I will not "
+                "credit unverified results or restart implementation."
+                if kind == "verification evidence" else
                 "Reconcile the checklist or explicitly approve a scope change; "
                 "I will not restart planning or implementation automatically.")
     question = ("Verification is blocked by " + kind + ":\n" + detail + "\n\n"
@@ -1342,9 +1351,8 @@ def _verify_preflight(state: dict) -> bool:
     if not path.is_file():
         return False  # Normal strict validation handles a missing change.
     pending = task_phases.inspect(config.REPO_PATH, state["slug"])
-    if pending["approval"] or pending["verification"]:
-        _verification_blocked(state, "approval" if pending["approval"] else "verification evidence",
-                              "\n".join(pending["approval"] + pending["verification"]))
+    if pending["approval"]:
+        _verification_blocked(state, "approval", "\n".join(pending["approval"]))
         return True
     if state.get("verification_guidance") and pending["implementation"]:
         _verification_blocked(state, "unfinished or unclassified tasks", "\n".join(pending["implementation"]))
@@ -1378,6 +1386,12 @@ def _complete_verify(state: dict, result) -> None:
     task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
     if task_path.is_file():
         pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+        if pending["verification"]:
+            detail = ("Unresolved verification tasks:\n" + "\n".join(pending["verification"])
+                      + "\n\nVerifier findings (missing evidence or results):\n"
+                      + _gate_report(result.output, "QUALITY_GATE"))
+            _verification_blocked(state, "verification evidence", detail)
+            return
         if pending["implementation"]:
             state["implementation_return_round"] = state.get("implementation_return_round", 0) + 1
             if state["implementation_return_round"] > config.QUALITY_GATE_MAX_ROUNDS:
@@ -1448,7 +1462,9 @@ def _advance_verified(state: dict) -> None:
 def do_verify(state: dict) -> None:
     if _verify_preflight(state):
         return
-    if state.get("quality_controller_validated") and state.get("quality_report") \
+    task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    reconciliation = task_phases.inspect(config.REPO_PATH, state["slug"])["verification"] if task_path.is_file() else []
+    if not reconciliation and state.get("quality_controller_validated") and state.get("quality_report") \
             and state.get("quality_snapshot") == content_snapshot(config.REPO_PATH):
         report, _ = parse_quality_gate("QUALITY_GATE: " + json.dumps(state["quality_report"]))
         if report:

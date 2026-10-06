@@ -247,8 +247,12 @@ Existing planning/repair continuations are superseded in the execution ledger
 The controller freezes the task inventory on approval and implementation completion.
 Changing checkmarks is allowed; adding, removing or changing tasks is a scope
 decision, not automatic permission for another implementation cycle. Tasks tagged
-`[codebot:approval]` or `[codebot:verification]` are administrative blockers, not
-implementation. Unclassified pending tasks on an explicit `VERIFY` request pause
+`[codebot:approval]` block for an explicit decision. Existing `[codebot:verification]`
+tasks proceed to verification, where current results and evidence are reconciled
+without restarting implementation. They remain unchecked if required evidence is
+missing; the verifier asks for the specific missing result or artifact, not another
+spec approval. Historical results do not prove the integrated version passed.
+Unclassified pending tasks on an explicit `VERIFY` request pause
 for a decision rather than restarting work. Controller-run unknown/interrupted
 checks cannot be overridden by an agent's pass report. A clean internal review is
 reused only on the exact content snapshot, including after task-state recovery.

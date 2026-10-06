@@ -27,8 +27,8 @@ class TaskPhaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 task_phases.inspect(root, "task")
 
-    def test_administrative_and_new_tasks_pause_once_instead_of_returning_to_work(self):
-        for task in ("[codebot:approval] Approve", "[codebot:verification] Evidence", "New ordinary task"):
+    def test_approval_and_new_tasks_pause_instead_of_returning_to_work(self):
+        for task in ("[codebot:approval] Approve", "New ordinary task"):
             with self.subTest(task=task), tempfile.TemporaryDirectory() as root:
                 path = Path(root) / "openspec/changes/task/tasks.md"
                 path.parent.mkdir(parents=True)
@@ -58,6 +58,102 @@ class TaskPhaseTests(unittest.TestCase):
             self.assertEqual(state["state"], "WAIT_REPLY")
             self.assertEqual(state["verification_blocker"]["kind"], "scope drift")
             scrub.assert_not_called()
+
+    def test_approved_implementation_proceeds_to_evidence_reconciliation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            pending = "- [x] Implement\n- [ ] [codebot:verification] Reconcile integrated demo\n"
+            path.write_text(pending)
+            application = Path(root) / "application.py"
+            application.write_text("existing implementation")
+            inventory = task_phases.inventory(root, "task")
+            state = {"state": "IMPLEMENTING", "slug": "task", "item": "task",
+                     "session_id": "sid", "approved_task_inventory": inventory}
+            def commands(argv):
+                if argv[1] == "validate":
+                    return "valid"
+                progress = task_phases.inspect(root, "task")
+                remaining = progress["total"] - progress["complete"]
+                return json.dumps({"state": "ready" if remaining else "all_done", "progress": {
+                    "total": progress["total"], "complete": progress["complete"], "remaining": remaining}})
+            def reconcile(session, prompt):
+                self.assertEqual(session, "sid")
+                self.assertIn("Reconcile integrated demo", prompt)
+                self.assertIn("Never credit checks, reviews or demos", prompt)
+                self.assertIn("Separate historical", prompt)
+                path.write_text(pending.replace("- [ ]", "- [x]"))
+                return SimpleNamespace(output='QUALITY_GATE: {"status":"pass",'
+                    '"commands":["demo: pass"],"openspec":"pass","tasks":"2/2"}')
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main, "_run_checked", side_effect=commands), \
+                 patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+                 patch.object(main, "handle_result", return_value=False), \
+                 patch.object(main, "content_snapshot", return_value="integrated"), \
+                 patch.object(main, "trail"), patch.object(main, "announce_milestone"), \
+                 patch.object(main, "save_state"), patch.object(main, "email") as email, \
+                 patch.object(main.agent_runner, "resume", side_effect=reconcile) as agent:
+                main._complete_implementation(state, SimpleNamespace(output="Done", attachments=[]))
+                self.assertEqual(state["state"], "VERIFYING")
+                self.assertEqual(path.read_text(), pending)
+                self.assertEqual(state["verified_task_inventory"], inventory)
+                main.do_verify(state)
+            agent.assert_called_once()
+            email.assert_not_called()
+            self.assertEqual(state["state"], "INTERNAL_REVIEW")
+            self.assertEqual(state["quality_report"]["tasks"], "2/2")
+            self.assertEqual(application.read_text(), "existing implementation")
+
+    def test_missing_evidence_blocks_after_verifier_runs_without_false_pass(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            pending = "- [x] Implement\n- [ ] [codebot:verification] Reconcile new demo\n"
+            path.write_text(pending)
+            state = {"state": "VERIFYING", "slug": "task", "item": "task", "session_id": "sid",
+                     "verification_guidance": "Verify existing implementation",
+                     "quality_controller_validated": True, "quality_snapshot": "same",
+                     "quality_report": {"status": "pass"}}
+            result = SimpleNamespace(output='Missing demo recording for the integrated commit.\n'
+                'QUALITY_GATE: {"status":"pass","commands":["old checks: pass"],'
+                '"openspec":"pass","tasks":"2/2"}')
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main, "save_state"), patch.object(main, "email") as email, \
+                 patch.object(main, "handle_result", return_value=False), \
+                 patch.object(main, "content_snapshot", return_value="same"), \
+                 patch.object(main, "_run_checked") as commands, \
+                 patch.object(main, "_advance_verified") as advance, \
+                 patch.object(main.agent_runner, "resume", return_value=result) as agent:
+                main.do_verify(state)
+            agent.assert_called_once()
+            commands.assert_not_called()
+            advance.assert_not_called()
+            email.assert_called_once()
+            self.assertEqual(state["state"], "WAIT_REPLY")
+            self.assertEqual(state["return_state"], "VERIFYING")
+            self.assertEqual(state["verification_blocker"]["kind"], "verification evidence")
+            self.assertIn("Missing demo recording", state["pending_question"])
+            self.assertIn("No new spec approval", state["pending_question"])
+            self.assertNotIn("implementation_return_round", state)
+            self.assertEqual(path.read_text(), pending)
+
+    def test_pending_approval_still_blocks_completed_implementation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [x] Implement\n- [ ] [codebot:approval] Approve\n"
+                            "- [ ] [codebot:verification] Reconcile\n")
+            state = {"state": "IMPLEMENTING", "slug": "task", "item": "task"}
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main, "_run_checked", return_value=json.dumps({"state": "ready",
+                     "progress": {"total": 3, "complete": 1, "remaining": 2}})), \
+                 patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+                 patch.object(main, "save_state"), patch.object(main, "email"), \
+                 patch.object(main, "announce_milestone") as announce:
+                main._complete_implementation(state, SimpleNamespace(output="Done", attachments=[]))
+            self.assertEqual(state["state"], "WAIT_REPLY")
+            self.assertEqual(state["verification_blocker"]["kind"], "approval")
+            announce.assert_not_called()
 
     def test_controller_unknown_check_cannot_be_overridden_by_agent_pass(self):
         state = {"state": "VERIFYING", "slug": "task", "item": "task",

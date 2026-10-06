@@ -243,8 +243,17 @@ actual checked/total count in "tasks". For example, tasks="24/25", deferred=1.
 Never use this tag to defer unfinished implementation or focused checks.
 Only approved implementation tasks authorize a return to implementation.
 Never add approval or evidence bookkeeping tasks to make verification complete.
-Use [codebot:approval] and [codebot:verification] for administrative tasks; these
-require a controller decision, not more implementation. A scope change requires
+Existing [codebot:verification] tasks belong to THIS verification phase, not
+implementation or a new approval. Reconcile them using actual commands/results,
+review evidence and any required demo of the integrated version. Separate historical
+results from current results; reuse only evidence still valid for the integrated
+content and environment. Never credit checks, reviews or demos that were not run
+or received. Mark a verification task complete only after its required evidence is
+available and reconciled. If evidence is missing or requires a later review phase,
+leave it unchecked and ask for the exact missing result, artifact or prerequisite;
+do not report pass, restart planning, expand scope or request blanket approval.
+[codebot:approval] tasks still require an explicit controller/user decision.
+A scope change requires
 explicit user approval; do not rewrite approval history or restart planning.
 If ordinary tasks remain, identify them without repeating already-green checks.
 A failing check never passes by being re-run or re-reported. For every failure:
