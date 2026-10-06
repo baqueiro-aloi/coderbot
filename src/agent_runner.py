@@ -15,7 +15,7 @@ import config
 import turn_control
 import phase_checkpoint
 import repo_provenance
-from agent_errors import AgentTransportError
+from agent_errors import AgentContentFilterError, AgentTransportError
 import operations
 import handoff_context
 import package_registry
@@ -461,6 +461,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
                               timeout=config.AGENT_TIMEOUT_SECONDS)
 
     output, errors, observed_session = [], [], None
+    content_filtered = False
     for line in proc.stdout.splitlines():
         try:
             event = json.loads(line)
@@ -475,8 +476,15 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             if isinstance(text, str):
                 output.append(text)
         elif event.get("type") == "error":
+            error = event.get("error")
+            if isinstance(error, dict) and error.get("name") == "ContentFilterError":
+                content_filtered = True
             errors.append(str(event.get("error", "unknown OpenCode error")))
+        elif event.get("type") == "step_finish" and event.get("part", {}).get("reason") == "content-filter":
+            content_filtered = True
 
+    if content_filtered:
+        raise AgentContentFilterError("The response was blocked by the provider's content filter", proc)
     if proc.returncode != 0 or errors:
         detail = "\n".join(errors) or proc.stderr or proc.stdout
         if errors and any("fetch failed" in error.casefold() for error in errors):

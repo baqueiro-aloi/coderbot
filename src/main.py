@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 
 import agent_runner
+from agent_errors import AgentContentFilterError
 import activity
 import phase_checkpoint
 import task_records
@@ -181,7 +182,7 @@ def _contact_name() -> str:
 
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
           new_thread: bool = False, *, milestone: str | None = None,
-          visible_question: str | None = None) -> None:
+          visible_question: str | None = None, localized: bool = False) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
     if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
@@ -207,7 +208,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         body += "\nFull details: " + report.name
     # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
     # The one-shot localizer never resumes or changes the task's coding session.
-    if state.get("task_language"):
+    if state.get("task_language") and not localized:
         phase, body = _localized_pair(state, phase, body)
     body = diagnostics.redact(body)
     subj = subject(state, phase)
@@ -3058,6 +3059,23 @@ def handle_wait(state: dict) -> None:
     if state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(token in reply.casefold()
             for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
         verification_ledger.waiver(state, reply, "e2e:general", content_snapshot(config.REPO_PATH))
+    reply_phase = state["state"]
+    try:
+        _dispatch_wait_reply(state, msg_id, reply)
+    except AgentContentFilterError:
+        state["state"] = reply_phase
+        _content_filter_stop(state, reply_phase)
+    if config.COMM_CHANNEL == "slack":
+        # Persist the state transition before clearing the durable inbox entry.
+        # If the process dies between those writes, restart skips reapplying it.
+        state["slack_last_handled_id"] = msg_id
+        save_state(state)
+    # Consume only successful replies or content-filter rejections. Transient
+    # failures still leave the message available for a later attempt.
+    gmail_client.mark_processed(msg_id)
+
+
+def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
     if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
             state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
             r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
@@ -3068,15 +3086,6 @@ def handle_wait(state: dict) -> None:
         _dispatch_feedback(state)
     else:
         _handle_reply(state, reply)
-    if config.COMM_CHANNEL == "slack":
-        # Persist the state transition before clearing the durable inbox entry.
-        # If the process dies between those writes, restart skips reapplying it.
-        state["slack_last_handled_id"] = msg_id
-        save_state(state)
-    # Consume the reply only now that handling finished without raising. If it threw
-    # (e.g. a transient claude failure), the message stays unprocessed so the next tick
-    # re-reads and re-handles it instead of silently dropping the user's reply.
-    gmail_client.mark_processed(msg_id)
 
 
 def handle_merge_wait(state: dict) -> None:
@@ -3154,6 +3163,17 @@ def _dispatch_feedback(state: dict) -> bool:
     if not rows:
         return False
     row = rows[0]
+    original_phase = state["state"]
+    try:
+        return _apply_received_feedback(state, database, row)
+    except AgentContentFilterError:
+        state["state"] = original_phase
+        database.update("feedback", row, status="blocked", outcome="content-filter")
+        _content_filter_stop(state, original_phase)
+        return True
+
+
+def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     text = row["data"]["text"]
     original_phase = state["state"]
     interrupted_wait = None
@@ -3623,6 +3643,23 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
         config.REPO_PATH = Path(state.pop("original_workspace"))
         state.pop("workspace_path", None)
     state["state"] = "IDLE"
+
+
+def _content_filter_stop(state: dict, failed_state: str) -> None:
+    """Reject this attempt, preserve the task, and request new text without an LLM."""
+    state.setdefault("task_language", "English")
+    if failed_state not in USER_SIDE_WAITS:
+        state["stuck_return"] = failed_state
+        state["state"] = "WAIT_STUCK"
+    state.pop("technical_retry", None)
+    state.setdefault("failures", {}).pop(failed_state, None)
+    body = message_templates.operational("content_filtered", state.get("task_language", "English"))
+    if failed_state not in USER_SIDE_WAITS:
+        state["stuck_error"] = body
+    save_state(state)
+    log.warning("provider content filter blocked %s; waiting for reformulated text", failed_state)
+    label = "texto bloqueado" if state.get("task_language", "").casefold() == "spanish" else "content blocked"
+    email(state, label, body, localized=True)
 
 
 def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
@@ -4728,6 +4765,11 @@ def _run_loop() -> None:
             log.info("user kicked agent turn; resuming %s without consuming failure budget",
                      state.get("state"))
             backoff = 1
+            continue
+        except AgentContentFilterError:
+            _content_filter_stop(state, prev)
+            backoff = 1
+            gmail_client.wait(config.POLL_INTERVAL_SECONDS)
             continue
         except Exception as error:
             if state.get("item"):

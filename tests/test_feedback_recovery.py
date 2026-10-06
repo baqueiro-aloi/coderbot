@@ -13,9 +13,93 @@ import replanning
 import verification_ledger
 import review_intent
 from execution_store import ExecutionStore
+from agent_errors import AgentContentFilterError
 
 
 class FeedbackRecoveryTests(unittest.TestCase):
+    def test_filtered_stuck_feedback_is_not_retried_and_new_text_can_resume(self):
+        with tempfile.TemporaryDirectory() as root:
+            database = ExecutionStore(Path(root) / "db")
+            state = {"item": "task", "state": "WAIT_STUCK", "stuck_return": "VERIFYING",
+                     "stuck_error": "original blocker", "task_language": "Spanish"}
+            feedback.receive(database, state, root, "blocked", "old message")
+            error = AgentContentFilterError("blocked", SimpleNamespace(
+                args=[], returncode=1, stdout="", stderr=""))
+            with patch.object(main.phase_checkpoint, "store", return_value=database), \
+                 patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main.agent_runner, "run", side_effect=[
+                     SimpleNamespace(output='{"kind":"answer"}'), error]) as run, \
+                 patch.object(main, "save_state"), patch.object(main, "email") as notify:
+                self.assertTrue(main._dispatch_feedback(state))
+                self.assertFalse(main._dispatch_feedback(state))
+                self.assertEqual(run.call_count, 2)
+                self.assertIn("Cambia el texto", notify.call_args.args[2])
+                self.assertTrue(notify.call_args.kwargs["localized"])
+            self.assertEqual(state["state"], "WAIT_STUCK")
+            self.assertEqual(state["stuck_return"], "VERIFYING")
+            self.assertEqual(state["stuck_error"], "original blocker")
+            rows = database.list("feedback", database.task_identity(state, root))
+            self.assertEqual(rows[0]["status"], "blocked")
+            feedback.receive(database, state, root, "revised", "retry")
+            with patch.object(main.phase_checkpoint, "store", return_value=database), \
+                 patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main.agent_runner, "run", side_effect=[
+                     SimpleNamespace(output='{"kind":"answer"}'),
+                     SimpleNamespace(output='{"action":"retry"}')]):
+                self.assertTrue(main._dispatch_feedback(state))
+            self.assertEqual(state["state"], "VERIFYING")
+
+    def test_filtered_direct_reply_is_consumed_without_losing_question(self):
+        state = {"item": "task", "state": "WAIT_REPLY", "return_state": "IMPLEMENTING",
+                 "pending_question": "Which behavior?", "thread_id": "thread", "task_language": "Spanish"}
+        error = AgentContentFilterError("blocked", SimpleNamespace(
+            args=[], returncode=1, stdout="", stderr=""))
+        with patch.object(main.gmail_client, "poll_reply", return_value=("m1", "old message")), \
+             patch.object(main.gmail_client, "foreign_command", return_value=None), \
+             patch.object(main.gmail_client, "mark_processed") as processed, \
+             patch.object(main.agent_runner, "run", side_effect=error), \
+             patch.object(main, "_note_contact"), patch.object(main, "save_state"), \
+             patch.object(main, "email"):
+            main.handle_wait(state)
+        processed.assert_called_once_with("m1")
+        self.assertEqual(state["state"], "WAIT_REPLY")
+        self.assertEqual(state["pending_question"], "Which behavior?")
+        self.assertEqual(state["return_state"], "IMPLEMENTING")
+
+    def test_filtered_working_turn_pauses_without_using_llm_for_notice(self):
+        state = {"item": "task", "state": "IMPLEMENTING", "session_id": "session",
+                 "task_language": "Spanish", "technical_retry": {"attempts": 3}}
+        with patch.object(main.agent_runner, "run") as run, \
+             patch.object(main.gmail_client, "send", return_value="thread"), \
+             patch.object(main, "trail"), patch.object(main, "_note_contact"), \
+             patch.object(main, "save_state"):
+            main._content_filter_stop(state, "IMPLEMENTING")
+        run.assert_not_called()
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertEqual(state["stuck_return"], "IMPLEMENTING")
+        self.assertEqual(state["session_id"], "session")
+        self.assertNotIn("technical_retry", state)
+
+    def test_loop_content_filter_does_not_consume_failure_budget_or_retry_phase(self):
+        state = {"item": "task", "state": "IMPLEMENTING", "task_language": "Spanish"}
+        error = AgentContentFilterError("blocked", SimpleNamespace(
+            args=[], returncode=1, stdout="", stderr=""))
+        with patch.object(main, "load_state", return_value=state), \
+             patch.object(main, "_announce_state"), patch.object(main, "check_commands", return_value=False), \
+             patch.object(main.task_records, "apply_contacts"), \
+             patch.object(main.gmail_client, "retry_deliveries"), \
+             patch.object(main, "_dispatch_feedback", return_value=False), \
+             patch.dict(main.PHASES, {"IMPLEMENTING": Mock(side_effect=error)}), \
+             patch.object(main, "email"), patch.object(main, "save_state"), \
+             patch.object(main, "_escalate") as escalate, \
+             patch.object(main.gmail_client, "wait", side_effect=SystemExit("paused")):
+            with self.assertRaisesRegex(SystemExit, "paused"):
+                main._run_loop()
+            main.PHASES["IMPLEMENTING"].assert_called_once_with(state)
+        escalate.assert_not_called()
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertEqual(state["failures"], {})
+
     def test_dropdown_feedback_replans_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as root:
             database = ExecutionStore(Path(root) / "db")

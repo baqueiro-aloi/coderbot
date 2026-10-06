@@ -19,6 +19,9 @@ SPANISH = {
 }
 
 OPERATIONAL = {
+    "content_filtered": (
+        "The provider's content filter blocked this attempt. I stopped automatic retries and preserved the work. Please reformulate your text and send it again; I will not retry the blocked message.",
+        "El filtro de contenido del proveedor bloqueó este intento. Detuve los reintentos automáticos y conservé el trabajo. Cambia el texto y envíalo de nuevo; no volveré a procesar el mensaje bloqueado."),
     "received": ("Received your message; I will review it before the next step.",
                  "Recibí tu mensaje; lo revisaré antes de continuar con el siguiente paso."),
     "working": ("Working; no action needed.", "Estoy trabajando; no necesito nada de ti."),
