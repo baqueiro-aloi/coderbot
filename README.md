@@ -223,6 +223,13 @@ aggregate agent 1800 s, E2E 900 s, local read/search 45 s, subagent 600 s,
 provider retry 180 s and utilities 30 s. Each is environment-overridable in the
 setup catalog. KICK also cancels controller-run tests and evidence operations.
 
+Only primary sessions may launch subagents; child sessions (including resumed ones)
+are rejected before entering the concurrency queue. `CODEBOT_MAX_SUBAGENTS` defaults
+to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (45 s by default).
+Completed or failed tasks release their slot even when the runtime skips the
+after-tool hook. On delegation rejection or queue timeout, the agent must finish
+that unit directly rather than retrying delegation or increasing runtime limits.
+
 Implementation/review use focused checks; the deterministic runner owns complete
 final checks and compares identifiable failures against the immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared

@@ -185,6 +185,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
           visible_question: str | None = None, localized: bool = False) -> None:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
+    show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
     if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
         body = f"{card}\n\n{body}"
     if len(body) > 1600 or len(body.splitlines()) > 12 or "Traceback (most recent call last)" in body:
@@ -219,13 +220,13 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         state["thread_id"] = delivery["thread_id"] or thread_id
         state["last_delivery"] = delivery
     else:
-        kwargs = {"progress": milestones.image(milestone)} if milestone else {}
+        kwargs = {"progress": milestones.image(show_progress)} if show_progress else {}
         state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments, **kwargs)
         state.pop("last_delivery", None)
     if milestone:
         # Artifact delivery has its own receipts; share the banner in the same
         # thread without changing or bypassing the artifact delivery contract.
-        if attachments:
+        if attachments and show_progress:
             gmail_client.send(subject(state, milestones.label(milestone)),
                               _localized(state, milestones.label(milestone)), state["thread_id"],
                               progress=milestones.image(milestone))
@@ -248,7 +249,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
 
 
 def announce_milestone(state: dict, stage: str, body: str) -> None:
-    """Announce each state entry, including returns to a previously visited step."""
+    """Announce each substate as text; illustrate only visible stage changes."""
     if state.get("banner_state") != state["state"] or state.get("banner_stage") != stage:
         previous_email = state.get("last_email")
         email(state, milestones.label(stage), body, milestone=stage)

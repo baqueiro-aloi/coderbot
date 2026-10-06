@@ -16,6 +16,33 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def test_artifact_updates_do_not_repeat_same_stage_image(self):
+        for channel in ("email", "slack"):
+            with self.subTest(channel=channel), patch.object(config, "COMM_CHANNEL", channel), \
+                 patch.object(main, "save_state"), patch.object(main, "trail"), \
+                 patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread"}) as deliver, \
+                 patch.object(main.gmail_client, "send", return_value="thread") as send:
+                state = {"state": "VERIFYING", "item": "task", "slug": "task", "thread_id": "thread"}
+                main.email(state, "Verification", "Checks", [Path("checks.txt")], milestone="verifying")
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(send.call_args.kwargs["progress"], milestones.image("verifying"))
+                state["state"] = "INTERNAL_REVIEW"
+                main.email(state, "Review", "Review results", [Path("review.txt")], milestone="verifying")
+                self.assertEqual(deliver.call_count, 2)
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(state["banner_state"], "INTERNAL_REVIEW")
+
+    def test_return_to_visible_stage_gets_image_again(self):
+        state = {"state": "VERIFYING", "item": "task", "slug": "task"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "send", return_value="thread") as send:
+            for phase in ("VERIFYING", "IMPLEMENTING", "VERIFYING"):
+                state["state"] = phase
+                main._announce_state(state)
+                self.assertEqual(send.call_args.kwargs["progress"],
+                                 milestones.image(milestones.state_stage(state)))
+        self.assertEqual(send.call_count, 3)
+
     def test_return_to_implementation_explains_pending_work_with_banner(self):
         state = {"state": "IMPLEMENTING", "item": "task", "slug": "task",
                  "banner_state": "VERIFYING", "thread_id": "thread",
@@ -227,7 +254,7 @@ class MilestoneDelivery(unittest.TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(state["milestones_announced"], ["exploring", "proposing"])
 
-    def test_every_state_entry_gets_banner_even_within_same_step_and_on_return(self):
+    def test_substate_updates_are_text_only_and_stage_entries_get_images(self):
         for channel in ("email", "slack"):
             with self.subTest(channel=channel), tempfile.TemporaryDirectory() as temp, \
                  patch.object(config, "STATE_PATH", Path(temp) / "state.json"), \
@@ -239,13 +266,19 @@ class MilestoneDelivery(unittest.TestCase):
                 phases = ["VERIFYING", "INTERNAL_REVIEW", "E2E", "WAIT_REPLY", "E2E",
                           "ARCHIVING", "OPEN_PR", "WAIT_REVIEW", "WAIT_MERGE",
                           "ADDRESS_PR_THREADS", "WAIT_MERGE", "WAIT_STUCK", "RECOVERING",
-                          "REPLANNING", "WAIT_APPROVAL", "IMPLEMENTING", "APPLY_FEEDBACK"]
+                           "REPLANNING", "WAIT_APPROVAL", "IMPLEMENTING", "APPLY_FEEDBACK"]
+                previous_stage = None
                 for index, phase in enumerate(phases, 1):
                     state["state"] = phase
+                    stage = milestones.state_stage(state)
                     main._announce_state(state)
                     self.assertEqual(send.call_count, index)
                     self.assertIn(phase, send.call_args.args[1])
-                    self.assertTrue(send.call_args.kwargs["progress"].is_file())
+                    if stage != previous_stage:
+                        self.assertEqual(send.call_args.kwargs["progress"], milestones.image(stage))
+                    else:
+                        self.assertNotIn("progress", send.call_args.kwargs)
+                    previous_stage = stage
                     state = main.load_state()
                     main._announce_state(state)
                     self.assertEqual(send.call_count, index)

@@ -9,6 +9,18 @@ from pathlib import Path
 
 
 class BudgetTests(unittest.TestCase):
+    def test_failed_delegation_clears_watchdog_operation(self):
+        operations.clear()
+        try:
+            operations.observe({"type": "tool_start", "sourceSessionID": "child",
+                "part": {"id": "nested", "tool": "task"}})
+            operations.observe({"type": "tool_use", "sourceSessionID": "child",
+                "part": {"id": "nested", "tool": "task", "state": {
+                    "status": "error", "error": "Nested subagent delegation is disabled"}}})
+            self.assertEqual(operations.snapshot(), [])
+        finally:
+            operations.clear()
+
     def test_child_progress_refreshes_idle_limit_without_refreshing_other_children(self):
         from unittest.mock import patch
         now = [100.0]

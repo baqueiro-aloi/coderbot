@@ -78,6 +78,13 @@ class PromptContractTests(unittest.TestCase):
             with self.subTest(prompt=name):
                 self.assertNotIn("subagent", getattr(prompts, name).lower())
 
+    def test_parallelism_forbids_nested_delegation_and_requires_direct_fallback(self):
+        instructions = " ".join(prompts.PARALLELISM.split())
+        self.assertIn("Only the primary agent may delegate", instructions)
+        self.assertIn("Include this restriction in every subagent brief", instructions)
+        self.assertIn("do not retry it or increase runtime limits", instructions)
+        self.assertIn("This fallback overrides all delegation requirements", instructions)
+
     def test_propose_creates_only_reviewable_openspec_artifacts(self):
         e2e_note = main._e2e_note({"has_e2e_harness": True, "e2e_kind": "playwright"})
         rendered = prompts.render(

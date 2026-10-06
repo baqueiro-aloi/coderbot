@@ -20,6 +20,7 @@ export function permissionRequest(event) {
 
 export function trustedSessionPolicy({serverUrl, directory, fetch: request = globalThis.fetch}) {
   const prepared = new Set();
+  const parents = new Map();
   async function send(route, method, body) {
     const headers = {'content-type': 'application/json', 'x-opencode-directory': directory};
     if (process.env.OPENCODE_SERVER_PASSWORD) {
@@ -32,6 +33,7 @@ export function trustedSessionPolicy({serverUrl, directory, fetch: request = glo
       signal: AbortSignal.timeout(10000),
     });
     if (!result.ok) throw new Error(`Trusted runtime request failed: ${method} ${result.status}`);
+    return result;
   }
   async function prepare(sessionID) {
     if (prepared.has(sessionID)) return;
@@ -40,6 +42,14 @@ export function trustedSessionPolicy({serverUrl, directory, fetch: request = glo
   }
   return {
     prepare,
+    async isChild(sessionID) {
+      if (!parents.has(sessionID)) {
+        const response = await send(`/session/${encodeURIComponent(sessionID)}`, 'GET');
+        const info = await response.json();
+        parents.set(sessionID, info.parentID || null);
+      }
+      return Boolean(parents.get(sessionID));
+    },
     async event({event}) {
       const permission = permissionRequest(event);
       if (permission) {
@@ -47,7 +57,11 @@ export function trustedSessionPolicy({serverUrl, directory, fetch: request = glo
           'POST', {response: permission.response});
         return;
       }
-      if (event.type === 'session.created') await prepare(event.properties.info.id);
+      if (event.type === 'session.created') {
+        const info = event.properties.info;
+        parents.set(info.id, info.parentID || null);
+        await prepare(info.id);
+      }
     },
     async before(input) { await prepare(input.sessionID); },
   };

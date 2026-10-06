@@ -8,7 +8,7 @@ LABELS = ("Exploration", "Proposal", "Awaiting approval", "Implementation",
 ASSETS = Path(__file__).resolve().parent / "assets" / "milestones"
 
 # Several FSM states belong to the same visible lifecycle step. Keep the exact
-# state in the notice even when they share an illustration.
+# state in the notice, but send the illustration only when the visible step changes.
 STATE_STAGES = {
     "EXPLORING": "exploring", "PROPOSING": "proposing", "REPLANNING": "proposing",
     "WAIT_APPROVAL": "approval", "IMPLEMENTING": "implementing",

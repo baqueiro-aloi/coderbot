@@ -41,6 +41,13 @@ ENVIRONMENT = """Execution environment (facts — do not re-derive or guess):
 # is parallelisable there.
 PARALLELISM = """
 Work in parallel whenever possible — this is a standing instruction for every phase:
+- Only the primary agent may delegate. Nested subagent delegation is disabled:
+  subagents MUST complete their assignments directly, without the Agent / Task tool,
+  even when a skill or phase instruction asks for further delegation. Include this
+  restriction in every subagent brief. Subagents may still batch independent tools.
+- If delegation fails due to depth, concurrency, or queue timeout, do not retry it
+  or increase runtime limits. Complete that unit directly and integrate any other
+  successful subagent results. This fallback overrides all delegation requirements.
 - Whenever a piece of work splits into independent parts (investigating separate areas
   of the codebase, implementing independent tasks, running independent test suites or
   checks, addressing unrelated review threads), delegate the parts to MULTIPLE
