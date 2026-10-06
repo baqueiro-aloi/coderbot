@@ -13,6 +13,96 @@ import task_phases
 
 
 class TaskPhaseTests(unittest.TestCase):
+    def test_phase_ownership_is_explicit_and_conflicts_are_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [ ] Implement\n- [ ] [codebot:approval] Decide\n"
+                            "- [ ] [codebot:verification] Reconcile\n- [ ] [codebot:final-checks] Run\n")
+            plan = task_phases.inspect(root, "task")
+            self.assertEqual(plan["implementation"], ["Implement"])
+            self.assertEqual(len(plan["approval"]), 1)
+            self.assertEqual(len(plan["verification"]), 1)
+            path.write_text("- [ ] [codebot:approval] [codebot:final-checks] Invalid\n")
+            with self.assertRaises(ValueError):
+                task_phases.inspect(root, "task")
+
+    def test_administrative_and_new_tasks_pause_once_instead_of_returning_to_work(self):
+        for task in ("[codebot:approval] Approve", "[codebot:verification] Evidence", "New ordinary task"):
+            with self.subTest(task=task), tempfile.TemporaryDirectory() as root:
+                path = Path(root) / "openspec/changes/task/tasks.md"
+                path.parent.mkdir(parents=True)
+                path.write_text("- [x] Implement\n- [ ] " + task + "\n")
+                state = {"state": "VERIFYING", "slug": "task", "item": "task", "session_id": "sid"}
+                if task == "New ordinary task":
+                    state["verified_task_inventory"] = ["Implement"]
+                with patch.object(main.config, "REPO_PATH", Path(root)), patch.object(main, "save_state"), \
+                     patch.object(main, "email") as email, patch.object(main.agent_runner, "resume") as agent:
+                    main.do_verify(state)
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                self.assertEqual(state["return_state"], "VERIFYING")
+                self.assertNotIn("implementation_return_round", state)
+                agent.assert_not_called()
+                email.assert_called_once()
+
+    def test_agent_cannot_expand_scope_during_implementation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [x] Implement\n- [ ] Approve again\n")
+            state = {"state": "IMPLEMENTING", "slug": "task", "item": "task",
+                     "approved_task_inventory": ["Implement"]}
+            with patch.object(main.config, "REPO_PATH", Path(root)), patch.object(main, "save_state"), \
+                 patch.object(main, "email"), patch.object(main, "_scrub_evidence_from_repo") as scrub:
+                main._complete_implementation(state, SimpleNamespace(output="done"))
+            self.assertEqual(state["state"], "WAIT_REPLY")
+            self.assertEqual(state["verification_blocker"]["kind"], "scope drift")
+            scrub.assert_not_called()
+
+    def test_controller_unknown_check_cannot_be_overridden_by_agent_pass(self):
+        state = {"state": "VERIFYING", "slug": "task", "item": "task",
+                 "focused_check_results": [{"check": "contracts", "status": "unknown", "exit_code": 137}]}
+        output = 'CHECK_PLAN: {"version":1,"checks":[{"id":"contracts","argv":["bash","checks.sh"]}]}\n'
+        output += 'QUALITY_GATE: {"status":"pass","commands":["focused: pass"],"openspec":"pass","tasks":"1/1"}'
+        with patch.object(main, "_verify_preflight", return_value=False), \
+             patch.object(main, "handle_result", return_value=False), patch.object(main, "save_state"), \
+             patch.object(main, "email"), patch.object(main, "_run_checked") as commands:
+            main._complete_verify(state, SimpleNamespace(output=output))
+        self.assertEqual(state["state"], "WAIT_REPLY")
+        self.assertEqual(state["verification_blocker"]["kind"], "check infrastructure")
+        self.assertNotIn("quality_report", state)
+        commands.assert_not_called()
+
+    def test_clean_review_is_reused_only_on_exact_snapshot(self):
+        for snapshot, expected in (("same", "E2E"), ("changed", "INTERNAL_REVIEW")):
+            with self.subTest(snapshot=snapshot), tempfile.TemporaryDirectory() as root:
+                state = {"state": "VERIFYING", "slug": "task", "item": "task", "reviewed_snapshot": "same",
+                         "internal_review_report": {"status": "pass", "critical": 0, "important": 0}}
+                output = 'QUALITY_GATE: {"status":"pass","commands":["focused: pass"],"openspec":"pass","tasks":"1/1"}'
+                with patch.object(main.config, "REPO_PATH", Path(root)), \
+                     patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \
+                     patch.object(main, "content_snapshot", return_value=snapshot), \
+                     patch.object(main, "_run_checked", side_effect=["valid", json.dumps({"state": "all_done",
+                         "progress": {"total": 1, "complete": 1, "remaining": 0}})]):
+                    main._complete_verify(state, SimpleNamespace(output=output))
+                self.assertEqual(state["state"], expected)
+
+    def test_agent_counts_cannot_disagree_with_actual_checklist(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "openspec/changes/task/tasks.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("- [x] Implement\n")
+            state = {"state": "VERIFYING", "slug": "task", "item": "task"}
+            output = 'QUALITY_GATE: {"status":"pass","commands":["focused: pass"],"openspec":"pass","tasks":"45/45"}'
+            with patch.object(main.config, "REPO_PATH", Path(root)), \
+                 patch.object(main, "handle_result", return_value=False), patch.object(main, "_gate_failed") as gate, \
+                 patch.object(main, "_run_checked", side_effect=["valid", json.dumps({"state": "all_done",
+                     "progress": {"total": 1, "complete": 1, "remaining": 0}})]):
+                main._complete_verify(state, SimpleNamespace(output=output))
+            self.assertEqual(state["state"], "VERIFYING")
+            self.assertNotIn("quality_report", state)
+            self.assertIn("counts", gate.call_args.args[3])
+
     def test_implementation_can_defer_only_explicit_controller_tasks(self):
         for deterministic in (False, True):
             with self.subTest(deterministic=deterministic), tempfile.TemporaryDirectory() as root:
@@ -174,6 +264,7 @@ class TaskPhaseTests(unittest.TestCase):
                 "commands": ["focused: pass"], "tasks": "1/2", "deferred": 1})
             with patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
+                 patch.object(main, "content_snapshot", return_value="checked-content"), \
                  patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \
                  patch.object(main, "_run_checked", side_effect=["valid", json.dumps({"state": "ready",
                      "progress": {"total": 2, "complete": 1, "remaining": 1}})]):

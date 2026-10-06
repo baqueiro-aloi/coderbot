@@ -34,6 +34,9 @@ def prompt(state, repo):
         "Do not implement application code, discard changes, push or merge. " + planning
         + "Update proposal, design, specs and tasks coherently; retain implemented work and "
         "identify remaining work and changed verification/demo. Validate strictly. "
+        "Do not add checklist tasks to obtain approval; the controller owns that decision. "
+        "Tag evidence reconciliation [codebot:verification] and complete final-suite execution "
+        "[codebot:final-checks]; never disguise these as implementation work. "
         "The user must approve this revised version before implementation resumes.\n"
         + prompts.fenced("user feedback", context["feedback"])
         + f"\nAssessment: {context.get('assessment')}\n"

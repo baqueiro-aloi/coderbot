@@ -241,8 +241,12 @@ change and confirm all implementation tasks are complete. Tasks explicitly tagge
 suite after internal review. Report their count in optional "deferred" and the
 actual checked/total count in "tasks". For example, tasks="24/25", deferred=1.
 Never use this tag to defer unfinished implementation or focused checks.
-If ordinary tasks remain, report them for a return to implementation instead of
-repeating already-green checks.
+Only approved implementation tasks authorize a return to implementation.
+Never add approval or evidence bookkeeping tasks to make verification complete.
+Use [codebot:approval] and [codebot:verification] for administrative tasks; these
+require a controller decision, not more implementation. A scope change requires
+explicit user approval; do not rewrite approval history or restart planning.
+If ordinary tasks remain, identify them without repeating already-green checks.
 A failing check never passes by being re-run or re-reported. For every failure:
 - If the change introduced or worsened it, fix it, commit the fix on the task branch,
   and rerun the check.

@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 
 FINAL_CHECKS = "[codebot:final-checks]"
+APPROVAL = "[codebot:approval]"
+VERIFICATION = "[codebot:verification]"
 TASK = re.compile(r"^(\s*- \[)([ xX])(\]\s+)(.*)$", re.MULTILINE)
 
 
@@ -12,9 +14,14 @@ def inspect(repo, slug):
     pending = [task for task in tasks if task[2] == " "]
     if not tasks:
         raise ValueError("OpenSpec tasks.md contains no tasks")
-    return {"total": len(tasks), "complete": len(tasks) - len(pending),
-            "implementation": [task[4] for task in pending if FINAL_CHECKS not in task[4]],
-            "final_checks": [task[4] for task in pending if FINAL_CHECKS in task[4]]}
+    groups = {"implementation": [], "approval": [], "verification": [], "final_checks": []}
+    for task in pending:
+        owners = [name for name, tag in (("approval", APPROVAL), ("verification", VERIFICATION),
+                                        ("final_checks", FINAL_CHECKS)) if tag in task[4]]
+        if len(owners) > 1:
+            raise ValueError("OpenSpec task has conflicting phase ownership: " + task[4])
+        groups[owners[0] if owners else "implementation"].append(task[4])
+    return {"total": len(tasks), "complete": len(tasks) - len(pending), **groups}
 
 
 def validate_progress(repo, slug, instructions):
@@ -32,6 +39,12 @@ def validate_progress(repo, slug, instructions):
     if instructions.get("state") != expected_state:
         raise ValueError("OpenSpec apply state does not match checklist progress")
     return actual
+
+
+def inventory(repo, slug):
+    """Scope identity ignores completion marks, not newly invented work or owners."""
+    path = Path(repo) / "openspec/changes" / slug / "tasks.md"
+    return [task[4].strip() for task in TASK.finditer(path.read_text())]
 
 
 def complete_final_checks(repo, slug):

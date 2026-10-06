@@ -8,7 +8,7 @@ _CMD_RE = re.compile(r"^(ABORT|STATUS|KICK|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))
 _CONTINUE_RE = re.compile(
     r"^(CONTINUE|RESUME)\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",
     re.IGNORECASE | re.DOTALL)
-_VERIFY_RE = re.compile(r"^VERIFY\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",
+_VERIFY_RE = re.compile(r"^VERIFY\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!]*\s*(.*)$",
                         re.IGNORECASE | re.DOTALL)
 
 

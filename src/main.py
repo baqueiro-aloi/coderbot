@@ -29,6 +29,7 @@ import feedback
 import replanning
 import recovery
 import verification_ledger
+import verification_recovery
 import review_intent
 import operations
 import check_plan
@@ -1098,6 +1099,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
             return
         trail(state, "Proposal approved by the user", reply)
         replanning.approve(state, current)
+        state["approved_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
+        state.pop("verified_task_inventory", None)
         announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
     # changes: revise the proposal in the working session and go back to waiting.
@@ -1112,6 +1115,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
 
 
 def do_implement(state: dict) -> None:
+    if _scope_drift(state):
+        return
     feedback = state.get("implementation_feedback", "")
     result = agent_runner.resume(
         state["session_id"],
@@ -1124,6 +1129,8 @@ def do_implement(state: dict) -> None:
 
 def _complete_implementation(state: dict, result) -> None:
     """A completed agent turn is not a completed plan. Both entry paths use this gate."""
+    if _scope_drift(state):
+        return
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
     state["implementation_summary"] = "\n".join(
@@ -1146,6 +1153,10 @@ def _complete_implementation(state: dict, result) -> None:
             raise ValueError("Pending controller final-suite tasks require deterministic checks")
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         _enter_stuck(state, "IMPLEMENTING", "Cannot confirm implementation completion: " + str(error))
+        return
+    if plan.get("approval") or plan.get("verification"):
+        _verification_blocked(state, "administrative tasks",
+                              "\n".join(plan.get("approval", []) + plan.get("verification", [])))
         return
     if plan["implementation"]:
         progress = {"pending": plan["implementation"], "complete": plan["complete"],
@@ -1174,6 +1185,7 @@ def _complete_implementation(state: dict, result) -> None:
                  plan["complete"], plan["total"], len(plan["implementation"]), state["implementation_turn"])
         return
     state["implementation_ready"] = plan
+    state["verified_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
     state["e2e_round"] = 0
     state.pop("implementation_feedback", None)
     state.pop("implementation_no_progress", None)
@@ -1295,8 +1307,76 @@ def _internal_review_prompt(state: dict) -> str:
             + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
 
 
+def _verification_blocked(state: dict, kind: str, detail: str) -> None:
+    """A scope/administrative blocker is a decision, not another coding attempt."""
+    guidance = ("Repair the execution environment and request VERIFY again; these results "
+                "do not establish missing implementation." if kind == "check infrastructure" else
+                "Reconcile the checklist or explicitly approve a scope change; "
+                "I will not restart planning or implementation automatically.")
+    question = ("Verification is blocked by " + kind + ":\n" + detail + "\n\n"
+                "The existing implementation is preserved. " + guidance)
+    state["verification_blocker"] = {"kind": kind, "detail": detail}
+    state["pending_question"] = question
+    state["return_state"] = "VERIFYING"
+    state["state"] = "WAIT_REPLY"
+    save_state(state)
+    email(state, "Verification blocked", question, visible_question=question)
+
+
+def _scope_drift(state: dict) -> bool:
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if not path.is_file():
+        return False
+    actual = task_phases.inventory(config.REPO_PATH, state["slug"])
+    expected = state.get("verified_task_inventory", state.get("approved_task_inventory"))
+    if expected is not None and actual != expected:
+        added = [task for task in actual if task not in expected]
+        removed = [task for task in expected if task not in actual]
+        _verification_blocked(state, "scope drift", "Added/changed tasks:\n" + "\n".join(added)
+                              + "\nRemoved/changed tasks:\n" + "\n".join(removed))
+        return True
+    return False
+
+
+def _verify_preflight(state: dict) -> bool:
+    if _scope_drift(state):
+        return True
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if not path.is_file():
+        return False  # Normal strict validation handles a missing change.
+    pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+    if pending["approval"] or pending["verification"]:
+        _verification_blocked(state, "approval" if pending["approval"] else "verification evidence",
+                              "\n".join(pending["approval"] + pending["verification"]))
+        return True
+    if state.get("verification_guidance") and pending["implementation"]:
+        _verification_blocked(state, "unfinished or unclassified tasks", "\n".join(pending["implementation"]))
+        return True
+    state.pop("verification_blocker", None)
+    return False
+
+
+def _verify_requested_checks(state: dict, result) -> bool:
+    """The agent's pass claim cannot override a controller-run unknown/failure."""
+    if not check_plan.reported(result.output):
+        return False
+    failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+    if not failed:
+        return False
+    detail = json.dumps(failed, ensure_ascii=False)
+    if any(check["status"] in ("unknown", "infrastructure", "interrupted") for check in failed):
+        _verification_blocked(state, "check infrastructure", detail)
+    else:
+        _gate_failed(state, "VERIFYING", "verify_round", "Controller-run focused checks failed", detail)
+    return True
+
+
 def _complete_verify(state: dict, result) -> None:
+    if _verify_preflight(state):
+        return
     if handle_result(state, result, "VERIFYING"):
+        return
+    if _verify_requested_checks(state, result):
         return
     task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
     if task_path.is_file():
@@ -1326,6 +1406,8 @@ def _complete_verify(state: dict, result) -> None:
             "openspec", "instructions", "apply", "--change", slug, "--json",
         ]))
         progress = instructions.get("progress") if isinstance(instructions, dict) else None
+        if task_path.is_file():
+            task_phases.validate_progress(config.REPO_PATH, slug, instructions)
         deferred = parsed.get("deferred", 0)
         if deferred:
             if not config.DETERMINISTIC_CHECKS:
@@ -1339,8 +1421,10 @@ def _complete_verify(state: dict, result) -> None:
         complete = progress.get("complete")
         remaining = progress.get("remaining")
         if any(type(value) is not int for value in (total, complete, remaining)) or \
-                remaining != deferred or complete + deferred != total:
+                 remaining != deferred or complete + deferred != total:
             raise ValueError("OpenSpec apply progress is incomplete")
+        if parsed["tasks"] != f"{complete}/{total}":
+            raise ValueError("Agent task counts do not match the controller-validated checklist")
     except Exception as error:
         _gate_failed(state, "VERIFYING", "verify_round", str(error),
                      _gate_report(result.output, "QUALITY_GATE"),
@@ -1349,17 +1433,37 @@ def _complete_verify(state: dict, result) -> None:
     state.pop("verify_round", None)
     state.pop("verify_round_feedback", None)
     state["quality_report"] = parsed
+    state["quality_snapshot"] = content_snapshot(config.REPO_PATH)
+    state["quality_controller_validated"] = True
+    _advance_verified(state)
+
+
+def _advance_verified(state: dict) -> None:
     state["review_gate_round"] = 0
-    state["state"] = "INTERNAL_REVIEW"
-    trail(state, "Verification passed; running internal review")
+    reviewed = state.get("internal_review_report", {})
+    reusable = (reviewed.get("status") == "pass" and reviewed.get("critical") == 0
+                and reviewed.get("important") == 0
+                and state.get("reviewed_snapshot") == state["quality_snapshot"])
+    state["state"] = "E2E" if reusable else "INTERNAL_REVIEW"
+    trail(state, "Verification passed; " + ("reusing content-bound internal review" if reusable else "running internal review"))
 
 
 def do_verify(state: dict) -> None:
+    if _verify_preflight(state):
+        return
+    if state.get("quality_controller_validated") and state.get("quality_report") \
+            and state.get("quality_snapshot") == content_snapshot(config.REPO_PATH):
+        report, _ = parse_quality_gate("QUALITY_GATE: " + json.dumps(state["quality_report"]))
+        if report:
+            _advance_verified(state)
+            return
     result = agent_runner.resume(state["session_id"], _verify_prompt(state))
     _complete_verify(state, result)
 
 
 def _complete_internal_review(state: dict, result) -> None:
+    if _scope_drift(state):
+        return
     if handle_result(state, result, "INTERNAL_REVIEW"):
         return
     parsed, reason = parse_internal_review(result.output)
@@ -1380,6 +1484,8 @@ def _complete_internal_review(state: dict, result) -> None:
 
 
 def do_internal_review(state: dict) -> None:
+    if _scope_drift(state):
+        return
     result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
     _complete_internal_review(state, result)
 
@@ -1400,6 +1506,8 @@ def _finish_e2e_repair(state: dict) -> None:
 
 
 def do_e2e(state: dict) -> None:
+    if _scope_drift(state):
+        return
     if config.DETERMINISTIC_CHECKS:
         report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
         state["final_check_report"] = report
@@ -3564,7 +3672,9 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "implementation_return_round", "implementation_turn", "implementation_progress",
               "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
               "implementation_attachments", "implementation_ready",
-              "verification_guidance", "verification_requested_from")
+              "verification_guidance", "verification_requested_from", "verification_blocker",
+              "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
+              "approved_task_inventory", "verified_task_inventory")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -3945,18 +4055,43 @@ def _request_verification(state: dict, note: str = "") -> None:
     slug = _validated_slug(state.get("slug"))
     if state.get("archive_path") or not (config.REPO_PATH / "openspec/changes" / slug / "tasks.md").is_file():
         raise ValueError("VERIFY requires an active, unarchived OpenSpec change")
+    restore_commit, note = verification_recovery.guidance(note)
+    if restore_commit:
+        state["verification_plan_recovery"] = verification_recovery.restore(
+            config.REPO_PATH, slug, restore_commit, config.DATA_DIR)
+        state["verified_task_inventory"] = task_phases.inventory(config.REPO_PATH, slug)
     # Removing only the in-memory context lets task_records.migrate replay these
     # durable transitions on the next tick. Retain their history, but explicitly
     # supersede the old continuation before saving the new phase.
     database = phase_checkpoint.store()
     task_id = database.task_identity(state, config.REPO_PATH)
+    # Prior VERIFY versions cleared these fields. Recover only an actual clean
+    # review outcome bound to precisely the current content, never an agent claim
+    # that an old review is still applicable.
+    review_rows = [row for row in database.list("checkpoint", task_id)
+                   if row["status"] in ("complete", "consumed")
+                   and row["data"].get("phase") == "INTERNAL_REVIEW"
+                   and row["data"].get("output")]
+    if review_rows:
+        snapshot = content_snapshot(config.REPO_PATH)
+        for row in review_rows:
+            if row["data"].get("snapshot") == snapshot:
+                report, _ = parse_internal_review(row["data"]["output"])
+                if report:
+                    state["internal_review_report"] = report
+                    state["reviewed_snapshot"] = snapshot
+                    break
+    if state.get("quality_snapshot") and state["quality_snapshot"] != content_snapshot(config.REPO_PATH):
+        state.pop("quality_report", None)
+        state.pop("quality_snapshot", None)
+        state.pop("quality_controller_validated", None)
     for row in database.list("feedback", task_id):
         if row["status"] in ("planning", "repairing"):
             database.update("feedback", row, status="superseded", outcome="verify-requested")
     state["verification_requested_from"] = state["state"]
     for key in ("replan", "pending_question", "return_state", "stuck_return",
                 "active_feedback_id", "pending_feedback", "feedback_origin",
-                "coverage_report", "quality_report", "internal_review_report", "reviewed_snapshot",
+                "coverage_report", "verification_blocker",
                 "final_check_report", "e2e_passed", "implementation_feedback",
                 "verify_round_feedback", "review_gate_round_feedback"):
         state.pop(key, None)

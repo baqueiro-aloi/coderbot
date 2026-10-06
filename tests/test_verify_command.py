@@ -14,6 +14,26 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gma
 
 
 class VerifyCommandTests(unittest.TestCase):
+    def test_unchanged_verify_reuses_verified_result_without_another_agent_turn(self):
+        state = {"state": "WAIT_REPLY", "slug": "feature", "item": "task", "session_id": "session",
+                 "quality_controller_validated": True,
+                 "quality_snapshot": "same", "reviewed_snapshot": "same",
+                 "internal_review_report": {"status": "pass", "critical": 0, "important": 0},
+                 "quality_report": {"status": "pass", "commands": ["focused: pass"],
+                                    "openspec": "pass", "tasks": "1/1"}}
+        with tempfile.TemporaryDirectory() as root:
+            tasks = Path(root) / "openspec/changes/feature/tasks.md"
+            tasks.parent.mkdir(parents=True)
+            tasks.write_text("- [x] Work\n")
+            with patch.object(config, "REPO_PATH", Path(root)), patch.object(main, "save_state"), \
+                 patch.object(main.phase_checkpoint, "store", return_value=ExecutionStore(Path(root) / "db")), \
+                 patch.object(main, "content_snapshot", return_value="same"), patch.object(main, "trail"), \
+                 patch.object(main.agent_runner, "resume") as agent:
+                main._request_verification(state)
+                main.do_verify(state)
+            self.assertEqual(state["state"], "E2E")
+            agent.assert_not_called()
+
     def test_live_verify_interrupts_without_consuming_command_or_mutating_state(self):
         with tempfile.TemporaryDirectory() as root:
             tasks = Path(root) / "openspec/changes/feature/tasks.md"
@@ -41,6 +61,7 @@ class VerifyCommandTests(unittest.TestCase):
         self.assertEqual(command_text.parse_command("VERIFY codebot-test: commit abc123 already has the fixes"),
                          ("VERIFY", "codebot-test", "commit abc123 already has the fixes"))
         self.assertIsNone(command_text.parse_command("verifying"))
+        self.assertEqual(command_text.parse_command("VERIFY --restore-plan 93ea27a")[2], "--restore-plan 93ea27a")
 
     def test_replanning_can_move_to_verify_without_changing_work_or_faking_approval(self):
         for channel in ("slack", "email"):

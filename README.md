@@ -244,6 +244,26 @@ push or merge is implied. Held tasks must be resumed first with `CONTINUE`.
 Existing planning/repair continuations are superseded in the execution ledger
 (their history is retained), so reloading cannot undo the verification request.
 
+The controller freezes the task inventory on approval and implementation completion.
+Changing checkmarks is allowed; adding, removing or changing tasks is a scope
+decision, not automatic permission for another implementation cycle. Tasks tagged
+`[codebot:approval]` or `[codebot:verification]` are administrative blockers, not
+implementation. Unclassified pending tasks on an explicit `VERIFY` request pause
+for a decision rather than restarting work. Controller-run unknown/interrupted
+checks cannot be overridden by an agent's pass report. A clean internal review is
+reused only on the exact content snapshot, including after task-state recovery.
+Successful verification is also reused only on an exact snapshot; reported task
+counts must match the actual checklist and OpenSpec CLI counts.
+
+To recover a completed plan polluted by an unwanted replanning, explicitly send
+`VERIFY --restore-plan <commit SHA>: optional guidance`. The commit must be an
+ancestor with a complete checklist and the same artifact inventory. This replaces
+only the active change's proposal, design, tasks and specs; it does not touch
+application code, HEAD or the Git index, and does not imply approval or passing
+tests. The current documents and staged diff are backed up outside the repository
+under `data/verification-recovery/` before any replacement. Review legitimate spec
+changes first; omit this option when they must be kept and reconcile them manually.
+
 Implementation/review use focused checks; the deterministic runner owns complete
 final checks and compares identifiable failures against the immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared
