@@ -24,7 +24,8 @@ class HumanHandoffs(unittest.TestCase):
         self.assertIn("Recommended", card)
         self.assertIn("approved spec", handoffs.selected_reply(state, "Sí")["reply"])
         self.assertTrue(handoffs.selected_reply(state, "NO")["wait"])
-        self.assertIsNone(handoffs.selected_reply(state, "yes, but change the scope"))
+        self.assertEqual(handoffs.selected_reply(state, "yes, but change the scope")["reply"],
+                         "yes, but change the scope")
         reloaded = json.loads(json.dumps(state))
         self.assertIn("explicitly authorize", handoffs.selected_reply(reloaded, "1")["reply"])
         reloaded["return_state"] = "PROPOSING"
@@ -50,7 +51,8 @@ class HumanHandoffs(unittest.TestCase):
         handoffs.remember_decision(state, "PR ready for review")
         self.assertIn("error", handoffs.selected_reply(state, "yes"))
         self.assertIn("error", handoffs.selected_reply(state, "1"))
-        self.assertIn("Add cancellation", handoffs.selected_reply(state, "1: Add cancellation")["reply"])
+        self.assertEqual(handoffs.selected_reply(state, "1: Add cancellation")["reply"],
+                         "1: Add cancellation")
         self.assertEqual(handoffs.selected_reply(state, "2")["reply"], "merge")
         self.assertTrue(handoffs.selected_reply(state, "3")["wait"])
         self.assertIn("error", handoffs.selected_reply(state, "4"))
@@ -81,6 +83,84 @@ class HumanHandoffs(unittest.TestCase):
         handle.assert_not_called()
         send.assert_called_once()
         self.assertEqual(state["state"], "WAIT_REPLY")
+
+    def test_full_text_is_preserved_for_every_decision(self):
+        cases = [("WAIT_APPROVAL", None, "proposal for review"),
+                 ("WAIT_MERGE", None, "PR ready for review"),
+                 ("WAIT_STUCK", "VERIFYING", "stuck in VERIFYING"),
+                 ("WAIT_REPLY", "EXPLORING", "question during EXPLORING"),
+                 ("WAIT_REPLY", "VERIFYING", "Verification blocked"),
+                 ("WAIT_CLEAN", None, "blocked: dirty working tree")]
+        replies = ["3. Dejemos el registro como está actualmente usando LiteLLM, con registro asíncrono.",
+                   "1) Dominio completo", "opción 1: Dominio completo", "1 Dominio completo",
+                   "Sí, pero cambia el diseño", "2. No hagas merge todavía",
+                   "3. No esperes; revisa primero la configuración", "Prefiero otra alternativa.\nEstos son los detalles."]
+        for stage, origin, phase in cases:
+            state = {"state": stage, "slug": "task"}
+            if stage == "WAIT_STUCK":
+                state["stuck_return"] = origin
+            else:
+                state["return_state"] = origin
+            handoffs.remember_decision(state, phase, "Which policy?" if stage == "WAIT_REPLY" and origin == "EXPLORING" else None)
+            for reply in replies:
+                with self.subTest(stage=stage, reply=reply):
+                    selected = handoffs.selected_reply(state, reply)
+                    self.assertEqual(selected["reply"], reply)
+                    self.assertFalse(selected["wait"])
+                    self.assertTrue(selected["prose"])
+
+    def test_prose_is_routed_verbatim_not_as_an_automatic_merge_or_wait(self):
+        for reply in ("2. No hagas merge todavía", "3: Revisa los fallos antes de esperar"):
+            state = {"state": "WAIT_MERGE", "slug": "task"}
+            handoffs.remember_decision(state, "PR ready for review")
+            with patch.object(main, "_handle_reply") as handle, patch.object(main, "email") as send:
+                main._dispatch_wait_reply(state, "msg", reply)
+            handle.assert_called_once_with(state, reply)
+            send.assert_not_called()
+
+    def test_classification_context_contains_active_options_and_prose_rules(self):
+        state = {"state": "WAIT_MERGE", "slug": "task"}
+        handoffs.remember_decision(state, "PR ready for review")
+        context = handoffs.classification_context(state)
+        self.assertIn("2. Authorize 'merge'", context)
+        self.assertIn("full reply", context)
+        state["slug"] = "other"
+        self.assertEqual(handoffs.classification_context(state), "")
+
+    def test_post_approval_prose_still_gets_scope_assessment(self):
+        state = {"state": "WAIT_REPLY", "return_state": "IMPLEMENTING", "slug": "task",
+                 "execution_task_id": "durable"}
+        handoffs.remember_decision(state, "question during IMPLEMENTING", "Which storage?")
+        reply = "1. Cambia toda la arquitectura y añade otra BDD"
+        with patch.object(main, "_handle_reply") as handle, \
+             patch.object(main.feedback, "receive") as receive, \
+             patch.object(main, "_dispatch_feedback") as dispatch:
+            main._dispatch_wait_reply(state, "msg", reply)
+        handle.assert_not_called()
+        receive.assert_called_once()
+        self.assertEqual(receive.call_args.args[-1], reply)
+        dispatch.assert_called_once_with(state)
+
+    def test_qualified_approval_merge_and_recovery_reach_semantic_classifier(self):
+        cases = [("WAIT_APPROVAL", "proposal for review", main.do_approval_reply,
+                  "1. Sí, pero cambia el diseño", "Do you authorize implementing"),
+                 ("WAIT_MERGE", "PR ready for review", main.do_merge_reply,
+                  "2. No hagas merge todavía", "Authorize 'merge'"),
+                 ("WAIT_STUCK", "stuck in VERIFYING", main.do_stuck_reply,
+                  "2. Investiga primero, no reintentes aún", "Retry the same step")]
+        for stage, phase, handler, reply, option in cases:
+            with self.subTest(stage=stage):
+                state = {"state": stage, "slug": "task", "stuck_return": "VERIFYING"}
+                handoffs.remember_decision(state, phase)
+                with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"unclear"}')) as run, \
+                     patch.object(main, "email"), patch.object(main.agent_runner, "resume") as resume:
+                    main._dispatch_wait_reply(state, "msg", reply)
+                prompt = run.call_args.args[0]
+                self.assertIn(reply, prompt)
+                self.assertIn(option, prompt)
+                self.assertIn("leading number alone", prompt)
+                self.assertEqual(state["state"], stage)
+                resume.assert_not_called()
 
     def test_decision_stays_visible_with_reports_in_both_channels(self):
         for channel in ("email", "slack"):

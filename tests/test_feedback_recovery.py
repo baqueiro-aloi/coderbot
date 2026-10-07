@@ -17,6 +17,68 @@ from agent_errors import AgentContentFilterError
 
 
 class FeedbackRecoveryTests(unittest.TestCase):
+    def test_exact_logging_reply_finishes_exploration_then_creates_initial_proposal(self):
+        message = ("3. Dejemos el registro como está actualmente usando LiteLLM, con registro asíncrono. "
+                   "No exigir configuración de BDD válida (como está ahorita), "
+                   "solo enviar info cuando el LiteLLM esté configurado.")
+        state = {"item": "task", "state": "WAIT_REPLY", "return_state": "EXPLORING",
+                 "slug": "task", "session_id": "session", "execution_task_id": "durable",
+                 "pending_question": "¿Qué política? 1. Durable 2. Cola 3. Registro nativo"}
+        main.handoffs.remember_decision(state, "question during EXPLORING", state["pending_question"])
+        result = SimpleNamespace(output="", session_id="session", attachments=[], question=None)
+        with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"answer"}')) as run, \
+             patch.object(main.agent_runner, "resume", return_value=result) as resume, \
+             patch.object(main, "handle_result", return_value=False), \
+             patch.object(main, "_undo_premature_work"), patch.object(main, "announce_milestone"), \
+             patch.object(main, "trail"), patch.object(main.feedback, "receive") as receive:
+            main._dispatch_wait_reply(state, "message", message)
+        self.assertEqual(state["state"], "PROPOSING")
+        self.assertNotIn("replan", state)
+        receive.assert_not_called()
+        self.assertIn(message, resume.call_args.args[1])
+        self.assertIn("do NOT modify files", resume.call_args.args[1])
+        self.assertIn("Displayed decision", run.call_args.args[0])
+
+    def test_exploration_answer_with_adjusted_option_never_investigates_approved_artifacts(self):
+        message = ("3. Dejemos el registro como está actualmente usando LiteLLM, con registro asíncrono. "
+                   "No exigir configuración de BDD válida (como está ahorita), "
+                   "solo enviar info cuando el LiteLLM esté configurado.")
+        for phase in ("EXPLORING", "PROPOSING"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root:
+                database = ExecutionStore(Path(root) / "db")
+                state = {"item": "task", "state": "WAIT_REPLY", "return_state": phase,
+                         "pending_question": "Which logging policy?", "slug": "task"}
+                feedback.receive(database, state, root, "message", message)
+                with patch.object(main.phase_checkpoint, "store", return_value=database), \
+                     patch.object(main.config, "REPO_PATH", Path(root)), \
+                     patch.object(main, "_handle_reply") as handle, \
+                     patch.object(main.agent_runner, "run") as run:
+                    self.assertTrue(main._dispatch_feedback(state))
+                handle.assert_called_once_with(state, message)
+                run.assert_not_called()
+                self.assertEqual(state["return_state"], phase)
+                self.assertNotIn("replan", state)
+                self.assertEqual(database.list("feedback", database.task_identity(state, root))[0]["status"], "complete")
+
+    def test_active_planning_feedback_resumes_its_phase_after_restart(self):
+        for phase in ("EXPLORING", "PROPOSING"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root:
+                database = ExecutionStore(Path(root) / "db")
+                state = {"item": "task", "state": phase, "slug": "task", "session_id": "session"}
+                message = "Mantén la BDD opcional; no implementes todavía."
+                feedback.receive(database, state, root, "message", message)
+                state = json.loads(json.dumps(state))
+                with patch.object(main.phase_checkpoint, "store", return_value=database), \
+                     patch.object(main.config, "REPO_PATH", Path(root)), \
+                     patch.object(main, "save_state"), \
+                     patch.object(main, "do_question_reply") as resume, \
+                     patch.object(main.agent_runner, "run") as run:
+                    self.assertTrue(main._dispatch_feedback(state))
+                resume.assert_called_once_with(state, message)
+                run.assert_not_called()
+                self.assertEqual(state["return_state"], phase)
+                self.assertNotIn("replan", state)
+
     def test_filtered_stuck_feedback_is_not_retried_and_new_text_can_resume(self):
         with tempfile.TemporaryDirectory() as root:
             database = ExecutionStore(Path(root) / "db")

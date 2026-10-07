@@ -1072,7 +1072,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
     explicit = reply.strip().casefold().rstrip(".! ")
     verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "implementa")
-               else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply),
+               else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)
+                          + handoffs.classification_context(state),
                          contract=False).output))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
@@ -2874,7 +2875,8 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
-    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply),
+    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
+                              + handoffs.classification_context(state),
                               contract=False)
     verdict = parse_json_reply(result.output)
     action = verdict.get("action")
@@ -3394,11 +3396,13 @@ def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
             message = selection.get("error") or "Work is preserved. I will keep waiting; no action was authorized."
             email(state, "decision selection", message + "\n\n" + handoffs.render_decision(state["pending_decision"]))
             return
-        # A displayed option is an answer to this wait, not new product feedback.
-        # Retain the displayed decision on errors/re-questions; state/origin binding
-        # prevents it from authorizing an unrelated phase later.
-        _handle_reply(state, selection["reply"])
-        return
+        # Bare choices have an exact controller meaning. Prose must still pass
+        # scope assessment in post-planning question/recovery waits, while the
+        # approval and PR handlers already classify the complete reply themselves.
+        if (not selection.get("prose") or state["state"] not in ("WAIT_REPLY", "WAIT_STUCK")
+                or state.get("return_state") in ("EXPLORING", "PROPOSING")):
+            _handle_reply(state, selection["reply"])
+            return
     if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
             state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
             r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
@@ -3499,6 +3503,20 @@ def _dispatch_feedback(state: dict) -> bool:
 def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     text = row["data"]["text"]
     original_phase = state["state"]
+    phase = (state.get("return_state") if original_phase == "WAIT_REPLY" else original_phase)
+    if phase in ("EXPLORING", "PROPOSING"):
+        # These phases are still defining the initial requirements. There is no
+        # approved contract to investigate or replan, even when an answer changes
+        # a suggested option or arrived through the active-turn feedback queue.
+        if original_phase == "WAIT_REPLY":
+            _handle_reply(state, text)
+        else:
+            state["return_state"] = phase
+            state["state"] = "WAIT_REPLY"
+            save_state(state)
+            do_question_reply(state, text)
+        database.update("feedback", row, status="complete", outcome=state["state"])
+        return True
     interrupted_wait = None
     if state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and state.get("return_state") != "FEEDBACK_QUESTION":
         # Explicit recovery commands/answers keep their existing continuation;
@@ -3506,7 +3524,11 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         intent = agent_runner.run("Classify this authorized message without tools. Return ONLY JSON "
             'with kind "answer" or "product_feedback". A missing feature, new requirement or '
             "design objection is product_feedback even if phrased as a question. An answer "
-            "to the pending question or retry/repair guidance is answer.\n"
+            "to the pending question or retry/repair guidance is answer. Selecting, "
+            "explaining or qualifying an offered alternative is an answer even if "
+            "it starts with '3. <explanation>', unless the complete reply adds or "
+            "changes requirements outside the approved scope; that remains product_feedback.\n"
+            + handoffs.classification_context(state)
             + prompts.fenced("pending question", state.get("pending_question") or state.get("stuck_error", ""))
             + prompts.fenced("message", text), contract=False)
         kind = parse_json_reply(intent.output).get("kind")
@@ -4016,7 +4038,8 @@ def _escalate(state: dict, failed_state: str) -> bool:
 def do_stuck_reply(state: dict, reply: str) -> None:
     """Handle the user's reply while WAIT_STUCK: retry / abort / complete / instructions."""
     verdict = parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply),
+        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply)
+                         + handoffs.classification_context(state),
                          contract=False).output)
     action = verdict.get("action")
     log.info("classified stuck reply as action=%r", action)
@@ -4720,8 +4743,9 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
         return prompts.render(prompts.FIX_ARCHIVE,
                               error=state.get("archive_error", "unknown archival failure"),
                               guidance=reply)
-    return prompts.render(prompts.ANSWER_REPLY, reply=reply,
-                          rules=prompts.PHASE_RULES.get(phase, ""))
+    return (prompts.render(prompts.ANSWER_REPLY, reply=reply,
+                           rules=prompts.PHASE_RULES.get(phase, ""))
+            + handoffs.classification_context(state))
 
 
 def do_question_reply(state: dict, reply: str) -> None:
@@ -4735,7 +4759,8 @@ def do_question_reply(state: dict, reply: str) -> None:
     verdict = parse_json_reply(
         agent_runner.run(
             prompts.render(prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
-                           question=state.get("pending_question", "(not recorded)")),
+                           question=state.get("pending_question", "(not recorded)"))
+            + handoffs.classification_context(state),
             contract=False).output)
     action = verdict.get("action")
     log.info("classified WAIT_REPLY reply as action=%r", action)

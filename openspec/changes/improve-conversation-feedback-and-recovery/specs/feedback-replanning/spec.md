@@ -15,6 +15,11 @@ Codebot SHALL record authorized task-thread feedback with its original text, ide
 - **WHEN** codebot restarts after acknowledging but before handling feedback
 - **THEN** the original feedback remains pending and is handled once
 
+#### Scenario: Clarification before the initial proposal
+- **WHEN** feedback or a full-text choice clarifies or adjusts requirements during EXPLORING or PROPOSING, including feedback queued during an active turn and restored after restart
+- **THEN** codebot resumes that planning phase with the complete text and its phase restrictions, without investigating an assumed approved contract or entering revision of nonexistent artifacts
+- **AND** completed exploration advances to initial PROPOSING and implementation still requires proposal approval
+
 ### Requirement: Questions and requirements are investigated together
 Codebot SHALL distinguish informational questions, localized corrections, material changes and unresolved product ambiguity using the approved artifacts and actual implementation. A question containing a requirement assertion SHALL NOT be dismissed as unclear merely because it is phrased as a question. It SHALL answer the factual question and record the disposition of the asserted requirement.
 

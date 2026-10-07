@@ -248,7 +248,14 @@ The controller freezes the task inventory on approval and implementation complet
 Every human decision is presented in the conversation itself, in both email and
 Slack: Yes/No for a single authorization, or 3-4 numbered alternatives with their
 consequences and a recommendation when justified. Reply with the number (and any
-requested details), or write your own answer. A selection applies only to the
+requested details), or write your own answer. Full-text replies such as
+`3. Dejemos el registro asíncrono y la BDD opcional`, `1: <details>` or
+`Sí, pero cambia el diseño` are interpreted in full with the displayed choices;
+no particular separator is required. Qualifications never become an automatic
+approval, merge or wait just because the reply starts with an option number.
+During exploration/proposal preparation, clarifications stay in that initial
+planning phase rather than attempting to revise a nonexistent approved change.
+A selection applies only to the
 current task and waiting phase, including after a restart. No means keep waiting
 and preserve the work, not abort or complete the task. Approval and merge gates
 still apply; Yes alone never authorizes a merge in a multi-option PR decision.

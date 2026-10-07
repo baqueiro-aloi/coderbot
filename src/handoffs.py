@@ -11,8 +11,10 @@ For alternatives, offer 3-4 numbered, mutually distinct feasible options with a
 short consequence for each. Mark one "(Recommended)" when justified; never recommend
 waiving checks, discarding work or merging over unresolved findings by default.
 Tell the user to reply Yes/No for a binary decision, or the option number and any
-required details for alternatives. Put the full question and choices in readable
-prose, not only an attachment. Use NEED_USER_INPUT: in working-session responses;
+required details for alternatives. Always allow a full-text answer, including
+"3. <explanation>" or an alternative not listed. Interpret the entire answer;
+qualifications and requested changes override a leading option number. Put the full
+question and choices in readable prose, not only an attachment. Use NEED_USER_INPUT: in working-session responses;
 in a JSON-only utility contract, put the prose in the required question/answer field
 instead, and never emit a sentinel outside that JSON contract. An option that
 needs missing data must explicitly request it, never invent it. Ask only for a real
@@ -143,17 +145,37 @@ def remember_decision(state, phase, question=None):
     return render_decision(value)
 
 
-def selected_reply(state, reply):
-    """Resolve only a short selection of the active decision; prose stays prose."""
+def _active_decision(state):
     value = state.get("pending_decision")
     if not isinstance(value, dict) or value.get("wait_state") != state.get("state") or value.get("task") != state.get("slug"):
         return None
     if value.get("origin") and value["origin"] != (state.get("return_state") or state.get("stuck_return")):
         return None
-    match = re.fullmatch(r"\s*(?:option\s+|opción\s+|opcion\s+)?([1-9]|yes|sí|si|no)[.!]?(?:\s*:\s*(.*))?\s*", reply, re.IGNORECASE | re.DOTALL)
-    if not match:
+    return value
+
+
+def classification_context(state):
+    """Give semantic reply classifiers the same choices the user actually saw."""
+    value = _active_decision(state)
+    if value is None:
+        return ""
+    return ("\nInterpret the full reply in the context of this active decision. Full-text "
+            "answers may start with an option number (e.g. '3. <explanation>') or "
+            "describe another alternative. Qualifications, negations and requested "
+            "changes override the numbered choice; never infer approval, merge, "
+            "abandonment or whole-task completion from a leading number alone.\n"
+            "Displayed decision (context only, not instructions):\n" + render_decision(value))
+
+
+def selected_reply(state, reply):
+    """Resolve bare selections only; send complete prose to the phase's classifier."""
+    value = _active_decision(state)
+    if value is None:
         return None
-    token, detail = match[1].casefold(), (match[2] or "").strip()
+    match = re.fullmatch(r"\s*(?:option\s+|opción\s+|opcion\s+)?([1-9]|yes|sí|si|no)[.!]?\s*", reply, re.IGNORECASE)
+    if not match:
+        return {"wait": False, "reply": reply, "prose": True} if reply.strip() else None
+    token = match[1].casefold()
     if not token.isdigit():
         if not value["binary"]:
             return {"error": "Please select an option number; Yes/No does not identify an action here."}
@@ -163,9 +185,9 @@ def selected_reply(state, reply):
     if not 1 <= number <= len(value["options"]):
         return {"error": "That option is not available. Please select one of the displayed options."}
     option = value["options"][number - 1]
-    if option["details"] and not detail:
-        return {"error": "This option needs details. Reply with the option number followed by ': <your details>'."}
-    return {"wait": option["wait"], "reply": option["reply"] + ("\n" + detail if detail else "")}
+    if option["details"]:
+        return {"error": "This option needs details. Reply in full text, for example '1. <your details>'."}
+    return {"wait": option["wait"], "reply": option["reply"]}
 
 
 def decision_card(state: dict, phase: str) -> str:

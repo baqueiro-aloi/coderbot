@@ -24,7 +24,15 @@ Codebot SHALL announce important results, blockers and decisions in concise acce
 - **THEN** codebot sends one short self-contained reminder stating the decision and valid response, without repeating the full original message
 
 ### Requirement: Decision-first messages
-Messages requiring approval, an answer or a PR decision SHALL begin with the concrete decision, valid responses and what happens next. Operational blockers SHALL identify the actual unresolved cause and who acts next, not merely ask for generic guidance. Commands SHALL be described consistently with their actual scope and behavior, including the distinction between `merge` and `merge anyway`. Ordinary messages SHALL target 6–10 lines and place extensive technical detail in attachments or linked reports. Fixed operational copy SHALL use the task language with bounded localization that cannot block coding or delivery for an agent-length timeout.
+Messages requiring approval, an answer or a PR decision SHALL begin with the concrete decision, valid responses and what happens next. Every multiple-choice decision SHALL also accept full-text answers, with or without a leading option number and without requiring a particular separator. Codebot SHALL preserve the complete reply and interpret it against the active task-bound decision; qualifications, negations and requested changes SHALL NOT be discarded or converted into automatic approval, merge or waiting based on the leading number. Bare selections SHALL retain their existing bounded meaning. Operational blockers SHALL identify the actual unresolved cause and who acts next, not merely ask for generic guidance. Commands SHALL be described consistently with their actual scope and behavior, including the distinction between `merge` and `merge anyway`. Ordinary messages SHALL target 6–10 lines and place extensive technical detail in attachments or linked reports. Fixed operational copy SHALL use the task language with bounded localization that cannot block coding or delivery for an agent-length timeout.
+
+#### Scenario: Numbered full-text answer
+- **WHEN** a user replies `3. Dejemos el registro como está actualmente usando LiteLLM, con registro asíncrono` to a multiple-choice question
+- **THEN** codebot processes the complete answer in the current phase without requiring `3:` or treating the number as a different wrapper action
+
+#### Scenario: Qualified approval or merge option
+- **WHEN** a reply starts with an approval or merge option number but requests changes or says not to merge yet
+- **THEN** codebot classifies the complete reply with the displayed choices and does not automatically approve or merge
 
 #### Scenario: Reviewing a proposal
 - **WHEN** codebot requests proposal approval

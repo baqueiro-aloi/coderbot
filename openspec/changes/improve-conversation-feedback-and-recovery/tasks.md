@@ -76,3 +76,13 @@ completed with 677 tests, OK (1 skipped). Controlled Email MIME and Slack API fi
 real Git repair/isolation/merge scenarios, durable restart and complementary proposal
 tests passed. `openspec validate improve-conversation-feedback-and-recovery --strict`
 passed. Live rollout and provider smoke checks are documented, not executed.
+
+## 10. Full-text decision and initial-planning regression
+
+- [x] 10.1 Preserve full-text answers for all multiple-choice handoffs and provide active displayed choices to semantic classifiers without turning qualified prose into automatic approval, merge or waiting.
+- [x] 10.2 Resume initial exploration/proposal clarification and queued feedback in the same phase without assuming approved OpenSpec artifacts; preserve post-approval scope assessment.
+- [x] 10.3 Test the exact optional asynchronous logging reply, qualified controller decisions, restart/queued feedback and initial PROPOSING transition; run regression suites and strict OpenSpec validation.
+
+Regression verification (2026-10-07): 33 focused tests passed; final
+`venv/bin/python -m unittest discover -s tests -t .` completed with 804 tests,
+OK (1 skipped). Strict validation passed. No live rollout or task-state repair executed.
