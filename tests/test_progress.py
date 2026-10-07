@@ -50,10 +50,28 @@ class ProgressCapture(unittest.TestCase):
         with patch.object(log, "level", logging.INFO):
             log.info("private", extra={"public_progress": "task a"})
         state_b = {"branch": "task-b", "state": "WAIT_REPLY", "return_state": "IMPLEMENTING"}
-        snapshot = progress.snapshot(state_b, active=True)
+        snapshot = progress.snapshot(state_b)
         self.assertEqual(snapshot["log_lines"], [])
         self.assertEqual(snapshot["phase"], "IMPLEMENTING")
         self.assertEqual(snapshot["situation"], "waiting_input")
+
+    def test_live_turn_overrides_wait_without_changing_persisted_state(self):
+        for wait in ("WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_STUCK", "WAIT_CLEAN"):
+            with self.subTest(wait=wait):
+                state = dict(self.state, state=wait, return_state="EXPLORING")
+                snapshot = progress.snapshot(state, active=True)
+                self.assertEqual(snapshot["situation"], "working")
+                self.assertEqual(state["state"], wait)
+                rendered = slack._render_progress("Task", snapshot)
+                self.assertIn(":loading:", rendered)
+                self.assertNotIn("esperando", rendered)
+                self.assertEqual(progress.snapshot(state)["situation"], "waiting_input")
+
+    def test_explicit_situation_and_idle_still_override_activity(self):
+        self.assertEqual(progress.snapshot(self.state, active=True, situation="paused")["situation"],
+                         "paused")
+        self.assertEqual(progress.snapshot(dict(self.state, state="IDLE"), active=True)["situation"],
+                         "completed")
 
     def test_non_editable_backend_does_not_send_anything(self):
         backend = SimpleNamespace(send=MagicMock())

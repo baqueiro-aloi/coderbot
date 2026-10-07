@@ -4624,7 +4624,7 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
                      + f"{operation['kind']} / {operation['label']} ({elapsed}); "
                      + ("presupuesto restante" if spanish else "budget remaining")
                      + f": {operation['remaining']:.0f}s")
-    if state.get("state") in USER_SIDE_WAITS:
+    if state.get("state") in USER_SIDE_WAITS and not turn.get("active"):
         lines.append(_ping_body(state, now, 0))
     elif not turn.get("active") and not operations.snapshot():
         lines.append("No hay ejecución activa; siguiente paso o reintento pendiente." if spanish else
@@ -5018,8 +5018,11 @@ def _refresh_progress() -> None:
 def _publish_progress(state: dict, situation: str | None = None) -> None:
     with _status_command_lock:
         try:
-            active = (_work_active.is_set() and state.get("state") in PHASES
-                      and state.get("state") != "IDLE")
+            # Reply handlers retain wait states for safe retries while running an
+            # agent. Polling a wait alone is not work; a live turn is.
+            active = (bool(agent_runner.turn_snapshot().get("active")) or
+                      (_work_active.is_set() and state.get("state") in PHASES
+                       and state.get("state") != "IDLE"))
             gmail_client.update_progress(state.get("thread_id"),
                                          progress.snapshot(state, active=active, situation=situation))
         except Exception:

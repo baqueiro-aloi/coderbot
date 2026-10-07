@@ -64,9 +64,10 @@ def install() -> None:
 def snapshot(state: dict, *, active: bool = False, situation: str | None = None) -> dict:
     phase = state.get("state", "IDLE")
     if situation is None:
-        situation = ("waiting_input" if phase in {"WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE",
+        situation = ("working" if active and phase != "IDLE" else
+                     "waiting_input" if phase in {"WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE",
                                                   "WAIT_STUCK", "WAIT_CLEAN"} else
-                     "completed" if phase == "IDLE" else "working" if active else "pending")
+                     "completed" if phase == "IDLE" else "pending")
     if phase == "WAIT_REPLY":
         phase = state.get("return_state") or phase
     with _lock:

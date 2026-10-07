@@ -78,6 +78,33 @@ class Supervisor(unittest.TestCase):
             main._refresh_progress()
         self.assertEqual(self.state["state"], "IMPLEMENTING")
 
+    def test_resumed_question_progress_uses_live_turn_not_wait_polling(self):
+        self.state.update(state="WAIT_REPLY", return_state="EXPLORING")
+        main._work_active.set()
+        with patch.object(main.gmail_client, "update_progress") as update, \
+             patch.object(main.agent_runner, "turn_snapshot", return_value={"active": True}) as turn, \
+             patch.object(main, "save_state") as save:
+            main._refresh_progress()
+            snapshot = update.call_args.args[1]
+            self.assertEqual(snapshot["situation"], "working")
+            self.assertEqual(snapshot["phase"], "EXPLORING")
+            turn.return_value = {"active": False}
+            main._refresh_progress()
+            self.assertEqual(update.call_args.args[1]["situation"], "waiting_input")
+        self.assertEqual(self.state["state"], "WAIT_REPLY")
+        save.assert_not_called()
+
+    def test_status_during_resumed_question_does_not_ask_for_another_reply(self):
+        self.state.update(state="WAIT_REPLY", return_state="EXPLORING")
+        observed = {"active": True, "started_at": 100.0, "last_activity": 200.0,
+                    "activity": "tool: webfetch"}
+        with patch.object(main.activity, "snapshot", return_value=observed), \
+             patch.object(main, "_ping_body") as ping:
+            body = main._short_status(self.state, observed, 210.0)
+        self.assertIn("Fase: EXPLORING", body)
+        self.assertIn("Estoy trabajando; no necesito nada de ti.", body)
+        ping.assert_not_called()
+
     def test_thread_status_answers_during_blocked_agent_and_preserves_abort(self):
         started, release = threading.Event(), threading.Event()
         def blocked_agent(_prompt, contract=False):
