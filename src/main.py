@@ -51,6 +51,7 @@ import proposal_package
 import task_source
 import turn_control
 import conversation as gmail_client
+import progress
 import prompts
 from command_text import parse_command
 
@@ -61,6 +62,7 @@ logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
 for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3", "slack_sdk"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("codebot")
+progress.install()
 
 
 # ---------------------------------------------------------------- state
@@ -3963,6 +3965,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
         email(state, subj, body, milestone="merged")
     else:
         email(state, subj, body)
+    _publish_progress(state, "completed")
     if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
         state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
@@ -4135,6 +4138,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
           "from the backlog.", new_thread=new_thread)
+    _publish_progress(state, "aborted")
     if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
         state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
@@ -4221,9 +4225,11 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
     problems = _reset_to_base_branch()
     if problems:
         log.warning("reset after hold left issues: %s", problems)
-    for key in RESET_KEYS:
-        state.pop(key, None)
-    state["state"] = "IDLE"
+    with _status_command_lock:
+        _publish_progress(state, "paused")
+        for key in RESET_KEYS:
+            state.pop(key, None)
+        state["state"] = "IDLE"
     log.info("task on hold: %r (resume at %s)", item[:80], resume_state)
 
 
@@ -4539,6 +4545,8 @@ def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -
                     f"{config.SUBJECT_PREFIX} held task — {command}", response, thread_id)
     gmail_client.mark_processed(msg_id)
     if command in ("ABORT", "DONE"):
+        held_state = {**(hold.get("saved") or {}), "thread_id": thread_id}
+        _publish_progress(held_state, "aborted" if command == "ABORT" else "completed")
         gmail_client.close_thread(thread_id)
     return True
 
@@ -4916,7 +4924,7 @@ def _handle_reply(state: dict, reply: str) -> None:
 # eventually lets the heartbeat go stale (see config.HEARTBEAT_MAX_TICK_SECONDS).
 _liveness = {"tick_started": time.time()}
 _work_active = threading.Event()
-_status_command_lock = threading.Lock()
+_status_command_lock = threading.RLock()
 _current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
 
@@ -4991,7 +4999,31 @@ def _status_supervisor_loop() -> None:
             _status_supervisor_once()
         except Exception:  # noqa: BLE001 — supervisory polling never crashes codebot
             log.exception("brief status supervisor failed; will retry")
+        try:
+            _refresh_progress()
+        except Exception:
+            log.exception("progress supervisor failed; will retry")
         time.sleep(3 if config.COMM_CHANNEL == "slack" else 15)
+
+
+def _refresh_progress() -> None:
+    """Publish independently of STATUS requests, including user-side waits."""
+    with _status_command_lock:
+        state = dict(_current_state) if _current_state is not None else load_state()
+        if state.get("item") and state.get("thread_id"):
+            _publish_progress(state)
+        gmail_client.flush_progress()
+
+
+def _publish_progress(state: dict, situation: str | None = None) -> None:
+    with _status_command_lock:
+        try:
+            active = (_work_active.is_set() and state.get("state") in PHASES
+                      and state.get("state") != "IDLE")
+            gmail_client.update_progress(state.get("thread_id"),
+                                         progress.snapshot(state, active=active, situation=situation))
+        except Exception:
+            log.exception("could not publish task progress; task execution continues")
 
 
 def _heartbeat_loop() -> None:

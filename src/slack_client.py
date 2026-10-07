@@ -25,6 +25,7 @@ _last_reconcile: dict[str, float] = {}
 _last_reconciled_at: dict[str, float] = {}
 _RECONCILE_SECONDS = 60
 _RECONCILE_OVERLAP_SECONDS = 300
+_progress_lock = threading.RLock()
 
 
 @contextmanager
@@ -39,7 +40,12 @@ def _database():
     db.execute("CREATE TABLE IF NOT EXISTS status_requests (id TEXT PRIMARY KEY, "
                "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS kick_requests (id TEXT PRIMARY KEY, "
-               "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
+                "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
+    db.execute("CREATE TABLE IF NOT EXISTS progress (channel TEXT NOT NULL, root_ts TEXT NOT NULL, "
+               "original TEXT NOT NULL, rendered TEXT, next_at REAL NOT NULL DEFAULT 0, "
+               "terminal INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
+               "pending TEXT, pending_terminal INTEGER NOT NULL DEFAULT 0, "
+               "PRIMARY KEY(channel, root_ts))")
     try:
         db.commit()
         yield db
@@ -209,6 +215,9 @@ def open_thread(state: dict) -> str:
     with _database() as db:
         db.execute("INSERT OR IGNORE INTO roots(channel,root_ts,nonce) VALUES(?,?,?)",
                    (channel, root_ts, nonce))
+        original = match["text"] if match else f"{text}\n{marker}"
+        db.execute("INSERT OR IGNORE INTO progress(channel,root_ts,original) VALUES(?,?,?)",
+                   (channel, root_ts, original))
     return _thread_id(channel, root_ts)
 
 
@@ -216,8 +225,108 @@ def close_thread(thread_id: str | None) -> None:
     if not thread_id:
         return
     channel, root_ts = _split_thread(thread_id)
-    with _database() as db:
+    with _progress_lock, _database() as db:
         db.execute("DELETE FROM roots WHERE channel=? AND root_ts=?", (channel, root_ts))
+        db.execute("DELETE FROM progress WHERE channel=? AND root_ts=? AND pending IS NULL", (channel, root_ts))
+
+
+def _render_progress(original: str, snapshot: dict) -> str:
+    spanish = snapshot.get("language", "English").casefold() == "spanish"
+    phase = snapshot.get("phase", "")
+    phase = {"EXPLORING": "Explore", "PROPOSING": "Proposal", "IMPLEMENTING": "Implement",
+             "VERIFYING": "Verify", "INTERNAL_REVIEW": "Internal Review", "ARCHIVING": "Archive",
+             "OPEN_PR": "Open PR"}.get(phase, str(phase).replace("_", " ").title())
+    situation = snapshot.get("situation")
+    emoji = ""
+    if situation == "working":
+        emoji = " :loading:"
+    elif situation == "waiting_input":
+        wait = snapshot.get("waiting_for")
+        label = ({"WAIT_APPROVAL": "esperando aprobación", "WAIT_MERGE": "esperando merge"}.get(
+            wait, "esperando tu respuesta") if spanish else
+            {"WAIT_APPROVAL": "awaiting approval", "WAIT_MERGE": "awaiting merge"}.get(wait, "awaiting your response"))
+        phase += f" — {label}"
+        emoji = " :question:"
+    elif situation in ("paused", "completed", "aborted"):
+        phase = ({"paused": "En pausa", "completed": "Finalizado", "aborted": "Cancelado"} if spanish else
+                 {"paused": "Paused", "completed": "Completed", "aborted": "Aborted"})[situation]
+    lines = snapshot.get("log_lines", [])[-3:]
+    # Metadata is plain text; escape Slack mentions and keep log fences intact.
+    tail = "\n```\n" + "\n".join(_escape_slack(line.replace("```", "'''"))[:700]
+                                  for line in lines) + "\n```" if lines else ""
+    return original + f"\n\n{'Estado' if spanish else 'Status'}: {_escape_slack(phase)}{emoji}" + tail
+
+
+def update_progress(thread_id: str, snapshot: dict) -> None:
+    """Edit only an owned root, deduplicating across restarts and respecting 429s."""
+    channel, root = _split_thread(thread_id)
+    with _progress_lock:
+        with _database() as db:
+            if not db.execute("SELECT 1 FROM roots WHERE channel=? AND root_ts=?", (channel, root)).fetchone():
+                return
+            row = db.execute("SELECT original,rendered,next_at,terminal,retry_at,pending_terminal FROM progress WHERE channel=? AND root_ts=?",
+                             (channel, root)).fetchone()
+        if row is None:
+            page = web().conversations_replies(channel=channel, ts=root, limit=1)
+            message = next((msg for msg in page.get("messages", [])
+                            if msg.get("ts") == root and msg.get("user") == _bot_user), None)
+            if not message:
+                return
+            row = (message["text"], None, 0, 0, 0, 0)
+            with _database() as db:
+                db.execute("INSERT OR IGNORE INTO progress(channel,root_ts,original) VALUES(?,?,?)",
+                           (channel, root, row[0]))
+        original, previous, next_at, terminal, retry_at, pending_terminal = row
+        rendered = _render_progress(original, snapshot)
+        final = snapshot.get("situation") in ("completed", "aborted")
+        if terminal or pending_terminal:
+            return
+        if rendered == previous:
+            with _database() as db:
+                db.execute("UPDATE progress SET pending=NULL WHERE channel=? AND root_ts=?", (channel, root))
+            return
+        with _database() as db:
+            db.execute("UPDATE progress SET pending=?,pending_terminal=? WHERE channel=? AND root_ts=?",
+                       (rendered, int(final), channel, root))
+        if time.time() < retry_at or (time.time() < next_at and not final
+                                     and snapshot.get("situation") != "paused"):
+            return
+        _send_progress(channel, root, rendered, final)
+
+
+def _send_progress(channel: str, root: str, rendered: str, final: bool) -> None:
+    try:
+        web().chat_update(channel=channel, ts=root, text=rendered, mrkdwn=True)
+    except Exception as error:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", {}) or {}
+        try:
+            retry = float(headers.get("Retry-After", headers.get("retry-after", 5)))
+        except (ValueError, TypeError):
+            retry = 5
+        with _database() as db:
+            db.execute("UPDATE progress SET retry_at=? WHERE channel=? AND root_ts=?",
+                       (time.time() + max(5, retry), channel, root))
+        raise
+    with _database() as db:
+        db.execute("UPDATE progress SET rendered=?,next_at=?,terminal=?,retry_at=0,"
+                   "pending=NULL,pending_terminal=0 WHERE channel=? AND root_ts=?",
+                   (rendered, time.time() + 5, int(final), channel, root))
+        db.execute("DELETE FROM progress WHERE channel=? AND root_ts=? AND NOT EXISTS "
+                   "(SELECT 1 FROM roots WHERE channel=? AND root_ts=?)", (channel, root, channel, root))
+
+
+def flush_progress() -> None:
+    with _progress_lock:
+        with _database() as db:
+            rows = db.execute("SELECT channel,root_ts,pending,pending_terminal FROM progress "
+                              "WHERE pending IS NOT NULL AND retry_at<=? AND (next_at<=? OR pending_terminal=1)",
+                              (time.time(), time.time())).fetchall()
+        for channel, root, rendered, final in rows:
+            try:
+                _send_progress(channel, root, rendered, bool(final))
+            except Exception:
+                log.warning("could not retry Slack task progress")
 
 
 def _escape_slack(text: str) -> str:

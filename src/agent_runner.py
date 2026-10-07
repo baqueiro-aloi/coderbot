@@ -20,6 +20,7 @@ import operations
 import handoff_context
 import package_registry
 import performance
+import progress
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -50,6 +51,7 @@ def turn_snapshot() -> dict:
 def set_task_context(state: dict | None) -> None:
     """Tag progress with the task being worked; never store its prompt or output."""
     _task_context.set(state)
+    progress.set_context(state)
 
 
 def _persist(action, *args, **kwargs) -> None:
@@ -70,6 +72,7 @@ def _begin_turn(session_id: str = "") -> None:
     context = _task_context.get()
     if context:
         _persist(activity.begin, context, session_id)
+    stream_log.info("agent turn started", extra={"public_progress": "agent turn started"})
 
 
 def _end_turn() -> None:
@@ -85,6 +88,7 @@ def _end_turn() -> None:
             _persist(activity.observe, context, now=last, activity=label,
                      session_id=session_id or None)
         _persist(activity.finish, context)
+    stream_log.info("agent turn ended", extra={"public_progress": "agent turn ended"})
 
 
 def _observe(event: dict) -> None:
@@ -362,7 +366,17 @@ def _stream_line(line: str) -> None:
     summary = summarize_event(event)
     if summary is None:
         return
-    stream_log.log(logging.DEBUG if summary.startswith("[step]") else logging.INFO, "%s", summary)
+    # Publish only tool metadata, not the summary's fallback prompt, errors or text.
+    part = event.get("part") if isinstance(event.get("part"), dict) else {}
+    public = None
+    if event.get("type") == "tool_use" or part.get("type") == "tool":
+        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        inputs = state.get("input") if isinstance(state.get("input"), dict) else {}
+        detail = next((inputs[key] for key in ("command", "filePath", "path", "pattern", "description")
+                       if isinstance(inputs.get(key), str)), "")
+        public = f"[tool {part.get('tool', '?')}] {detail}".rstrip()
+    stream_log.log(logging.DEBUG if summary.startswith("[step]") else logging.INFO, "%s", summary,
+                   extra={"public_progress": public})
 
 
 def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,

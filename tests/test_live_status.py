@@ -61,6 +61,23 @@ class Supervisor(unittest.TestCase):
                       "thread_id": "C123:100.0", "task_language": "Spanish"}
         main._current_state = self.state
 
+    def test_progress_refresh_without_status_and_while_waiting(self):
+        self.state.update(state="WAIT_REPLY", return_state="EXPLORING")
+        with patch.object(main.gmail_client, "update_progress") as update, \
+             patch.object(main, "save_state") as save:
+            main._refresh_progress()
+        args = update.call_args.args
+        self.assertEqual(args[0], self.state["thread_id"])
+        self.assertEqual(args[1]["situation"], "waiting_input")
+        self.assertEqual(args[1]["phase"], "EXPLORING")
+        save.assert_not_called()
+
+    def test_progress_transport_failure_does_not_mutate_task(self):
+        with patch.object(main.gmail_client, "update_progress", side_effect=RuntimeError("offline")), \
+             self.assertLogs("codebot", level="ERROR"):
+            main._refresh_progress()
+        self.assertEqual(self.state["state"], "IMPLEMENTING")
+
     def test_thread_status_answers_during_blocked_agent_and_preserves_abort(self):
         started, release = threading.Event(), threading.Event()
         def blocked_agent(_prompt, contract=False):

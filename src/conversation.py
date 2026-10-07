@@ -27,6 +27,20 @@ def send(subject: str, body: str, thread_id: str | None = None,
     return _backend().send(subject, body, thread_id, attachments)
 
 
+def update_progress(thread_id: str | None, snapshot: dict) -> None:
+    """Optional live progress; non-editable channels never send fallback messages."""
+    update = getattr(_backend(), "update_progress", None)
+    if thread_id and update is not None:
+        update(thread_id, snapshot)
+
+
+def flush_progress() -> None:
+    """Retry optional queued progress, including final updates to retired tasks."""
+    flush = getattr(_backend(), "flush_progress", None)
+    if flush is not None:
+        flush()
+
+
 def deliver(state, subject, body, thread_id=None, attachments=()):
     import message_delivery
     import phase_checkpoint

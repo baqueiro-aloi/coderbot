@@ -8,6 +8,18 @@ managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
 OpenCode), and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
 Several instances can share a backlog; Slack instances each use their own app.
 
+The communication façade supports optional live task progress. Slack edits the
+initial feature message with its phase, `:loading:` while working, `:question:`
+when user input is required, and the last three safe operational log lines.
+Enable the animated custom `:loading:` emoji in your workspace. Updates are
+deduplicated, normally at most once every five seconds, and respect Slack's
+rate-limit retries; pause/completion updates can bypass the normal interval.
+The original message and task marker are preserved across restarts. Log tails
+are bounded in memory per task, redact known credentials, and exclude reasoning,
+prompts and tool output. Email does not send extra progress emails. Future
+editable channels can implement `update_progress(thread_id, snapshot)` without
+changing the task supervisor. Questions and approvals still arrive in the thread.
+
 ## Repository layout
 
 Conversation and recovery contracts, diagnostic attachments and the rollout procedure
