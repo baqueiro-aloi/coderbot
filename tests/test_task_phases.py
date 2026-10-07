@@ -238,7 +238,7 @@ class TaskPhaseTests(unittest.TestCase):
             verdict = SimpleNamespace(output='{"action":"answer"}')
             with patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main.agent_runner, "run", return_value=verdict), \
-                 patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[])), \
+                 patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[], session_id="sid")), \
                  patch.object(main, "handle_result", return_value=False), \
                  patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "trail"):
                 main.do_question_reply(state, "continue")
@@ -253,7 +253,7 @@ class TaskPhaseTests(unittest.TestCase):
         verdict = SimpleNamespace(output='{"action":"resume_implementation"}')
         continuation = Mock()
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[])), \
+             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[], session_id="sid")), \
              patch.object(main, "_verify_prompt", return_value="verification rules"), \
              patch.object(main, "email"), \
              patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \

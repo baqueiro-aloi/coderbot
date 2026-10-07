@@ -380,13 +380,23 @@ def send_envelope(envelope, receipts, confirm):
             continue
         confirm(key, {"status": "uncertain"})
         try:
-            result = web().files_upload_v2(channel=channel, thread_ts=root,
-                file=artifact["path"], filename=artifact["filename"])
+            if artifact["size"] == 0:
+                # Slack rejects zero-byte uploads. Deliver an explicit empty-output
+                # descriptor, never invent a successful command/test result. This
+                # also repairs notifications queued by older versions of the bot.
+                result = web().files_upload_v2(channel=channel, thread_ts=root,
+                    content=f"Original file: {artifact['filename']}\nOriginal size: 0 bytes.\n"
+                            "The source file contains no output. This does not establish a check result.\n",
+                    filename=artifact["filename"])
+            else:
+                result = web().files_upload_v2(channel=channel, thread_ts=root,
+                    file=artifact["path"], filename=artifact["filename"])
             ids = [file.get("id") for file in result.get("files", [])]
             confirm(key, {"status": "confirmed", "provider_ids": ids})
         except Exception as error:
             confirm(key, {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
-                          "error": type(error).__name__})
+                           "error": str(error)[:500]})
+            log.warning("Slack attachment delivery failed for %s: %s", artifact["filename"], error)
     if receipts.get("body", {}).get("status") not in ("confirmed", "uncertain"):
         pending = [a["filename"] for a in envelope["attachments"]
                    if receipts.get(a["id"], {}).get("status") != "confirmed"]

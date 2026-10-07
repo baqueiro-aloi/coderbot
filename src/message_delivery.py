@@ -44,12 +44,18 @@ def attempt(store, row, backend):
     def confirm(key, value):
         receipts[key] = value
         store.update("delivery_receipt", row, status="pending", receipts=dict(receipts))
-    thread = backend.send_envelope(envelope, receipts, confirm)
+    error = None
+    try:
+        thread = backend.send_envelope(envelope, receipts, confirm)
+    except Exception as exc:
+        # Keep provider receipts and retry transport, never the coding phase.
+        thread = row["data"].get("thread_id") or envelope.get("thread_id")
+        error = f"{type(exc).__name__}: {exc}"
     required = ["body", *[a["id"] for a in envelope["attachments"]]]
     complete = all(receipts.get(key, {}).get("status") == "confirmed" for key in required)
     store.update("delivery_receipt", row, status="complete" if complete else "pending",
-                 receipts=receipts, thread_id=thread)
-    return {"thread_id": thread, "complete": complete, "receipts": receipts, "notification_id": row["id"]}
+                  receipts=receipts, thread_id=thread, last_error=error)
+    return {"thread_id": thread, "complete": complete, "receipts": receipts, "notification_id": row["id"], "error": error}
 
 
 def retry_pending(store, state, repo, backend):

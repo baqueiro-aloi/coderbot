@@ -303,6 +303,11 @@ needed to restart planning or reset state.
 Responses to user questions and their attachments are sent in the same thread in
 every phase before the continuation advances. Failed/partial delivery preserves the
 waiting phase and question rather than dropping the answer behind a progress banner.
+The completed reply and its continuation are saved before delivery. Pending Slack/
+email receipts retry transport only, without running the agent again or consuming
+the phase failure budget; confirmed delivery resumes the saved continuation
+automatically, including after a restart. Empty Slack attachments are sent as an
+explicit zero-byte-source notice, never as invented passing-check evidence.
 `.codebot/checks.json` can declare project-specific full/focused check plans.
 See [harness contract](docs/harness-contract.md) for preparation, resource locks,
 provider grouping and artifact manifests.

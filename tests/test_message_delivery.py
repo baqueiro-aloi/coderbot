@@ -10,6 +10,37 @@ import gmail_client
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_empty_slack_attachment_is_delivered_as_explicit_empty_output_not_pass(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "green-eslint.txt"
+            path.write_bytes(b"")
+            store = ExecutionStore(Path(root) / "db")
+            web = Mock()
+            web.files_upload_v2.return_value = {"files": [{"id": "F1"}]}
+            web.chat_postMessage.return_value = {"ts": "1"}
+            with patch.object(slack_client, "web", return_value=web):
+                outcome = message_delivery.deliver(store, {"item": "task"}, root, root,
+                    slack_client, "Reply", "Lint diagnosis", "C:1", [path])
+            self.assertTrue(outcome["complete"])
+            upload = web.files_upload_v2.call_args.kwargs
+            self.assertNotIn("file", upload)
+            self.assertIn("0 bytes", upload["content"])
+            self.assertIn("does not establish a check result", upload["content"])
+            self.assertEqual(path.read_bytes(), b"")
+
+    def test_provider_exception_keeps_notification_pending_with_receipts(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            backend = Mock(__name__="fixture")
+            backend.attachment_limits.return_value = {"file": 10000, "mime": False}
+            backend.send_envelope.side_effect = ConnectionError("Slack unavailable")
+            result = message_delivery.deliver(store, {"item": "task"}, root, root,
+                                             backend, "Reply", "Completed answer", "C:1")
+            self.assertFalse(result["complete"])
+            row = store.get("delivery_receipt", result["notification_id"])
+            self.assertEqual(row["status"], "pending")
+            self.assertIn("Slack unavailable", row["data"]["last_error"])
+
     def test_log_delivery_uses_txt_name_and_preserves_contents_in_both_channels(self):
         for backend in (slack_client, gmail_client):
             with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:

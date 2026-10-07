@@ -244,8 +244,7 @@ class QuestionReply(unittest.TestCase):
              patch.object(main.agent_runner, "resume", return_value=result(output="Entendido.")), \
              patch.object(main, "email", side_effect=RuntimeError("Slack unavailable")), \
              patch.object(main, "_undo_premature_work") as advance:
-            with self.assertRaisesRegex(RuntimeError, "Slack unavailable"):
-                main.do_question_reply(state, "Aclara, por favor")
+            main.do_question_reply(state, "Aclara, por favor")
         advance.assert_not_called()
         self.assertEqual(state["state"], "WAIT_REPLY")
         self.assertEqual(state["pending_question"], "q?")
@@ -327,13 +326,46 @@ class QuestionReply(unittest.TestCase):
                      patch.object(main.agent_runner, "resume", return_value=result()), \
                      patch.object(main, "email", side_effect=send), \
                      patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
-                    with self.assertRaises(RuntimeError):
-                        main.do_question_reply(state, "Investigate main")
+                    main.do_question_reply(state, "Investigate main")
                 continuation.assert_not_called()
                 self.assertEqual(state["state"], "WAIT_REPLY")
                 self.assertEqual(state["return_state"], "E2E")
                 self.assertEqual(state["pending_question"], "q?")
                 self.assertEqual(state["question_rounds"], 2)
+                self.assertEqual(state["pending_reply_delivery"]["phase"], "E2E")
+
+    def test_partial_delivery_restart_resumes_transport_without_agent_or_duplicate_body(self):
+        state = self.base("E2E")
+        def send(*args):
+            state["last_delivery"] = {"complete": False, "notification_id": "receipt"}
+        continuation = Mock(side_effect=lambda s, r: s.update(state="E2E"))
+        with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+             patch.object(main.agent_runner, "resume", return_value=result(output="Diagnosis complete")) as agent, \
+             patch.object(main, "email", side_effect=send) as email, \
+             patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+            main.do_question_reply(state, "Investigate main")
+        self.assertEqual(agent.call_count, 1)
+        self.assertEqual(email.call_count, 1)
+        continuation.assert_not_called()
+        reloaded = json.loads(json.dumps(state))
+        with patch.object(main.phase_checkpoint, "store") as store, \
+             patch.object(main.agent_runner, "resume") as agent, \
+             patch.object(main.agent_runner, "run") as classify, \
+             patch.object(main, "email") as email, \
+             patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+            store.return_value.get.return_value = {"status": "pending"}
+            main.do_question_reply(reloaded, "retry")
+            continuation.assert_not_called()
+            store.return_value.get.return_value = {"status": "complete"}
+            main._continue_reply_delivery(reloaded)
+        agent.assert_not_called()
+        classify.assert_not_called()
+        email.assert_not_called()
+        continuation.assert_called_once()
+        self.assertEqual(continuation.call_args.args[1].output, "Diagnosis complete")
+        self.assertEqual(reloaded["state"], "E2E")
+        self.assertNotIn("pending_reply_delivery", reloaded)
+        self.assertNotIn("pending_question", reloaded)
 
     def test_attachment_only_answer_is_delivered(self):
         with tempfile.TemporaryDirectory() as root:

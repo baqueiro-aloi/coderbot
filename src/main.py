@@ -3221,6 +3221,9 @@ def _bot_side_activity(state: dict, now: float) -> str:
 
 def _ping_body(state: dict, now: float, count: int) -> str:
     spanish = state.get("task_language", "English").casefold() == "spanish"
+    if state.get("pending_reply_delivery"):
+        return ("La respuesta está preparada; estoy reintentando solo la entrega de archivos. No necesito una decisión ni volveré a ejecutar al agente."
+                if spanish else "The reply is ready; I am retrying file delivery only. No decision is needed and the agent will not run again.")
     decision = state.get("pending_decision")
     if isinstance(decision, dict) and decision.get("wait_state") == state["state"]:
         return handoffs.render_decision(decision)
@@ -3838,7 +3841,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
               "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair",
+              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
               "approved_task_inventory", "verified_task_inventory")
@@ -4675,6 +4678,9 @@ def do_question_reply(state: dict, reply: str) -> None:
     fresh session, like the other waits — because control-flow instructions ("mark it
     done and move on", "abandon this") must act on the FSM, not be forwarded to the
     working session, which has no lever on the FSM and can only loop asking questions."""
+    if state.get("pending_reply_delivery"):
+        _continue_reply_delivery(state)
+        return
     verdict = parse_json_reply(
         agent_runner.run(
             prompts.render(prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
@@ -4746,24 +4752,63 @@ def do_question_reply(state: dict, reply: str) -> None:
         # A WAIT_REPLY turn answers a person, regardless of the phase's normal
         # completion notice. Deliver the answer/evidence before its continuation
         # can replace it with a progress banner or silently discard attachments.
-        try:
-            label = "exploration reply" if phase == "EXPLORING" else f"reply during {phase}"
-            email(state, label, result.output.strip() or "The requested supporting files are attached.",
-                  reply_files)
-            if state.get("last_delivery", {}).get("complete") is False:
-                raise RuntimeError("Question reply delivery is incomplete; continuation paused")
-        except Exception:
-            # handle_result cleared these on success; retain the original
-            # question if delivery fails and the FSM retries this reply.
-            if pending_question is not None:
-                state["pending_question"] = pending_question
-            if question_rounds is not None:
-                state["question_rounds"] = question_rounds
-            raise
+        state["pending_reply_delivery"] = {
+            "phase": phase, "output": result.output, "session_id": result.session_id,
+            "attachments": [str(p) for p in reply_files],
+            "question": pending_question, "question_rounds": question_rounds,
+        }
+        if pending_question is not None:
+            state["pending_question"] = pending_question
+        if question_rounds is not None:
+            state["question_rounds"] = question_rounds
+        save_state(state)
+        _continue_reply_delivery(state)
+        return
     CONTINUATIONS[phase](state, result)
     if state["state"] != "WAIT_REPLY":  # a continuation may itself have re-questioned
         state.pop("return_state", None)
         state.pop("pending_question", None)
+
+
+def _continue_reply_delivery(state: dict) -> None:
+    """Resume only transport/continuation; never regenerate a completed agent reply."""
+    from types import SimpleNamespace
+    pending = state["pending_reply_delivery"]
+    phase = pending["phase"]
+    receipt_id = pending.get("notification_id")
+    if receipt_id:
+        receipt = phase_checkpoint.store().get("delivery_receipt", receipt_id)
+        if not receipt or receipt["status"] != "complete":
+            log.info("reply delivery pending for %s; waiting for transport confirmation", phase)
+            return
+    elif not pending.get("delivered"):
+        state.pop("last_delivery", None)
+        try:
+            label = "exploration reply" if phase == "EXPLORING" else f"reply during {phase}"
+            email(state, label, pending["output"].strip() or "The requested supporting files are attached.",
+                  [Path(p) for p in pending["attachments"]])
+        except Exception as error:
+            # Delivery receipts may already exist even if the send raised.
+            log.warning("reply delivery unavailable for %s; preserving completed answer: %s", phase, error)
+            save_state(state)
+            return
+        delivery = state.get("last_delivery", {})
+        if delivery.get("notification_id"):
+            pending["notification_id"] = delivery["notification_id"]
+        if delivery.get("complete") is False:
+            save_state(state)
+            log.info("reply delivery incomplete for %s; retrying transport only", phase)
+            return
+        pending["delivered"] = True
+        save_state(state)
+    result = SimpleNamespace(session_id=pending["session_id"], output=pending["output"],
+                             attachments=pending["attachments"], question=None, preamble="")
+    CONTINUATIONS[phase](state, result)
+    state.pop("pending_reply_delivery", None)
+    if state["state"] != "WAIT_REPLY":
+        state.pop("return_state", None)
+        state.pop("pending_question", None)
+    save_state(state)
 
 
 def _handle_reply(state: dict, reply: str) -> None:
@@ -5072,7 +5117,12 @@ def _run_loop() -> None:
             with _status_command_lock:
                 handled_command = check_commands(state)
             task_records.apply_contacts(phase_checkpoint.store(), state, config.REPO_PATH)
-            gmail_client.retry_deliveries(state)
+            try:
+                gmail_client.retry_deliveries(state)
+            except Exception:
+                if not state.get("pending_reply_delivery"):
+                    raise
+                log.exception("reply transport retry failed; keeping completed answer pending")
             receipt_id = state.get("last_delivery", {}).get("notification_id")
             if receipt_id:
                 receipt = phase_checkpoint.store().get("delivery_receipt", receipt_id)
@@ -5082,7 +5132,10 @@ def _run_loop() -> None:
                 with _status_command_lock:
                     _receive_feedback(state)
             dispatched_feedback = False
-            if state.get("item") and not handled_command:
+            if state.get("pending_reply_delivery") and not handled_command:
+                _continue_reply_delivery(state)
+                dispatched_feedback = True
+            elif state.get("item") and not handled_command:
                 _work_active.set()
                 try:
                     dispatched_feedback = _dispatch_feedback(state)
