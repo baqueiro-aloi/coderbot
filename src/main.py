@@ -2019,6 +2019,39 @@ def _pr_title(state: dict) -> str:
     return title
 
 
+def _pr_publication(state: dict) -> dict:
+    value = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json",
+                                     "state,headRefName,headRefOid,baseRefName,isCrossRepository"]))
+    branch = state.get("remote_branch") or state["branch"]
+    if (not isinstance(value, dict) or value.get("state") != "OPEN" or
+            value.get("headRefName") != branch or value.get("baseRefName") != config.BASE_BRANCH or
+            value.get("isCrossRepository") is not False or
+            not isinstance(value.get("headRefOid"), str) or
+            not re.fullmatch(r"[0-9a-f]{40}", value["headRefOid"])):
+        raise RuntimeError("PR publication target is not the expected open same-repository branch")
+    return value
+
+
+def _verify_pr_publication(state: dict) -> None:
+    head = git("rev-parse", "HEAD")
+    published = _pr_publication(state)
+    if published["headRefOid"] != head:
+        raise RuntimeError("PR head does not match local HEAD; publication is not confirmed")
+    state["delivered_sha"] = head
+    log.info("PR publication confirmed: %s head=%s", state["pr_url"], head)
+
+
+def _publish_existing_pr(state: dict) -> None:
+    # Validate before publishing: a stale URL must never target another branch,
+    # a fork, closed PR or different base. Push without force preserves remote work.
+    _pr_publication(state)
+    branch = state.get("remote_branch") or state["branch"]
+    _run_checked(["git", "check-ref-format", "refs/heads/" + branch])
+    if git("status", "--porcelain", "--untracked-files=no"):
+        raise RuntimeError("PR publication requires committed tracked changes")
+    git("push", "origin", "HEAD:refs/heads/" + branch)
+
+
 def do_open_pr(state: dict) -> None:
     if not state.get("archive_path"):
         state["verify_round"] = 0
@@ -2050,6 +2083,7 @@ def do_open_pr(state: dict) -> None:
         body += f"\n\nCloses {state['item_url']}"
     if state.get("pr_url"):
         state["pr_url"] = _https_url(state["pr_url"])
+        _publish_existing_pr(state)
     else:
         git("push", "-u", "origin", state["branch"])
         listed = _run_checked([
@@ -2073,6 +2107,7 @@ def do_open_pr(state: dict) -> None:
                 "--title", _pr_title(state), "--body", body,
             ])
             state["pr_url"] = _https_url(output)
+    _verify_pr_publication(state)
     state["pr_summary"] = body
     log.info("PR opened: %s", state["pr_url"])
     trail(state, f"PR opened: {state['pr_url']}", body)

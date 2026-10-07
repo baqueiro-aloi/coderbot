@@ -162,8 +162,9 @@ class ArchitecturalAnalysis(unittest.TestCase):
             def fake_git(*args):
                 return "archived file" if args[0] == "ls-tree" else ""
             with patch.object(main.config, "REPO_PATH", repo), \
-                 patch.object(main, "git", side_effect=fake_git), \
-                 patch.object(main, "trail"), patch.object(main.task_source, "note_pr"), \
+                  patch.object(main, "git", side_effect=fake_git), \
+                  patch.object(main, "_publish_existing_pr"), patch.object(main, "_verify_pr_publication"), \
+                  patch.object(main, "trail"), patch.object(main.task_source, "note_pr"), \
                  patch.object(main, "_notify_architecture",
                               side_effect=lambda *_: order.append("architecture")), \
                  patch.object(main, "_enter_review_wait",

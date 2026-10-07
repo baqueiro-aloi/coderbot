@@ -523,6 +523,10 @@ class ArchivalTests(unittest.TestCase):
 
 class NativePullRequestTests(unittest.TestCase):
     def setUp(self):
+        for helper in ("_publish_existing_pr", "_verify_pr_publication"):
+            patcher = patch.object(main, helper)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
         (self.repo / "openspec/changes/archive/2026-09-01-api-version").mkdir(parents=True)
@@ -647,6 +651,8 @@ class NativePullRequestTests(unittest.TestCase):
         self.assertFalse(any(c.args and c.args[0] == "push" for c in git.call_args_list))
         process.assert_not_called()
         enter_wait.assert_called_once_with(state)
+        main._publish_existing_pr.assert_called_once_with(state)
+        main._verify_pr_publication.assert_called_once_with(state)
 
     def test_open_pr_restart_discovers_existing_pr_before_create(self):
         state = self.state()
