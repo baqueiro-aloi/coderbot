@@ -285,6 +285,73 @@ class QuestionReply(unittest.TestCase):
         self.assertEqual(state["return_state"], "EXPLORING")
         self.assertEqual(state["pending_question"], "and?")
 
+    def test_every_phase_delivers_reply_and_attachment_before_continuation(self):
+        with tempfile.TemporaryDirectory() as root:
+            attachment = pathlib.Path(root) / "comparison.md"
+            attachment.write_text("comparison evidence")
+            for phase in main.CONTINUATIONS:
+                with self.subTest(phase=phase):
+                    state = self.base(phase)
+                    if phase == "REPAIR_CHECKS":
+                        state["check_repair"] = {"attempt": 1, "resume": "E2E", "before": "same", "checks": []}
+                    response = result(output="The failures also occur on main; no gate pass claimed.")
+                    response.attachments = [str(attachment), str(attachment.parent / "missing.md")]
+                    events = []
+                    def send(_state, label, body, files):
+                        self.assertEqual(_state["state"], "WAIT_REPLY")
+                        self.assertIn("no gate pass claimed", body)
+                        self.assertEqual(files, [attachment])
+                        events.append("send")
+                    def advance(_state, _result):
+                        events.append("advance")
+                        _state["state"] = "E2E"
+                    with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                         patch.object(main.agent_runner, "resume", return_value=response), \
+                         patch.object(main, "email", side_effect=send), \
+                         patch.dict(main.CONTINUATIONS, {phase: advance}):
+                        main.do_question_reply(state, "Investigate the failures")
+                    self.assertEqual(events, ["send", "advance"])
+                    self.assertNotIn("pending_question", state)
+
+    def test_failed_or_partial_reply_delivery_preserves_wait_in_e2e(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                state = self.base("E2E") | {"question_rounds": 2}
+                def send(*args):
+                    if partial:
+                        state["last_delivery"] = {"complete": False}
+                    else:
+                        raise RuntimeError("Slack unavailable")
+                continuation = Mock()
+                with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                     patch.object(main.agent_runner, "resume", return_value=result()), \
+                     patch.object(main, "email", side_effect=send), \
+                     patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+                    with self.assertRaises(RuntimeError):
+                        main.do_question_reply(state, "Investigate main")
+                continuation.assert_not_called()
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                self.assertEqual(state["return_state"], "E2E")
+                self.assertEqual(state["pending_question"], "q?")
+                self.assertEqual(state["question_rounds"], 2)
+
+    def test_attachment_only_answer_is_delivered(self):
+        with tempfile.TemporaryDirectory() as root:
+            attachment = pathlib.Path(root) / "comparison.md"
+            attachment.write_text("evidence")
+            state = self.base("E2E")
+            response = result(output="")
+            response.attachments = [str(attachment)]
+            continuation = Mock()
+            with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                 patch.object(main.agent_runner, "resume", return_value=response), \
+                 patch.object(main, "email") as send, \
+                 patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+                main.do_question_reply(state, "Send the comparison")
+            send.assert_called_once_with(state, "reply during E2E",
+                                         "The requested supporting files are attached.", [attachment])
+            continuation.assert_called_once()
+
 
 class ActivityTrail(unittest.TestCase):
     def test_trail_posts_and_stores_a_string_ref(self):

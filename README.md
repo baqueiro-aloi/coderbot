@@ -286,6 +286,23 @@ Implementation/review use focused checks; the deterministic runner owns complete
 final checks and compares identifiable failures against the immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared
 environment. Unknown failures and incomparable baseline environments do not pass.
+The default response to every failed/unknown/infrastructure check is diagnose and
+implement a fix, including inherited failures, not ask the user what to do or repeat
+the same command blindly. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
+declared dependencies in the check's interpreter and fixes approved code/test/runner
+behavior without requiring SSH or manual bot edits. The controller then reruns only
+affected invalidated checks; unaffected valid results remain reusable. Agent prose
+or "ignore it" never overrides the gate. Tracked repairs re-enter verification and
+independent review; environment-only repairs return to the originating check phase.
+Repair context/attempts survive restarts. After bounded failed repairs, the bot gives
+the exact diagnosis and 2-4 actionable choices in Slack/email; choosing to continue
+starts a fresh repair attempt, not another blind run. Product/scope changes or
+unobtainable external prerequisites still require a concrete decision. Legacy final
+check waits recover through the same path when the user replies; `VERIFY` is not
+needed to restart planning or reset state.
+Responses to user questions and their attachments are sent in the same thread in
+every phase before the continuation advances. Failed/partial delivery preserves the
+waiting phase and question rather than dropping the answer behind a progress banner.
 `.codebot/checks.json` can declare project-specific full/focused check plans.
 See [harness contract](docs/harness-contract.md) for preparation, resource locks,
 provider grouping and artifact manifests.
@@ -1026,7 +1043,9 @@ OpenSpec so exploration, review and recovery preserve the same scope. This is a
 scope decision, not a passing result for excluded tests.
 
 Baseline comparisons reuse installed dependencies only when the relevant
-manifests match. Incompatible baseline dependencies remain a diagnosed blocker;
-they are never silently linked or reported as preexisting failures. Controller
+manifests match. If they differ, the controller prepares the immutable baseline's
+own npm lockfile/Python requirements in its disposable worktree; installs are never
+mixed with the feature checkout. Preparation failures include their actual log and
+enter diagnosis/repair rather than being reported as preexisting failures. Controller
 final-task completion commits only its exact checkbox delta, with provenance,
 before archival; unrelated edits remain protected.

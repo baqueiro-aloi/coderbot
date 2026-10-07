@@ -66,7 +66,16 @@ Work in parallel whenever possible — this is a standing instruction for every 
   for every tiny task. Respect the runtime's concurrent-subagent limit.
 """
 
-ENVIRONMENT += PARALLELISM + handoffs.DECISION_INSTRUCTIONS
+ENVIRONMENT += PARALLELISM + handoffs.DECISION_INSTRUCTIONS + """
+Failure policy for every phase: IMPLEMENT A FIX. Diagnose actual logs and repair
+code/tests/runner or execution prerequisites autonomously before asking a human.
+Do not substitute blind retries, ignoring errors or a pass claim for repair.
+Being present on main does not by itself excuse leaving a blocking defect unfixed.
+Ask a human only for a genuinely unresolved product/scope decision, destructive
+choice or external prerequisite you cannot obtain; preserve existing work and
+report the exact cause, attempted repairs and feasible options. Never ask the user
+to modify the bot or SSH/install runtime dependencies you can repair yourself.
+"""
 
 
 # Fence markers for interpolating UNTRUSTED text (raw e2e output, code-review comments,
@@ -566,6 +575,7 @@ Classify the reply's intent. Respond with ONLY a JSON object, no other text:
 # and archives; no phase ever lets the agent do so.
 PHASE_RULES = {
     "RECOVERING": "Repair task-owned code/tests and verify before committing intended paths. Preserve unrelated work; do NOT push or merge.",
+    "REPAIR_CHECKS": "Diagnose actual failing-check logs and implement a fix for code, tests or execution dependencies. Preserve scope/work/history; do NOT push, merge, waive checks or claim a gate pass. The controller verifies after repair.",
     "REPLANNING": "Revise planning artifacts only; preserve legitimate implementation and Git history. Do not implement; do NOT push or merge.",
     "APPLY_FEEDBACK": "Apply localized approved corrections, verify and commit intended paths; do NOT push or merge.",
     "FEEDBACK_QUESTION": "Investigate the user's concrete answer against approved requirements. Preserve work and report material changes for replanning; do NOT push or merge.",

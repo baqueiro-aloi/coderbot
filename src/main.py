@@ -35,6 +35,7 @@ import operations
 import check_plan
 import checks
 import final_checks
+import check_repair
 from execution_identity import snapshot as content_snapshot
 import delivery_checkpoint
 import message_templates
@@ -1375,11 +1376,10 @@ def _verify_requested_checks(state: dict, result) -> bool:
     failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
     if not failed:
         return False
-    detail = json.dumps(failed, ensure_ascii=False)
-    if any(check["status"] in ("unknown", "infrastructure", "interrupted") for check in failed):
-        _verification_blocked(state, "check infrastructure", detail)
-    else:
-        _gate_failed(state, "VERIFYING", "verify_round", "Controller-run focused checks failed", detail)
+    report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
+              if check["status"] in ("unknown", "infrastructure", "interrupted") else "fail",
+              "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
+    _begin_check_repair(state, report, resume="VERIFYING")
     return True
 
 
@@ -1489,8 +1489,9 @@ def _complete_internal_review(state: dict, result) -> None:
     if check_plan.reported(result.output):
         failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
         if failed:
-            _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round",
-                         "Controller-run review checks failed", json.dumps(failed, ensure_ascii=False))
+            report = {"status": "fail", "checks": [dict(check, gate={"status": "fail",
+                      "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
+            _begin_check_repair(state, report, resume="INTERNAL_REVIEW")
             return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
@@ -1539,25 +1540,11 @@ def do_e2e(state: dict) -> None:
         state["final_check_report"] = report
         save_state(state)
         if report["status"] != "pass":
-            if report["status"] == "fail":
-                state["final_repair_round"] = state.get("final_repair_round", 0) + 1
-                if state["final_repair_round"] <= config.QUALITY_GATE_MAX_ROUNDS:
-                    regressions = [{"check": r["check"], "tests": r["gate"]["regressions"],
-                                    "report": r.get("report")} for r in report["checks"]
-                                   if r["gate"]["regressions"]]
-                    result = agent_runner.resume(state["session_id"], prompts.render(prompts.FIX_E2E,
-                        output=json.dumps(regressions, ensure_ascii=False)))
-                    if handle_result(state, result, "E2E"):
-                        return
-                    state["verify_round"] = 0
-                    for key in ("quality_report", "quality_snapshot", "quality_controller_validated",
-                                "internal_review_report", "reviewed_snapshot", "e2e_passed"):
-                        state.pop(key, None)
-                    state["state"] = "VERIFYING"
-                    return
-            _gate_failed(state, "E2E", "final_check_round", "Final checks: " + report["status"],
-                         json.dumps(report, ensure_ascii=False))
+            _begin_check_repair(state, report, resume="E2E")
             return
+        state.pop("check_repair", None)
+        state.pop("final_repair_round", None)
+        state.pop("final_check_round", None)
         state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
             w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
         if state.get("quality_report", {}).get("deferred"):
@@ -1618,6 +1605,90 @@ def do_e2e(state: dict) -> None:
     state["state"] = "ARCHIVING"
     trail(state, "e2e suite passed; archiving the change")
     announce_milestone(state, "archiving", "The e2e suite passed; I'm archiving the OpenSpec change.")
+
+
+def _begin_check_repair(state: dict, report: dict, *, resume: str) -> None:
+    """Every unresolved final result gets diagnosis and repair, not blind retries."""
+    previous = state.get("check_repair", {})
+    attempt = previous.get("attempt", 0) + 1
+    state["check_repair"] = {"attempt": attempt, "resume": resume,
+        "checks": check_repair.unresolved(report), "before": content_snapshot(config.REPO_PATH),
+        "previous": previous.get("findings", ""), "guidance": previous.get("guidance", "")}
+    state["state"] = "REPAIR_CHECKS"
+    save_state(state)
+    if attempt > config.QUALITY_GATE_MAX_ROUNDS:
+        question = (check_repair.summary(report) + "\n\nBounded automatic repair attempts "
+                    "did not produce a controller-verified pass. Last diagnosis:\n"
+                    + (previous.get("findings") or "No successful repair diagnosis was recorded.")
+                    + "\n1. Continue diagnosis and implement a different fix (Recommended)"
+                    "\n2. Provide additional evidence or the missing external prerequisite; include details after ':'"
+                    "\n3. Keep waiting and preserve work; do not waive checks"
+                    "\nReply with the option number; include any new evidence with option 2.")
+        state["pending_question"] = question
+        state["return_state"] = "REPAIR_CHECKS"
+        state["state"] = "WAIT_REPLY"
+        save_state(state)
+        files = [Path(item["report"]) for item in state["check_repair"]["checks"]
+                 if item.get("report") and Path(item["report"]).is_file()]
+        email(state, "final check recovery decision", question, files, visible_question=question)
+        return
+    email(state, "repairing final checks", check_repair.summary(report) +
+          "\nI am diagnosing the logs and implementing a fix. Work is preserved; "
+          "no user action is needed. Unaffected valid checks will be reused.")
+
+
+def do_repair_checks(state: dict) -> None:
+    if not state.get("archive_path") and _scope_drift(state):
+        return
+    context = state.get("check_repair")
+    if not isinstance(context, dict):
+        raise RuntimeError("Final-check repair context is missing")
+    if context["attempt"] > config.QUALITY_GATE_MAX_ROUNDS:
+        _begin_check_repair(state, {"checks": context["checks"]}, resume=context["resume"])
+        return
+    result = agent_runner.resume(state["session_id"], check_repair.prompt(state, context))
+    if handle_result(state, result, "REPAIR_CHECKS"):
+        return
+    # The diagnosis and evidence are part of the conversation, not only logs.
+    email(state, "final check repair findings", result.output.strip() or "Repair turn finished; controller verification is next.",
+          [Path(p) for p in result.attachments if Path(p).is_file()])
+    if state.get("last_delivery", {}).get("complete") is False:
+        raise RuntimeError("Repair findings delivery is incomplete")
+    _complete_check_repair(state, result)
+
+
+def _complete_check_repair(state: dict, result) -> None:
+    context = state["check_repair"]
+    if not state.get("archive_path") and _scope_drift(state):
+        return
+    context["findings"] = result.output.strip()[-5000:]
+    _, status = _tracked_snapshot()
+    if status:
+        # Never push/archive a repair turn with uncommitted tracked changes.
+        context["previous"] = context["findings"] + "\nRepair is incomplete: commit only intended tracked repairs; preserve unrelated work.\n" + status
+        context["attempt"] += 1
+        state["state"] = "REPAIR_CHECKS"
+        save_state(state)
+        return
+    checks.invalidate_environment(phase_checkpoint.store(), config.REPO_PATH,
+                                  [item["check"] for item in context["checks"] if item.get("check")])
+    # A clean Git tree is not an environment repair. Re-execute affected checks
+    # even when only the ignored venv/service state changed, and never trust prose.
+    changed = context["before"] != content_snapshot(config.REPO_PATH)
+    for key in ("e2e_passed", "final_check_report", "final_check_round", "post_review_check_round"):
+        state.pop(key, None)
+    if changed or context["checks"]:
+        for key in ("quality_report", "quality_snapshot", "quality_controller_validated",
+                    "internal_review_report", "reviewed_snapshot"):
+            state.pop(key, None)
+    active = not state.get("archive_path") and (config.REPO_PATH / "openspec/changes" / state["slug"]).is_dir()
+    state["state"] = "VERIFYING" if changed and active else context["resume"]
+    if state["state"] == "VERIFYING":
+        state["verify_round"] = 0
+    if context["resume"] in ("VERIFYING", "INTERNAL_REVIEW"):
+        state.pop("focused_check_results", None)
+    save_state(state)
+    trail(state, "Check repair returned to controller verification", context["findings"])
 
 
 def _commit_final_check_tasks(state: dict) -> None:
@@ -2928,9 +2999,9 @@ def do_push(state: dict) -> None:
         state["final_check_report"] = report
         save_state(state)
         if report["status"] != "pass":
-            _gate_failed(state, "PUSHING", "post_review_check_round",
-                         "Post-review final checks: " + report["status"], json.dumps(report))
+            _begin_check_repair(state, report, resume="PUSHING")
             return
+        state.pop("check_repair", None)
     git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
         if state.get("remote_branch") else state["branch"])
     state["delivered_sha"] = git("rev-parse", "HEAD")
@@ -2986,6 +3057,7 @@ PING_KEYS = ("last_contact", "ping_count", "last_ping_at")
 USER_SIDE_WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"}
 
 _PHASE_ACTIVITY = {
+    "REPAIR_CHECKS": "diagnosing failing checks and implementing repairs before controller verification",
     "RECOVERING": "diagnosing and repairing a task-owned repository condition",
     "REPLANNING": "revising the proposal to incorporate material feedback",
     "APPLY_FEEDBACK": "applying the requested localized corrections",
@@ -3191,6 +3263,7 @@ def _maybe_ping(state: dict) -> None:
 
 PHASES = {
     "RECOVERING": lambda state: do_recover(state),
+    "REPAIR_CHECKS": do_repair_checks,
     "REPLANNING": lambda state: do_replan(state),
     "APPLY_FEEDBACK": lambda state: do_apply_feedback(state),
     "IDLE": do_pick,
@@ -3765,7 +3838,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
               "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready", "pending_decision",
+              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
               "approved_task_inventory", "verified_task_inventory")
@@ -4497,6 +4570,17 @@ def _continue_internal_review(state: dict, result) -> None:
 
 def _continue_e2e(state: dict, result) -> None:
     state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
+    state.pop("final_check_round", None)
+    state.pop("final_repair_round", None)
+    if state.get("check_repair") and config.DETERMINISTIC_CHECKS:
+        _complete_check_repair(state, result)
+        return
+    # Upgrade legacy WAIT_REPLY final-check blockers into repair before rerunning.
+    if config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+        _begin_check_repair(state, state["final_check_report"], resume="E2E")
+        state["check_repair"]["guidance"] = "Prior user-guided investigation:\n" + result.output
+        save_state(state)
+        return
     if "e2e_repair_head" in state and "e2e_repair_status" in state:
         _finish_e2e_repair(state)
     else:
@@ -4543,6 +4627,7 @@ def _continue_apply_pr_feedback(state: dict, result) -> None:
 
 CONTINUATIONS = {
     "RECOVERING": _complete_recovery,
+    "REPAIR_CHECKS": _complete_check_repair,
     "REPLANNING": _continue_replanning,
     "APPLY_FEEDBACK": _complete_local_feedback,
     "FEEDBACK_QUESTION": lambda state, result: state.update(state="VERIFYING"),
@@ -4564,6 +4649,16 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
     """The prompt that resumes the working session with the user's answer. Gate phases
     re-issue their own contract prompt (the answer alone would not make the session emit
     the completion contract again); every other phase gets the answer plus its rules."""
+    if phase == "REPAIR_CHECKS":
+        context = state["check_repair"]
+        context["guidance"] = reply
+        context["attempt"] = 1
+        return check_repair.prompt(state, context)
+    if phase == "E2E" and config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+        state["check_repair"] = {"attempt": 1, "resume": "E2E",
+            "checks": check_repair.unresolved(state["final_check_report"]),
+            "before": content_snapshot(config.REPO_PATH), "guidance": reply}
+        return check_repair.prompt(state, state["check_repair"])
     if phase in ("VERIFYING", "INTERNAL_REVIEW"):
         gate_prompt = _verify_prompt if phase == "VERIFYING" else _internal_review_prompt
         return f"User recovery guidance:\n{reply}\n\n" + gate_prompt(state)
@@ -4646,13 +4741,17 @@ def do_question_reply(state: dict, reply: str) -> None:
     result = agent_runner.resume(state["session_id"], _reply_prompt(state, phase, reply))
     if handle_result(state, result, phase):
         return  # re-questioned (or question cap hit); return_state already updated
-    if phase == "EXPLORING" and result.output.strip():
-        # Exploration normally has no completion email. A WAIT_REPLY detour is
-        # different: this turn answers a person who may have asked for an
-        # explanation. Deliver it before proceeding to the proposal phase.
+    reply_files = [Path(p) for p in result.attachments if Path(p).is_file()]
+    if result.output.strip() or reply_files:
+        # A WAIT_REPLY turn answers a person, regardless of the phase's normal
+        # completion notice. Deliver the answer/evidence before its continuation
+        # can replace it with a progress banner or silently discard attachments.
         try:
-            email(state, "exploration reply", result.output.strip(),
-                  [Path(p) for p in result.attachments if Path(p).exists()])
+            label = "exploration reply" if phase == "EXPLORING" else f"reply during {phase}"
+            email(state, label, result.output.strip() or "The requested supporting files are attached.",
+                  reply_files)
+            if state.get("last_delivery", {}).get("complete") is False:
+                raise RuntimeError("Question reply delivery is incomplete; continuation paused")
         except Exception:
             # handle_result cleared these on success; retain the original
             # question if delivery fails and the FSM retries this reply.

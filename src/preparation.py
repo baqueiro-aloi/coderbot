@@ -13,7 +13,8 @@ def ensure(spec, repo, store, task_id):
         result = operations.run(command, cwd=repo, timeout=spec.get("timeout", 900),
                                 exclusive=["prepare:" + str(repo)])
         if result.returncode:
-            raise RuntimeError("Dependency preparation failed")
+            raise RuntimeError("Dependency preparation failed: " +
+                               (result.stdout + "\n" + result.stderr)[-5000:])
     if not probes or not all(operations.run(p, cwd=repo, timeout=30).returncode == 0 for p in probes):
         raise RuntimeError("Prepared dependencies failed availability probes")
     store.put("operation", task_id=task_id, status="prepared", identity=identity, data={"preparation": spec})

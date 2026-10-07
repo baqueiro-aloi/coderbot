@@ -238,7 +238,7 @@ class TaskPhaseTests(unittest.TestCase):
             verdict = SimpleNamespace(output='{"action":"answer"}')
             with patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main.agent_runner, "run", return_value=verdict), \
-                 patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done")), \
+                 patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[])), \
                  patch.object(main, "handle_result", return_value=False), \
                  patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "trail"):
                 main.do_question_reply(state, "continue")
@@ -253,8 +253,9 @@ class TaskPhaseTests(unittest.TestCase):
         verdict = SimpleNamespace(output='{"action":"resume_implementation"}')
         continuation = Mock()
         with patch.object(main.agent_runner, "run", return_value=verdict), \
-             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done")), \
+             patch.object(main.agent_runner, "resume", return_value=SimpleNamespace(output="done", attachments=[])), \
              patch.object(main, "_verify_prompt", return_value="verification rules"), \
+             patch.object(main, "email"), \
              patch.object(main, "handle_result", return_value=False), patch.object(main, "trail"), \
              patch.dict(main.CONTINUATIONS, {"VERIFYING": continuation}):
             main.do_question_reply(state, "Reconcile the evidence")
@@ -269,10 +270,11 @@ class TaskPhaseTests(unittest.TestCase):
         output += 'QUALITY_GATE: {"status":"pass","commands":["focused: pass"],"openspec":"pass","tasks":"1/1"}'
         with patch.object(main, "_verify_preflight", return_value=False), \
              patch.object(main, "handle_result", return_value=False), patch.object(main, "save_state"), \
-             patch.object(main, "email"), patch.object(main, "_run_checked") as commands:
+             patch.object(main, "email"), patch.object(main, "content_snapshot", return_value="same"), \
+             patch.object(main, "_run_checked") as commands:
             main._complete_verify(state, SimpleNamespace(output=output))
-        self.assertEqual(state["state"], "WAIT_REPLY")
-        self.assertEqual(state["verification_blocker"]["kind"], "check infrastructure")
+        self.assertEqual(state["state"], "REPAIR_CHECKS")
+        self.assertEqual(state["check_repair"]["resume"], "VERIFYING")
         self.assertNotIn("quality_report", state)
         commands.assert_not_called()
 
@@ -487,6 +489,7 @@ class TaskPhaseTests(unittest.TestCase):
             with patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main.config, "DETERMINISTIC_CHECKS", True), patch.object(main, "save_state"), \
                  patch.object(main, "announce_milestone"), \
+                 patch.object(main, "email"), \
                  patch.object(main, "_gate_failed"), \
                  patch.object(main.final_checks, "run", return_value={"status": "indeterminate", "checks": []}):
                 main.do_e2e(state)

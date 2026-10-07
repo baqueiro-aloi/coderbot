@@ -321,6 +321,7 @@ class LifecycleGateTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume",
                           return_value=result("still malformed")) as resume, \
+             patch.object(main, "email"), \
              patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3, create=True):
             main._handle_reply(state, "please rerun the checks")
 
@@ -405,6 +406,7 @@ class LifecycleGateTests(unittest.TestCase):
         state = self.base_state(
             state="WAIT_REPLY", return_state="E2E", e2e_round=6)
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main, "email"), \
              patch.object(main.agent_runner, "resume", return_value=result("try again")):
             main._handle_reply(state, "service is back")
 

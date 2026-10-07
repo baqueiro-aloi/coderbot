@@ -71,22 +71,28 @@ class VerifyPrRepairTests(unittest.TestCase):
         with patch.object(main, '_scope_drift', return_value=False), \
              patch.object(main, '_transcript_append'), patch.object(main.phase_checkpoint, 'store') as store, \
              patch.object(main.checks, 'execute_plan', return_value=[{'status': 'fail'}]), \
-             patch.object(main, '_gate_failed') as reject:
+             patch.object(main, '_begin_check_repair') as reject:
             main._complete_internal_review(state, result)
         reject.assert_called_once()
         self.assertNotIn('internal_review_report', state)
         self.assertEqual(state['state'], 'INTERNAL_REVIEW')
 
     def test_final_repair_invalidates_old_gates_and_reenters_verify(self):
-        state = {'state': 'E2E', 'session_id': 'session', 'quality_report': {'status': 'pass'},
+        state = {'state': 'E2E', 'session_id': 'session', 'slug': 'feature', 'item': 'task', 'quality_report': {'status': 'pass'},
                  'internal_review_report': {'status': 'pass'}, 'quality_controller_validated': True}
         report = {'status': 'fail', 'checks': [{'check': 'unit', 'gate': {'regressions': ['t']}}]}
         with patch.object(config, 'DETERMINISTIC_CHECKS', True), \
              patch.object(main, '_scope_drift', return_value=False), patch.object(main, 'save_state'), \
              patch.object(main.final_checks, 'run', return_value=report), \
+             patch.object(main, 'email'), patch.object(main, 'trail'), \
+             patch.object(main, 'content_snapshot', side_effect=['before', 'after']), \
+             patch.object(main, '_tracked_snapshot', return_value=('head', '')), \
+             patch.object(main.phase_checkpoint, 'store'), patch.object(main.checks, 'invalidate_environment'), \
              patch.object(main.agent_runner, 'resume'), patch.object(main, 'handle_result', return_value=False):
             main.do_e2e(state)
-        self.assertEqual(state['state'], 'VERIFYING')
+            self.assertEqual(state['state'], 'REPAIR_CHECKS')
+            main._complete_check_repair(state, Mock(output='fixed'))
+        self.assertIn(state['state'], ('VERIFYING', 'E2E'))
         self.assertNotIn('quality_report', state)
         self.assertNotIn('internal_review_report', state)
 

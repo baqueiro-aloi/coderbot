@@ -74,6 +74,48 @@ class BaselineTests(unittest.TestCase):
         changed = {"status": "fail", "failures": {"test": "AssertionError: expected 3"}}
         self.assertEqual(compare(changed, base)["regressions"], ["test"])
         self.assertEqual(compare(base, {"status": "infrastructure"})["status"], "indeterminate")
+
+    def test_differing_baseline_requirements_prepare_separate_interpreter(self):
+        from check_plan import Check
+        from execution_store import ExecutionStore
+        from unittest.mock import patch, Mock
+        with tempfile.TemporaryDirectory() as root:
+            scratch = Path(root) / "baseline/backend"
+            scratch.mkdir(parents=True)
+            (scratch / "requirements.txt").write_text("pytz==2026.1\n")
+            store = ExecutionStore(Path(root) / "data/db")
+            check = Check("unit", ["/feature/backend/.venv/bin/python", "-m", "unittest"], cwd="backend")
+            with patch("check_baseline.worktree") as work, \
+                 patch("checks.tool_versions", return_value={}), \
+                 patch("check_baseline.dependency_snapshot", side_effect=["feature", "base"]), \
+                 patch("check_baseline.operations.run", return_value=Mock(returncode=0, stdout="installed", stderr="")) as install, \
+                 patch("check_baseline.execute", return_value={"status": "pass", "failures": {}}) as run:
+                work.return_value.__enter__.return_value = scratch.parent
+                result = baseline_result(check, "/feature", "a" * 40, store)
+            self.assertEqual(result["status"], "pass")
+            self.assertEqual(install.call_count, 2)
+            self.assertEqual(run.call_args.args[0].argv[0], str(scratch / ".venv/bin/python"))
+            self.assertIn("requirements.txt", install.call_args.args[0])
+
+    def test_baseline_install_failure_has_diagnostic_not_false_preexisting_result(self):
+        from check_plan import Check
+        from execution_store import ExecutionStore
+        from unittest.mock import patch, Mock
+        with tempfile.TemporaryDirectory() as root:
+            scratch = Path(root) / "baseline/frontend"
+            scratch.mkdir(parents=True)
+            (scratch / "package-lock.json").write_text("{}")
+            store = ExecutionStore(Path(root) / "data/db")
+            with patch("check_baseline.worktree") as work, \
+                 patch("checks.tool_versions", return_value={}), \
+                 patch("check_baseline.dependency_snapshot", side_effect=["feature", "base"]), \
+                 patch("check_baseline.operations.run", return_value=Mock(returncode=1, stdout="", stderr="registry unavailable")), \
+                 patch("check_baseline.execute") as run:
+                work.return_value.__enter__.return_value = scratch.parent
+                result = baseline_result(Check("lint", ["npm", "run", "lint"], cwd="frontend"), root, "a" * 40, store)
+            self.assertEqual(result["status"], "infrastructure")
+            self.assertIn("registry unavailable", Path(result["report"]).read_text())
+            run.assert_not_called()
     def test_worktree_is_pinned_and_removed_after_failure(self):
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root) / "repo"

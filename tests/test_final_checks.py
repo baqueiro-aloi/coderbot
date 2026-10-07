@@ -19,7 +19,8 @@ class FinalCheckTests(unittest.TestCase):
                  "push_context": {"continuation": "threads", "output": "RESOLVE: x"}}
         with patch.object(main.config, "DETERMINISTIC_CHECKS", True), \
              patch.object(main.final_checks, "run", return_value={"status": "indeterminate", "checks": []}), \
-             patch.object(main, "save_state"), patch.object(main, "_gate_failed"), \
+             patch.object(main, "save_state"), patch.object(main, "email"), \
+             patch.object(main, "content_snapshot", return_value="same"), \
              patch.object(main, "git") as git:
             main.do_push(state)
         git.assert_not_called()
@@ -34,7 +35,7 @@ class FinalCheckTests(unittest.TestCase):
                 report = final_checks.run({"base_sha": "a" * 40}, root, store)
             self.assertEqual(report["status"], "fail")
             self.assertEqual(report["checks"][0]["gate"]["regressions"], ["new"])
-    def test_eighteen_preexisting_failures_pass_without_repair(self):
+    def test_preexisting_failures_are_attributed_but_still_repaired(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
             failed = {"status": "fail", "failures": {f"test_{i}": "AssertionError: baseline" for i in range(18)}}
@@ -42,7 +43,7 @@ class FinalCheckTests(unittest.TestCase):
                  patch("final_checks.checks.execute_plan", return_value=[failed]), \
                  patch("final_checks.baseline_result", return_value=failed):
                 report = final_checks.run({"branch": "b", "base_sha": "a" * 40}, root, store)
-            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["status"], "fail")
             self.assertEqual(len(report["checks"][0]["gate"]["preexisting"]), 18)
     def test_without_harness_still_executes_complete_unit_suite(self):
         with tempfile.TemporaryDirectory() as root:

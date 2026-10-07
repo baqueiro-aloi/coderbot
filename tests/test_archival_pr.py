@@ -326,6 +326,7 @@ class ArchivalTests(unittest.TestCase):
                      question=None, attachments=[])
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
+             patch.object(main, "email"), \
              patch.object(main, "_reset_to_base_branch") as reset:
             main._handle_reply(state, "fix the malformed requirement")
 
@@ -930,6 +931,7 @@ class PushPhaseTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+             patch.object(main, "email"), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "use the safe option")
 
@@ -948,6 +950,7 @@ class PushPhaseTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+             patch.object(main, "email"), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "apply it")
 

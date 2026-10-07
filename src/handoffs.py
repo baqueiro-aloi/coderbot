@@ -102,7 +102,9 @@ def decision(state, phase, question=None):
         choices = re.findall(r"^\s*[1-4][.)]\s+(.+)$", question, re.MULTILINE)
         if len(choices) in (2, 3, 4):
             binary = len(choices) == 2 and bool(re.match(r"(?i)(yes|sí|si)\b", choices[0])) and bool(re.match(r"(?i)no\b", choices[1]))
-            options = [_option(label, label, wait=bool(re.match(r"(?i)(?:no\b|keep waiting\b|wait\b|mantener.*pausa|esperar\b)", label))) for label in choices]
+            options = [_option(label, label,
+                wait=bool(re.match(r"(?i)(?:no\b|keep waiting\b|wait\b|mantener.*pausa|esperar\b)", label)),
+                details=bool(re.search(r"(?i)include details|provide details|incluye detalles|indica.*detalles", label))) for label in choices]
             if binary:
                 options[1] = no
             title = question

@@ -15,6 +15,21 @@ from execution_identity import digest, environment_identity, snapshot
 log = logging.getLogger(__name__)
 
 
+def environment_revision(store, repo, check_id):
+    rows = store.list("check_environment", "environment:" + str(Path(repo).resolve()), identity=check_id)
+    return rows[0]["data"]["revision"] if rows else 0
+
+
+def invalidate_environment(store, repo, check_ids):
+    """A runtime repair invalidates only affected results, including baseline cache."""
+    task_id = "environment:" + str(Path(repo).resolve())
+    for check_id in set(check_ids):
+        rows = store.list("check_environment", task_id, identity=check_id)
+        store.put("check_environment", task_id=task_id, identity=check_id,
+                  id=rows[0]["id"] if rows else None,
+                  data={"revision": environment_revision(store, repo, check_id) + 1})
+
+
 def execute_plan(plan, repo, store, task_id, *, workers=3):
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
@@ -25,17 +40,22 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
 
 def execute(check, repo, store, task_id, *, reuse=True):
     repo = Path(repo).resolve()
+    preparation_error = None
     if check.preparation:
-        preparation.ensure(check.preparation, repo, store, task_id)
+        try:
+            preparation.ensure(check.preparation, repo, store, task_id)
+        except (RuntimeError, OSError, TimeoutError, subprocess.TimeoutExpired) as error:
+            preparation_error = error
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
-        tools=tool_versions(check.argv, cwd), key_path=store.path.parent / "identity.key")
+        tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id)},
+        key_path=store.path.parent / "identity.key")
     from check_baseline import dependency_snapshot, dependency_inputs
     dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(),
                        "dependencies": dependencies, "version": 2})
-    previous = store.reusable_check(task_id, identity) if reuse else None
+    previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
         log.info("check reused: %s status=%s report=%s", check.id,
                  previous["data"]["result"]["status"], previous["data"]["result"].get("report"))
@@ -56,6 +76,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, data={"check": check.id})
     log.info("check started: %s cwd=%s timeout=%ss reason=%s", check.id, cwd, check.timeout, reason)
     try:
+        if preparation_error:
+            raise OSError("Check preparation failed: " + str(preparation_error))
         process = operations.run(check.argv, cwd=cwd, timeout=check.timeout,
                                  exclusive=check.resources)
         output = process.stdout + "\n" + process.stderr
