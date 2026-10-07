@@ -261,6 +261,10 @@ and preserve the work, not abort or complete the task. Approval and merge gates
 still apply; Yes alone never authorizes a merge in a multi-option PR decision.
 Supporting reports do not replace the visible question and options. Reminders
 repeat the same active decision instead of truncating its choices.
+Each input handoff shows one question with each numbered alternative on its own
+line. Inline agent options are normalized without adding a second generic menu;
+open questions accept full-text answers. The agent asks one decision and waits
+for its answer before continuing.
 
 Changing checkmarks is allowed; adding, removing or changing tasks is a scope
 decision, not automatic permission for another implementation cycle. Tasks tagged

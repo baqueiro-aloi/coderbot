@@ -86,3 +86,13 @@ passed. Live rollout and provider smoke checks are documented, not executed.
 Regression verification (2026-10-07): 33 focused tests passed; final
 `venv/bin/python -m unittest discover -s tests -t .` completed with 804 tests,
 OK (1 skipped). Strict validation passed. No live rollout or task-state repair executed.
+
+## 11. Single decision handoffs
+
+- [x] 11.1 Normalize inline and multiline real options into separate lines, preserve their task-bound meaning, and avoid generic menus for supplied concrete/open questions.
+- [x] 11.2 Render the actionable question once while preserving useful context and attachments; instruct agents to ask one decision then stop and wait.
+- [x] 11.3 Cover the duplicated OpenSpec authorization in Email and Slack, inline options, open questions and technical payload preservation; run full regression tests and strict validation.
+
+Verification (2026-10-07): `venv/bin/python -m unittest discover -s tests -t .`
+completed with 807 tests, OK (1 skipped). Strict OpenSpec validation and
+`git diff --check` passed. No live rollout or state changes executed.

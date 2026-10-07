@@ -34,6 +34,15 @@ Messages requiring approval, an answer or a PR decision SHALL begin with the con
 - **WHEN** a reply starts with an approval or merge option number but requests changes or says not to merge yet
 - **THEN** codebot classifies the complete reply with the displayed choices and does not automatically approve or merge
 
+#### Scenario: One decision with inline alternatives
+- **WHEN** an agent supplies a question with alternatives in a single paragraph or repeated in its summary
+- **THEN** codebot displays the question once, renders each real numbered option on its own line, and does not add an answer/explain/wait menu
+- **AND** the active pending decision binds to those displayed alternatives and the bot waits for the answer before continuing
+
+#### Scenario: Open question without options
+- **WHEN** an agent asks a concrete open-ended question without numbered alternatives
+- **THEN** codebot requests a full-text answer without inventing a second multiple-choice decision
+
 #### Scenario: Reviewing a proposal
 - **WHEN** codebot requests proposal approval
 - **THEN** it starts with the approval decision and revised scope when applicable, and identifies the attached complete package

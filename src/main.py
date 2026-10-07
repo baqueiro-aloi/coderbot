@@ -190,6 +190,8 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
     decision_text = "" if milestone and " · " in body else handoffs.remember_decision(state, phase, visible_question)
     if decision_text:
+        if visible_question and state.get("pending_decision", {}).get("agent_question"):
+            body = handoffs.without_question(body, visible_question)
         body = f"{decision_text}\n\n{body}"
     elif card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
         body = f"{card}\n\n{body}"
@@ -202,7 +204,7 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
         body = conversation_body or "Technical results are in the attached report."
         # Length is not a reason to hide conversational text. Slack handles its
         # own message limits; email keeps a full plain-text/HTML body.
-        if visible_question and visible_question not in body:
+        if visible_question and not decision_text and visible_question not in body:
             question_body, _ = message_content.split(visible_question)
             if question_body and question_body not in body:
                 body += "\n\n" + question_body

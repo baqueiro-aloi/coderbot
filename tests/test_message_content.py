@@ -110,4 +110,5 @@ class ConversationContentTests(unittest.TestCase):
                  patch.object(main.gmail_client, 'deliver', return_value={'thread_id': 'C:1'}) as deliver:
                 main.email(state, 'Verification blocked', '{"status":"infrastructure"}', visible_question=question)
             self.assertIn(question, deliver.call_args.args[2])
+            self.assertNotIn('How should we resolve', deliver.call_args.args[2])
             self.assertNotIn('"status"', deliver.call_args.args[2])

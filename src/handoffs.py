@@ -21,6 +21,10 @@ needs missing data must explicitly request it, never invent it. Ask only for a r
 human decision, not permission to run already authorized tools. These rules apply
 in every phase and in both email and Slack. A choice grants only the named action;
 never infer new scope, whole-task completion, push or merge beyond that action.
+Ask exactly one decision per turn, then stop and wait for its answer. Put each
+numbered option on its own line. Do not repeat the question or offer a second,
+generic menu such as answer/explain/wait. Keep background context separate from
+the single actionable question.
 """
 
 
@@ -28,9 +32,31 @@ def _option(label, reply, *, wait=False, details=False):
     return {"label": label, "reply": reply, "wait": wait, "details": details}
 
 
+def _question_parts(question):
+    """Parse a consecutive option list, including legacy inline agent output."""
+    markers = list(re.finditer(r"(?<!\S)([1-4])[.)]\s+", question))
+    if not 2 <= len(markers) <= 4 or [int(m[1]) for m in markers] != list(range(1, len(markers) + 1)):
+        return question.strip(), []
+    labels = [" ".join(question[m.end():markers[i + 1].start() if i + 1 < len(markers) else len(question)].split())
+              for i, m in enumerate(markers)]
+    if not all(labels):
+        return question.strip(), []
+    return question[:markers[0].start()].strip(), labels
+
+
+def without_question(body, question):
+    """Remove repeated copies of this question only, preserving other context."""
+    pattern = r"\s+".join(re.escape(word) for word in question.split())
+    return re.sub(pattern, "", body).strip() if pattern else body
+
+
 def decision(state, phase, question=None):
     """Controller choices use existing FSM operations, never invent new commands."""
     name = phase.lower()
+    if question and not name.startswith("question during "):
+        # A concrete supplied question is the decision, not a prompt to add a
+        # second controller menu based on the notification's subject.
+        return decision(state, "question during " + str(state.get("state", "")), question)
     stage = state.get("state")
     target, binary = "WAIT_REPLY", False
     no = _option("No — preserve the work and keep waiting", "", wait=True)
@@ -101,21 +127,17 @@ def decision(state, phase, question=None):
     elif question:
         # Working agents supply meaningful domain choices in readable prose. Bind
         # the displayed labels, not an arbitrary utility-generated action/command.
-        choices = re.findall(r"^\s*[1-4][.)]\s+(.+)$", question, re.MULTILINE)
+        title, choices = _question_parts(question)
         if len(choices) in (2, 3, 4):
             binary = len(choices) == 2 and bool(re.match(r"(?i)(yes|sí|si)\b", choices[0])) and bool(re.match(r"(?i)no\b", choices[1]))
             options = [_option(label, label,
                 wait=bool(re.match(r"(?i)(?:no\b|keep waiting\b|wait\b|mantener.*pausa|esperar\b)", label)),
                 details=bool(re.search(r"(?i)include details|provide details|incluye detalles|indica.*detalles", label))) for label in choices]
-            if binary:
-                options[1] = no
-            title = question
             return {"question": title, "options": options, "binary": binary,
-                    "wait_state": target, "provided_choices": True}
-        title = question
-        options = [_option("Answer the question; include the requested information (Recommended)", "My answer is:", details=True),
-                   _option("Explain the alternatives and their consequences", "Clarify the question with concrete alternatives and their consequences."),
-                   _option("Keep waiting and preserve the work", "", wait=True)]
+                    "wait_state": target, "provided_choices": True, "agent_question": True}
+        # An open question needs a free-text answer, not a competing controller menu.
+        return {"question": title, "options": [], "binary": False,
+                "wait_state": target, "provided_choices": False, "agent_question": True}
     else:
         return None
     return {"question": title, "options": options, "binary": binary, "wait_state": target}
@@ -123,10 +145,10 @@ def decision(state, phase, question=None):
 
 def render_decision(value):
     lines = ["Decision needed: " + value["question"]]
-    if not value.get("provided_choices"):
-        lines += [f"{n}. {option['label']}" for n, option in enumerate(value["options"], 1)]
-    lines.append("Reply Yes/No or 1/2. You may also describe requested changes." if value["binary"] else
-                 "Reply with the option number; include details if requested. You may also write your own answer.")
+    lines += [f"{n}. {option['label']}" for n, option in enumerate(value["options"], 1)]
+    lines.append("Reply Yes/No or 1/2; you may also describe requested changes." if value["binary"] else
+                 "Reply with the option number; include details if requested. You may also write your own answer."
+                 if value["options"] else "Reply in full text with the requested information.")
     return "\n".join(lines)
 
 

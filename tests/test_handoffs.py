@@ -66,8 +66,61 @@ class HumanHandoffs(unittest.TestCase):
         self.assertIn("Separate DB", handoffs.selected_reply(state, "1")["reply"])
         self.assertTrue(handoffs.selected_reply(state, "3")["wait"])
         fallback = handoffs.remember_decision(state, "question during IMPLEMENTING", "Which customer owns the data?")
-        self.assertIn("include the requested information", fallback)
+        self.assertIn("Which customer owns the data?", fallback)
+        self.assertNotIn("Answer the question", fallback)
         self.assertIn("error", handoffs.selected_reply(state, "1"))
+
+    def test_inline_options_are_real_choices_on_separate_lines(self):
+        for question in (
+                "¿Autorizas crear el cambio? Responde Sí/No. 1. Sí: crear solo planificación. 2. No: conservar el trabajo.",
+                "Which policy? 1. Native async logging 2. Durable queue 3. Keep waiting",
+                "Which policy?\n1. Native async logging\n   with optional PostgreSQL\n2. Durable queue\n3. Keep waiting"):
+            with self.subTest(question=question):
+                state = {"state": "REPLANNING", "slug": "task"}
+                card = handoffs.remember_decision(state, "question during REPLANNING", question)
+                self.assertRegex(card, r"\n1\. ")
+                self.assertRegex(card, r"\n2\. ")
+                self.assertNotIn("Answer the question", card)
+                self.assertNotIn("Explain the alternatives", card)
+                self.assertEqual(card.count("1. "), 1)
+                self.assertEqual(card.count("2. "), 1)
+                state.update(state="WAIT_REPLY", return_state="REPLANNING")
+                self.assertNotIn("error", handoffs.selected_reply(state, "1"))
+        self.assertTrue(state["pending_decision"]["provided_choices"])
+
+    def test_one_question_and_one_option_set_in_both_channels(self):
+        question = ("¿Autorizas crear el cambio OpenSpec ausente mediante el CLI? Responde Sí/No. "
+                    "1. Sí: crear únicamente la planificación, sin implementar. "
+                    "2. No: mantener el trabajo pausado.")
+        for channel in ("email", "slack"):
+            with self.subTest(channel=channel):
+                state = {"state": "REPLANNING", "slug": "task", "item": "task"}
+                result = SimpleNamespace(session_id="session", output=question, question=question,
+                    preamble="Contexto útil.\n\n" + question, attachments=[])
+                with patch.object(main.config, "COMM_CHANNEL", channel), \
+                     patch.object(main.diagnostics, "report", return_value=Path("details.txt")), \
+                     patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread"}) as deliver, \
+                     patch.object(main.gmail_client, "send", return_value="thread") as send, \
+                     patch.object(main, "trail"), patch.object(main, "_note_contact"), \
+                     patch.object(main, "_transcript_append"), patch.object(main, "_transcript_note"):
+                    self.assertTrue(main.handle_result(state, result, "REPLANNING"))
+                body = deliver.call_args.args[2] if deliver.called else send.call_args.args[1]
+                self.assertEqual(body.count("¿Autorizas"), 1)
+                self.assertEqual(body.count("1. Sí:"), 1)
+                self.assertEqual(body.count("2. No:"), 1)
+                self.assertRegex(body, r"\n1\. Sí:")
+                self.assertRegex(body, r"\n2\. No:")
+                self.assertIn("Contexto útil", body)
+                self.assertNotIn("Answer the question", body)
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                self.assertEqual(state["return_state"], "REPLANNING")
+
+    def test_agent_contract_requires_one_decision_then_wait(self):
+        from claude_runner import SENTINEL_CONTRACT
+        self.assertIn("exactly one self-contained question", SENTINEL_CONTRACT)
+        self.assertIn("own following line", SENTINEL_CONTRACT)
+        self.assertIn("wait for that answer", SENTINEL_CONTRACT)
+        self.assertIn("Do not repeat", SENTINEL_CONTRACT)
 
     def test_selection_routes_to_existing_handler_without_feedback_investigation(self):
         state = {"state": "WAIT_REPLY", "return_state": "VERIFYING", "slug": "task",

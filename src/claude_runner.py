@@ -42,9 +42,10 @@ SENTINEL_CONTRACT = f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`
-followed by the full question and all context needed to answer it through the
-configured conversation channel,
-then stop working. Otherwise finish the work and summarize what you did.
+followed by exactly one self-contained question. Put each numbered option on its
+own following line, then stop working and wait for that answer. Do not repeat the
+question in your preceding summary or ask another decision in the same turn.
+Otherwise finish the work and summarize what you did.
 Make the question self-contained: explain the decision, available options and
 important consequences in plain language. Do not emit only 'answer the attached
 question' or put the actionable request solely in an attachment.
