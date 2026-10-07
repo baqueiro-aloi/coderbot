@@ -189,10 +189,15 @@ is below.
 """ + fenced("user reply", "$reply") + """
 
 Classify their intent. Respond with ONLY a JSON object, no other text:
-{"action": "approve" | "changes" | "complete" | "abort" | "unclear", "feedback": "<the requested changes, empty otherwise>"}
+{"action": "approve" | "changes" | "wait" | "complete" | "abort" | "unclear", "feedback": "<the requested changes, empty otherwise>"}
 
 - "approve" ONLY when the reply is a clear, explicit go-ahead to implement the proposal as-is.
 - "changes" when they request any modification; put the substance in "feedback".
+- "wait" when they ask to keep waiting, defer approval, or say not to implement
+  until approval without requesting substantive proposal changes. Existing approval
+  boundaries are controller state, not missing requirements to add to artifacts.
+  Do not classify 'no implementes hasta mi aprobación' as a proposal revision.
+  If they also request actual scope/design changes, use "changes" instead.
 - "complete" ONLY when the reply explicitly says the task should be marked done with no
   further work (e.g. "this is already implemented, mark it complete and move on").
 - "abort" ONLY when the reply explicitly tells codebot to stop or abandon the task

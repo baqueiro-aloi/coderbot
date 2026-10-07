@@ -1041,19 +1041,21 @@ def _send_proposal_review(state: dict, output: str, note: str = "", *,
         return
     key = proposal_package.fingerprint(files)
     feedback_key = f"{revised}:{feedback}:{key}"
-    if state.get("proposal_sent_key") == feedback_key:
+    if state.get("proposal_sent_key") == feedback_key or state.get("reviewed_proposal") == key:
         state["state"] = "WAIT_APPROVAL"
         return
-    summary = output.strip()
+    summary = ""
     if state.get("replan", {}).get("original_archive"):
         summary = (f"Complementary revision of {state['replan']['original_archive']}. "
-                   "Existing implementation and PR are retained.\n" + summary)
-    digest = f"What changed since your last review:\n{proposal_package.changes(snapshot, files)}\n\n" if revised else ""
-    body = ("Decision needed: approve this proposal to begin implementation, or reply "
-            "with the changes you want. The complete OpenSpec change is attached.\n\n"
-            f"Task: {state['item']}\n\n{digest}{summary}\n\n"
-            + (f"{note}\n\n" if note else "")
-            + "Reply with your approval or requested changes.")
+                    "Existing implementation and PR are retained.\n")
+    changes = proposal_package.changes(snapshot, files).splitlines() if revised else []
+    digest = ("What changed since your last review:\n" + "\n".join(line[:180] for line in changes[:3])
+              + ("\nFurther changes are in the attached proposal." if len(changes) > 3 else "")
+              + "\n\n") if revised else ""
+    body = ("The complete OpenSpec proposal is attached; implementation remains paused.\n"
+            f"Task: {state['item']}\n\n{digest}{summary}"
+            + (f"{note[:300]}\n" if note else "")
+            )
     email(state, "revised proposal" if revised else "proposal for review", body, [bundle],
           milestone="approval")
     if state.get("last_delivery", {}).get("complete") is False:
@@ -1079,6 +1081,9 @@ def do_approval_reply(state: dict, reply: str) -> None:
                          contract=False).output))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
+    if action == "wait":
+        email(state, "approval deferred", "Work is preserved. Implementation remains paused until your explicit approval.")
+        return
     if action not in ("approve", "changes", "abort", "complete"):
         email(state, "clarification needed",
               f"I could not tell whether your reply approves the proposal, requests "
@@ -3278,7 +3283,10 @@ def _ping_body(state: dict, now: float, count: int) -> str:
     spanish = state.get("task_language", "English").casefold() == "spanish"
     if state.get("pending_reply_delivery"):
         return ("La respuesta está preparada; estoy reintentando solo la entrega de archivos. No necesito una decisión ni volveré a ejecutar al agente."
-                if spanish else "The reply is ready; I am retrying file delivery only. No decision is needed and the agent will not run again.")
+                 if spanish else "The reply is ready; I am retrying file delivery only. No decision is needed and the agent will not run again.")
+    if state["state"] == "WAIT_APPROVAL":
+        return ("Aprobación pendiente: revisa la propuesta ya enviada y responde con aprobación o cambios. La implementación sigue pausada."
+                if spanish else "Approval pending: review the proposal already sent and reply with approval or changes. Implementation remains paused.")
     decision = state.get("pending_decision")
     if isinstance(decision, dict) and decision.get("wait_state") == state["state"]:
         return handoffs.render_decision(decision)

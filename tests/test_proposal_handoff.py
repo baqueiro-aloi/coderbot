@@ -57,6 +57,51 @@ class ProposalHandoff(unittest.TestCase):
         send.assert_not_called()
         self.assertIn("complete OpenSpec review package", stuck.call_args.args[2])
 
+    def test_same_package_is_not_resent_for_different_feedback_or_revision_flag(self):
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main.config, "DATA_DIR", self.root / "data"), \
+             patch.object(main, "save_state"), patch.object(main, "email") as send:
+            main._send_proposal_review(self.state, "First summary")
+            send.reset_mock()
+            main._send_proposal_review(self.state, "Different narration", revised=True,
+                                       feedback="No implementes hasta mi aprobación")
+            send.assert_not_called()
+            self.assertEqual(self.state["state"], "WAIT_APPROVAL")
+
+    def test_proposal_notice_does_not_dump_agent_narration(self):
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main.config, "DATA_DIR", self.root / "data"), \
+             patch.object(main, "save_state"), patch.object(main, "email") as send:
+            main._send_proposal_review(self.state, "Verbose agent narration\n" * 300)
+            body = send.call_args.args[2]
+            self.assertNotIn("Verbose agent narration", body)
+            self.assertNotIn("Decision needed:", body)
+            self.assertLess(len(body), 1000)
+            self.assertLessEqual(len(body.splitlines()), 10)
+
+    def test_wait_instruction_does_not_revise_or_resend_proposal(self):
+        self.state.update(state="WAIT_APPROVAL", session_id="sid")
+        with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"wait"}')), \
+             patch.object(main.agent_runner, "resume") as resume, \
+             patch.object(main, "_send_proposal_review") as send, \
+             patch.object(main, "email") as notify:
+            main.do_approval_reply(self.state, "No implementes hasta mi aprobación; sigue esperando")
+        resume.assert_not_called()
+        send.assert_not_called()
+        self.assertEqual(self.state["state"], "WAIT_APPROVAL")
+        self.assertLess(len(notify.call_args.args[2]), 250)
+
+    def test_approval_reminder_is_short_even_with_full_pending_decision(self):
+        state = dict(self.state, state="WAIT_APPROVAL", task_language="Spanish",
+                     pending_decision={"wait_state": "WAIT_APPROVAL", "question": "Long proposal " * 500})
+        body = main._ping_body(state, 0, 1)
+        self.assertLess(len(body), 250)
+        self.assertNotIn("Long proposal", body)
+
+    def test_wait_classifier_contract_does_not_turn_deferral_into_revision(self):
+        self.assertIn('"wait"', main.prompts.CLASSIFY_APPROVAL_REPLY)
+        self.assertIn("no implementes hasta mi aprobación", main.prompts.CLASSIFY_APPROVAL_REPLY)
+
     def test_direct_and_question_continuation_use_same_sender(self):
         result = SimpleNamespace(output="Summary", session_id="sid", question=None)
         with patch.object(main.agent_runner, "resume", return_value=result), \

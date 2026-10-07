@@ -43,6 +43,18 @@ Messages requiring approval, an answer or a PR decision SHALL begin with the con
 - **WHEN** an agent asks a concrete open-ended question without numbered alternatives
 - **THEN** codebot requests a full-text answer without inventing a second multiple-choice decision
 
+#### Scenario: Approval deferred without proposal changes
+- **WHEN** the user asks to keep waiting or not implement until explicit approval without requesting substantive changes
+- **THEN** codebot preserves WAIT_APPROVAL, acknowledges briefly and does not revise artifacts or resend the proposal
+
+#### Scenario: Unchanged proposal handoff retried
+- **WHEN** a proposal handoff is repeated with different narration or feedback but the reviewed artifact fingerprint is unchanged
+- **THEN** codebot does not repost the complete package; unresolved transport delivery remains independently retryable
+
+#### Scenario: Concise approval notices
+- **WHEN** codebot sends a proposal or an approval reminder
+- **THEN** the proposal notice contains a single approval decision and a short artifact-based change summary rather than full agent narration, and the reminder refers to the already sent proposal without reposting its contents or files
+
 #### Scenario: Reviewing a proposal
 - **WHEN** codebot requests proposal approval
 - **THEN** it starts with the approval decision and revised scope when applicable, and identifies the attached complete package

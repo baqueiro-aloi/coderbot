@@ -96,3 +96,12 @@ OK (1 skipped). Strict validation passed. No live rollout or task-state repair e
 Verification (2026-10-07): `venv/bin/python -m unittest discover -s tests -t .`
 completed with 807 tests, OK (1 skipped). Strict OpenSpec validation and
 `git diff --check` passed. No live rollout or state changes executed.
+
+## 12. Concise approval waits
+
+- [x] 12.1 Classify approval deferrals separately from substantive revisions and preserve the waiting proposal without another agent turn.
+- [x] 12.2 Deduplicate reviewed packages by artifact fingerprint, replace full agent narration with a short change summary and keep approval reminders concise.
+- [x] 12.3 Cover deferral, unchanged-package retries, long narration and reminders; run regression suites and strict validation.
+
+Verification (2026-10-07): full unittest discovery completed with 812 tests,
+OK (1 skipped). No live deployment or task-state repair executed.
