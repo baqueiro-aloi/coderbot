@@ -2,6 +2,7 @@
 import time
 
 import prompts
+import handoffs
 
 
 def receive(store, state, repo, message_id, text):
@@ -32,7 +33,7 @@ def investigation(state, row):
         "any requirement assertion even when phrased as a question. Classify material "
         "omissions, scope/architecture changes or invalidated assumptions as replan; "
         "localized unambiguous defects within approved intent as correction. Ask only "
-        "a concrete unresolved product decision.\n"
+        "a concrete unresolved product decision.\n" + handoffs.DECISION_INSTRUCTIONS + "\n"
         f"Task: {state.get('item')}\nChange: {state.get('slug')}\n"
         f"Archive: {state.get('archive_path')}\n"
         + prompts.fenced("user feedback", row["data"]["text"])

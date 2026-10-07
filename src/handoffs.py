@@ -1,4 +1,169 @@
 """Concise, channel-neutral headings for messages requiring a human decision."""
+import re
+
+
+DECISION_INSTRUCTIONS = """
+Whenever a human decision is genuinely required, ask it as a concrete action:
+"Do you authorize ...?", not just "verification blocked" or "give guidance".
+For one authorization, offer exactly "1. Yes — <action and consequence>" and
+"2. No — keep the current work paused, without aborting or marking it complete".
+For alternatives, offer 3-4 numbered, mutually distinct feasible options with a
+short consequence for each. Mark one "(Recommended)" when justified; never recommend
+waiving checks, discarding work or merging over unresolved findings by default.
+Tell the user to reply Yes/No for a binary decision, or the option number and any
+required details for alternatives. Put the full question and choices in readable
+prose, not only an attachment. Use NEED_USER_INPUT: in working-session responses;
+in a JSON-only utility contract, put the prose in the required question/answer field
+instead, and never emit a sentinel outside that JSON contract. An option that
+needs missing data must explicitly request it, never invent it. Ask only for a real
+human decision, not permission to run already authorized tools. These rules apply
+in every phase and in both email and Slack. A choice grants only the named action;
+never infer new scope, whole-task completion, push or merge beyond that action.
+"""
+
+
+def _option(label, reply, *, wait=False, details=False):
+    return {"label": label, "reply": reply, "wait": wait, "details": details}
+
+
+def decision(state, phase, question=None):
+    """Controller choices use existing FSM operations, never invent new commands."""
+    name = phase.lower()
+    stage = state.get("state")
+    target, binary = "WAIT_REPLY", False
+    no = _option("No — preserve the work and keep waiting", "", wait=True)
+    if name == "verification blocked":
+        kind = state.get("verification_blocker", {}).get("kind")
+        if kind == "unfinished or unclassified tasks":
+            title = "Do you authorize continuing the pending implementation of the already approved spec?"
+            options = [_option("Yes — finish only the approved pending tasks, then verify (Recommended)",
+                "I explicitly authorize completing the pending implementation tasks of the already "
+                "approved spec. Preserve existing work and history; do not replan or expand scope. "
+                "Then verify and reconcile current evidence."), no]
+            binary = True
+        elif kind == "approval":
+            title = "How should we resolve the pending approval?"
+            options = [_option("Provide the specific approval or decision requested below (Recommended)",
+                               "My decision on the pending approval is:", details=True),
+                       _option("Clarify what approval is missing", "Explain the exact pending approval and its consequences."),
+                       _option("Keep waiting without changing the work", "", wait=True)]
+        elif kind == "scope drift":
+            title = "How should we reconcile the changed task scope?"
+            options = [_option("Reconcile the checklist with the approved scope; specify corrections (Recommended)",
+                               "Reconcile the checklist with the approved scope using these corrections:", details=True),
+                       _option("Request a scope revision; describe it for review", "Prepare a scope revision for review, not implementation:", details=True),
+                       _option("Keep waiting without changing scope", "", wait=True)]
+        else:
+            title = "How should we resolve the missing evidence or execution prerequisite?"
+            options = [_option("Provide the missing evidence or recovery guidance below (Recommended)",
+                               "Use this evidence or recovery guidance, without crediting unverified results:", details=True),
+                       _option("Clarify exactly which result or prerequisite is missing",
+                               "Explain exactly which evidence, result or prerequisite is missing and why."),
+                       _option("Keep waiting; do not waive checks", "", wait=True)]
+    elif name in ("proposal for review", "revised proposal") or (name == "clarification needed" and stage == "WAIT_APPROVAL"):
+        target = "WAIT_APPROVAL"
+        title = "Do you authorize implementing the attached proposal?"
+        options = [_option("Yes — approve this proposal and start implementation", "approve"), no]
+        binary = True
+    elif name in ("pr ready for review", "pr updated") or name.startswith("merge blocked") or name.startswith("merge failed") or name == "unresolved review threads need your help" or (name == "clarification needed" and stage == "WAIT_MERGE"):
+        target = "WAIT_MERGE"
+        title = "What should I do with this PR?"
+        options = [_option("Request changes; describe them", "Requested PR changes:", details=True),
+                   _option("Authorize 'merge' after reviewing this PR; existing gates still apply", "merge"),
+                   _option("Keep waiting without merging (Recommended)", "", wait=True)]
+        if name in ("merge blocked — unresolved review comments", "merge blocked — could not verify review comments", "unresolved review threads need your help"):
+            options.append(_option("Explicitly authorize 'merge anyway'; bypass the review-thread gate", "merge anyway"))
+    elif name == "blocked: dirty working tree":
+        target = "WAIT_CLEAN"
+        title = "Is the working tree now clean so I can retry starting the task?"
+        options = [_option("Yes — recheck Git; start only if the working tree is clean", "The working tree is ready; recheck it."), no]
+        binary = True
+    elif name in ("content blocked", "texto bloqueado"):
+        target = stage
+        title = "How should we handle the provider-blocked message?"
+        options = [_option("Provide reformulated text; do not resend the blocked text (Recommended)",
+                           "Use this reformulated message:", details=True),
+                   _option("Keep waiting without retrying the blocked message", "", wait=True)]
+    elif name.startswith("stuck in") or name == "service unavailable" or (name == "clarification needed" and stage == "WAIT_STUCK"):
+        target = "WAIT_STUCK"
+        title = "How should I recover this stopped step?"
+        options = [_option("Provide recovery instructions (Recommended)", "Recovery instructions:", details=True),
+                   _option("Retry the same step; this does not prove it passed", "retry"),
+                   _option("Keep waiting and preserve the work", "", wait=True)]
+    elif "stuck" in name:
+        title = "How should I continue the blocked step?"
+        options = [_option("Continue with specific repair or investigation guidance (Recommended)",
+                           "Continue the current phase using this guidance:", details=True),
+                   _option("Explain the blocker and available remedies", "Explain this blocker and the available remedies before continuing."),
+                   _option("Keep waiting and preserve the work", "", wait=True)]
+    elif question:
+        # Working agents supply meaningful domain choices in readable prose. Bind
+        # the displayed labels, not an arbitrary utility-generated action/command.
+        choices = re.findall(r"^\s*[1-4][.)]\s+(.+)$", question, re.MULTILINE)
+        if len(choices) in (2, 3, 4):
+            binary = len(choices) == 2 and bool(re.match(r"(?i)(yes|sí|si)\b", choices[0])) and bool(re.match(r"(?i)no\b", choices[1]))
+            options = [_option(label, label, wait=bool(re.match(r"(?i)(?:no\b|keep waiting\b|wait\b|mantener.*pausa|esperar\b)", label))) for label in choices]
+            if binary:
+                options[1] = no
+            title = question
+            return {"question": title, "options": options, "binary": binary,
+                    "wait_state": target, "provided_choices": True}
+        title = question
+        options = [_option("Answer the question; include the requested information (Recommended)", "My answer is:", details=True),
+                   _option("Explain the alternatives and their consequences", "Clarify the question with concrete alternatives and their consequences."),
+                   _option("Keep waiting and preserve the work", "", wait=True)]
+    else:
+        return None
+    return {"question": title, "options": options, "binary": binary, "wait_state": target}
+
+
+def render_decision(value):
+    lines = ["Decision needed: " + value["question"]]
+    if not value.get("provided_choices"):
+        lines += [f"{n}. {option['label']}" for n, option in enumerate(value["options"], 1)]
+    lines.append("Reply Yes/No or 1/2. You may also describe requested changes." if value["binary"] else
+                 "Reply with the option number; include details if requested. You may also write your own answer.")
+    return "\n".join(lines)
+
+
+def remember_decision(state, phase, question=None):
+    value = decision(state, phase, question)
+    if value is None:
+        return ""
+    origin = ((state.get("return_state") or state.get("stuck_return"))
+              if value["wait_state"] in ("WAIT_REPLY", "WAIT_STUCK") else None)
+    if phase.lower().startswith("question during "):
+        origin = phase[len("question during "):]
+    elif value["wait_state"] == "WAIT_REPLY" and state.get("state") not in ("WAIT_REPLY", "WAIT_STUCK"):
+        origin = state.get("state")
+    value.update(task=state.get("slug"), origin=origin)
+    state["pending_decision"] = value
+    return render_decision(value)
+
+
+def selected_reply(state, reply):
+    """Resolve only a short selection of the active decision; prose stays prose."""
+    value = state.get("pending_decision")
+    if not isinstance(value, dict) or value.get("wait_state") != state.get("state") or value.get("task") != state.get("slug"):
+        return None
+    if value.get("origin") and value["origin"] != (state.get("return_state") or state.get("stuck_return")):
+        return None
+    match = re.fullmatch(r"\s*(?:option\s+|opción\s+|opcion\s+)?([1-9]|yes|sí|si|no)[.!]?(?:\s*:\s*(.*))?\s*", reply, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    token, detail = match[1].casefold(), (match[2] or "").strip()
+    if not token.isdigit():
+        if not value["binary"]:
+            return {"error": "Please select an option number; Yes/No does not identify an action here."}
+        number = 2 if token == "no" else 1
+    else:
+        number = int(token)
+    if not 1 <= number <= len(value["options"]):
+        return {"error": "That option is not available. Please select one of the displayed options."}
+    option = value["options"][number - 1]
+    if option["details"] and not detail:
+        return {"error": "This option needs details. Reply with the option number followed by ': <your details>'."}
+    return {"wait": option["wait"], "reply": option["reply"] + ("\n" + detail if detail else "")}
 
 
 def decision_card(state: dict, phase: str) -> str:

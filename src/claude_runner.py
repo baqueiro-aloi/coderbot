@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import config
+import handoffs
 import turn_control
 import operations
 
@@ -48,6 +49,7 @@ Make the question self-contained: explain the decision, available options and
 important consequences in plain language. Do not emit only 'answer the attached
 question' or put the actionable request solely in an attachment.
 {EVIDENCE_CONTRACT}
+{handoffs.DECISION_INSTRUCTIONS}
 Each of your turns is a brand-new, one-shot headless process: nothing monitors
 this session between invocations. If you start a background process (including
 via the Bash tool's run_in_background), it is orphaned the moment this turn

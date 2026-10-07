@@ -9,6 +9,7 @@ and safe_substitute never rescans the substituted values.
 from string import Template
 
 import config
+import handoffs
 
 
 def render(template: str, **kwargs) -> str:
@@ -65,7 +66,7 @@ Work in parallel whenever possible — this is a standing instruction for every 
   for every tiny task. Respect the runtime's concurrent-subagent limit.
 """
 
-ENVIRONMENT += PARALLELISM
+ENVIRONMENT += PARALLELISM + handoffs.DECISION_INSTRUCTIONS
 
 
 # Fence markers for interpolating UNTRUSTED text (raw e2e output, code-review comments,

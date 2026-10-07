@@ -245,6 +245,16 @@ Existing planning/repair continuations are superseded in the execution ledger
 (their history is retained), so reloading cannot undo the verification request.
 
 The controller freezes the task inventory on approval and implementation completion.
+Every human decision is presented in the conversation itself, in both email and
+Slack: Yes/No for a single authorization, or 3-4 numbered alternatives with their
+consequences and a recommendation when justified. Reply with the number (and any
+requested details), or write your own answer. A selection applies only to the
+current task and waiting phase, including after a restart. No means keep waiting
+and preserve the work, not abort or complete the task. Approval and merge gates
+still apply; Yes alone never authorizes a merge in a multi-option PR decision.
+Supporting reports do not replace the visible question and options. Reminders
+repeat the same active decision instead of truncating its choices.
+
 Changing checkmarks is allowed; adding, removing or changing tasks is a scope
 decision, not automatic permission for another implementation cycle. Tasks tagged
 `[codebot:approval]` block for an explicit decision. Existing `[codebot:verification]`

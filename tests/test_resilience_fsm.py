@@ -314,9 +314,8 @@ class ActivityTrail(unittest.TestCase):
              patch.object(main, "trail") as trail:
             main.email(state, "proposal for review", "body", [pathlib.Path("/x/video.webm")])
         trail.assert_called_once_with(state, "proposal for review",
-                                      "Your decision: approve the attached proposal to start "
-                                      "implementation, or reply with requested changes.\n\n"
-                                  "body\n\nFiles (delivery receipts tracked separately): video.webm")
+                                      main.handoffs.render_decision(state["pending_decision"]) +
+                                      "\n\nbody\n\nFiles (delivery receipts tracked separately): video.webm")
 
 
 class FinishTask(unittest.TestCase):

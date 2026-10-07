@@ -187,7 +187,10 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
     show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
-    if card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
+    decision_text = "" if milestone and " · " in body else handoffs.remember_decision(state, phase, visible_question)
+    if decision_text:
+        body = f"{decision_text}\n\n{body}"
+    elif card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
         body = f"{card}\n\n{body}"
     import message_content
     conversation_body, technical = message_content.split(body)
@@ -203,6 +206,8 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
             if question_body and question_body not in body:
                 body += "\n\n" + question_body
         body += "\n\nSupporting details: " + report.name
+    if decision_text and decision_text not in body:
+        body = decision_text + "\n\n" + body
     # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
     # The one-shot localizer never resumes or changes the task's coding session.
     if state.get("task_language") and not localized:
@@ -1273,6 +1278,8 @@ def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str
     email(state, f"{label} stuck - needs your help", body, files, visible_question=decision)
     state["pending_question"] = decision
     state["return_state"] = phase
+    if state.get("pending_decision"):
+        state["pending_decision"]["origin"] = phase
     state["state"] = "WAIT_REPLY"
 
 
@@ -1595,6 +1602,7 @@ def do_e2e(state: dict) -> None:
                    "to continue.", [diagnostics.report(phase_checkpoint.store(), state,
                    config.REPO_PATH, config.DATA_DIR, "E2E", detail=output)])
             state["return_state"] = "E2E"
+            state["pending_question"] = handoffs.render_decision(state["pending_decision"]) if state.get("pending_decision") else "How should I repair the failed E2E suite?"
             state["state"] = "WAIT_REPLY"
             return
         state["e2e_repair_head"], state["e2e_repair_status"] = _tracked_snapshot()
@@ -1735,6 +1743,7 @@ def _archive_failed(state: dict, error: Exception) -> None:
           f"Task: {state['item']}\n\nArchival failed {state['archive_round']} times. "
           f"{diagnostics.summary(error)}\n\nReply with guidance to retry.", [path])
     state["return_state"] = "ARCHIVING"
+    state["pending_question"] = handoffs.render_decision(state["pending_decision"]) if state.get("pending_decision") else "How should I repair the failed archival step?"
     state["state"] = "WAIT_REPLY"
 
 
@@ -3053,6 +3062,9 @@ def _expected_from_user(state: dict) -> str:
     """What the current wait needs from the user, spelled out in full: a check-in must
     stand on its own, never "see my earlier email"."""
     st = state["state"]
+    decision = state.get("pending_decision")
+    if isinstance(decision, dict) and decision.get("wait_state") == st:
+        return handoffs.render_decision(decision)
     if st == "WAIT_APPROVAL":
         return ("your decision on the proposal I sent for this task. Reply with an explicit "
                 "approval to start implementing, with the changes you want made to the "
@@ -3137,6 +3149,9 @@ def _bot_side_activity(state: dict, now: float) -> str:
 
 def _ping_body(state: dict, now: float, count: int) -> str:
     spanish = state.get("task_language", "English").casefold() == "spanish"
+    decision = state.get("pending_decision")
+    if isinstance(decision, dict) and decision.get("wait_state") == state["state"]:
+        return handoffs.render_decision(decision)
     question = state.get("pending_question")
     if state["state"] == "WAIT_APPROVAL":
         action = "Revisa la propuesta y responde con aprobación o cambios." if spanish else "Review the proposal and reply with approval or changes."
@@ -3246,6 +3261,17 @@ def handle_wait(state: dict) -> None:
 
 
 def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
+    selection = handoffs.selected_reply(state, reply)
+    if selection is not None:
+        if selection.get("error") or selection.get("wait"):
+            message = selection.get("error") or "Work is preserved. I will keep waiting; no action was authorized."
+            email(state, "decision selection", message + "\n\n" + handoffs.render_decision(state["pending_decision"]))
+            return
+        # A displayed option is an answer to this wait, not new product feedback.
+        # Retain the displayed decision on errors/re-questions; state/origin binding
+        # prevents it from authorizing an unrelated phase later.
+        _handle_reply(state, selection["reply"])
+        return
     if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
             state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
             r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
@@ -3398,7 +3424,8 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
             raise RuntimeError("Feedback assessment could not be saved")
     if not row["data"].get("assessment_delivered"):
         try:
-            email(state, "feedback investigated", assessment["answer"] + "\n" + assessment["reason"])
+            email(state, "feedback investigated", assessment["answer"] + "\n" + assessment["reason"],
+                  visible_question=assessment["answer"] if assessment["action"] == "question" else None)
         except Exception:
             state["state"] = original_phase
             raise
@@ -3421,6 +3448,8 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         state["feedback_question_id"] = row["id"]
         state["pending_question"] = assessment["answer"]
         state["return_state"] = "FEEDBACK_QUESTION"
+        if state.get("pending_decision"):
+            state["pending_decision"]["origin"] = "FEEDBACK_QUESTION"
         state["state"] = "WAIT_REPLY"
         save_state(state)
         database.update("feedback", row, status="waiting")
@@ -3736,7 +3765,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
               "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
-              "implementation_attachments", "implementation_ready",
+              "implementation_attachments", "implementation_ready", "pending_decision",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
               "approved_task_inventory", "verified_task_inventory")
