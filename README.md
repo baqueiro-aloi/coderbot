@@ -12,7 +12,7 @@ The communication façade supports optional live task progress. Slack edits the
 initial feature message with its phase, `:loading:` while working, `:question:`
 when user input is required, and the last three safe operational log lines.
 Enable the animated custom `:loading:` emoji in your workspace. Updates are
-deduplicated, normally at most once every five seconds, and respect Slack's
+deduplicated, normally at most once every 30 seconds, and respect Slack's
 rate-limit retries; pause/completion updates can bypass the normal interval.
 The original message and task marker are preserved across restarts. Log tails
 are bounded in memory per task, redact known credentials, and exclude reasoning,

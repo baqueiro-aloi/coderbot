@@ -111,7 +111,11 @@ class SlackProgress(unittest.TestCase):
             self.state.update(state="WAIT_APPROVAL")
             slack.update_progress(self.thread, progress.snapshot(self.state))
         self.assertEqual(self.api.chat_update.call_count, 1)
-        with patch.object(slack.time, "time", return_value=106):
+        with patch.object(slack.time, "time", return_value=129):
+            slack.update_progress(self.thread, progress.snapshot(self.state))
+            slack.flush_progress()
+        self.assertEqual(self.api.chat_update.call_count, 1)
+        with patch.object(slack.time, "time", return_value=130):
             slack.update_progress(self.thread, progress.snapshot(self.state))
             sent = self.api.chat_update.call_args.kwargs["text"]
             self.assertIn(":question:", sent)
@@ -159,7 +163,7 @@ class SlackProgress(unittest.TestCase):
             waiting = progress.snapshot(dict(self.state, state="WAIT_REPLY", return_state="EXPLORING"))
             slack.update_progress(self.thread, waiting)
             slack.update_progress(self.thread, active)
-        with patch.object(slack.time, "time", return_value=106):
+        with patch.object(slack.time, "time", return_value=130):
             slack.flush_progress()
         self.api.chat_update.assert_called_once()
 

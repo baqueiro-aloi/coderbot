@@ -25,6 +25,7 @@ _last_reconcile: dict[str, float] = {}
 _last_reconciled_at: dict[str, float] = {}
 _RECONCILE_SECONDS = 60
 _RECONCILE_OVERLAP_SECONDS = 300
+_PROGRESS_INTERVAL_SECONDS = 30
 _progress_lock = threading.RLock()
 
 
@@ -311,7 +312,7 @@ def _send_progress(channel: str, root: str, rendered: str, final: bool) -> None:
     with _database() as db:
         db.execute("UPDATE progress SET rendered=?,next_at=?,terminal=?,retry_at=0,"
                    "pending=NULL,pending_terminal=0 WHERE channel=? AND root_ts=?",
-                   (rendered, time.time() + 5, int(final), channel, root))
+                    (rendered, time.time() + _PROGRESS_INTERVAL_SECONDS, int(final), channel, root))
         db.execute("DELETE FROM progress WHERE channel=? AND root_ts=? AND NOT EXISTS "
                    "(SELECT 1 FROM roots WHERE channel=? AND root_ts=?)", (channel, root, channel, root))
 
