@@ -1,0 +1,412 @@
+"""Durable lateral conversation. Workers never own the task state machine."""
+import copy
+import hashlib
+import json
+import re
+import time
+import threading
+import logging
+from pathlib import Path
+
+import handoffs
+import prompts
+from command_text import parse_command, parse_btw
+
+
+INTENTS = {"answer", "conversation", "change_request", "ambiguous"}
+INPUT_KINDS = {"context", "change"}
+OPEN_INPUTS = {"ready", "clarifying", "waiting_approval", "processing"}
+log = logging.getLogger(__name__)
+
+
+def process_one(store, repo, generate, deliver):
+    """One worker owns lateral records; the controller alone consumes flow records."""
+    with store.connection() as db:
+        records = db.execute("SELECT * FROM conversation WHERE status IN "
+                             "('pending','classified','generating','generated','retry','failed') ORDER BY created").fetchall()
+    rows = [store._decode(r) for r in records]
+    blocked_tasks = set()
+    row = None
+    for candidate in rows:
+        if candidate["task_id"] in blocked_tasks or candidate["data"].get("route") == "flow":
+            continue
+        if candidate["status"] == "failed" and (not candidate["data"].get("generation_failed") or
+                                                 candidate["data"].get("failure_delivered")):
+            continue
+        if candidate["data"].get("retry_at", 0) > time.time():
+            blocked_tasks.add(candidate["task_id"])
+            continue
+        row = candidate
+        break
+    if row is None:
+        return False
+    try:
+        if row["data"].get("generation_failed"):
+            receipt = deliver(row)
+            store.update("conversation", row, failure_delivered=receipt["complete"],
+                         notification_id=receipt["notification_id"], retry_at=time.time() + 30)
+            return True
+        def remember(session_id):
+            current = store.get("conversation", row["id"])
+            store.update("conversation", current, session_id=session_id)
+        if not row["data"].get("classification"):
+            fixed = deterministic(row["data"]["snapshot"], row["data"]["original_text"])
+            if fixed is None:
+                result = generate(classification_prompt(row), None)
+                fixed = json.loads(result.output)
+            row = save_classification(store, row, fixed)
+        if row["data"]["route"] == "flow":
+            return True
+        inputs = register_inputs(store, row, repo)
+        if row["data"].get("output") is None:
+            sessions = [r["data"].get("session_id") for r in store.list("conversation", row["task_id"])
+                        if r["data"].get("session_id")]
+            row = store.update("conversation", row, status="generating")
+            result = generate(response_prompt(row, inputs), row["data"].get("session_id") or
+                              (sessions[0] if sessions else None), on_session=remember)
+            row = store.update("conversation", row, status="generated", output=result.output,
+                               session_id=result.session_id)
+        receipt = deliver(row)
+        store.update("conversation", row, status="complete" if receipt["complete"] else "generated",
+                     notification_id=receipt["notification_id"], last_error=receipt.get("error"))
+    except Exception as error:
+        from agent_errors import AgentContentFilterError
+        row = store.get("conversation", row["id"])
+        attempts = row["data"].get("attempts", 0) + 1
+        if row["data"].get("output") is not None:
+            status = "generated"
+        else:
+            status = "failed" if isinstance(error, AgentContentFilterError) or attempts >= 3 else "retry"
+        row = store.update("conversation", row, status=status, attempts=attempts,
+                           retry_at=time.time() + min(2 ** attempts, 30),
+                           last_error=f"{type(error).__name__}: {error}")
+        if status == "failed":
+            spanish = row["data"]["snapshot"].get("task_language", "").casefold() == "spanish"
+            notice = ("No pude procesar este mensaje lateral. Conservé el trabajo y la decisión pendiente. "
+                      "Envía un mensaje nuevo o reformulado para continuar la conversación." if spanish else
+                      "I could not process this lateral message. Work and the pending decision are preserved. "
+                      "Send a new or reformulated message to continue the conversation.")
+            current = store.update("conversation", row, output=notice, generation_failed=True)
+            try:
+                receipt = deliver(current)
+                store.update("conversation", current, notification_id=receipt["notification_id"],
+                             failure_delivered=receipt["complete"])
+            except Exception:
+                log.exception("could not deliver lateral failure notice")
+        log.exception("lateral conversation failed; work is unchanged")
+    return True
+
+
+class Worker:
+    def __init__(self, store_factory, repo, generate, deliver):
+        self.store_factory, self.repo = store_factory, repo
+        self.generate, self.deliver = generate, deliver
+        self.stop = threading.Event()
+        self.wake = threading.Event()
+        self.thread = threading.Thread(target=self.run, name="task-conversation", daemon=True)
+
+    def run(self):
+        while not self.stop.is_set():
+            try:
+                processed = process_one(self.store_factory(), self.repo, self.generate, self.deliver)
+            except Exception:
+                log.exception("conversation worker failed")
+                processed = False
+            self.wake.wait(.2 if processed else 2)
+            self.wake.clear()
+
+    def close(self):
+        self.stop.set()
+        self.wake.set()
+        import turn_control
+        turn_control.request_kick("conversation")
+
+
+def flow_pending(store, state, repo):
+    return sorted([r for r in store.list("conversation", store.task_identity(state, repo))
+                   if r["status"] == "classified" and r["data"].get("route") == "flow"],
+                  key=lambda r: r["created"])
+
+
+def delivery(store, row, repo, directory, backend):
+    import message_delivery
+    view = row["data"]["snapshot"]
+    return message_delivery.deliver(store, view, repo, directory, backend,
+        "Task conversation", row["data"]["output"], view.get("thread_id"),
+        identity="conversation:" + row["id"])
+
+
+def _safe(value):
+    """Bound model context and redact common credential forms, not original receipts."""
+    if isinstance(value, dict):
+        return {k: _safe(v) for k, v in value.items()
+                if not re.search(r"secret|password|token|credential|api_key", k, re.I)}
+    if isinstance(value, list):
+        return [_safe(v) for v in value[:20]]
+    if isinstance(value, str):
+        value = re.sub(r"(?i)(bearer\s+|(?:api[_-]?key|password|secret)\s*[:=]\s*)\S+",
+                       r"\1[redacted]", value)
+        return value[:5000]
+    return value
+
+
+def decision_version(state):
+    values = [state.get(k) for k in ("state", "pending_question", "pending_decision",
+                                    "return_state", "stuck_return", "stuck_error",
+                                    "reviewed_proposal", "proposal_sent_key", "pr_url")]
+    return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def snapshot(store, state, repo):
+    keys = ("item", "item_detail", "item_id", "branch", "slug", "state", "thread_id",
+            "execution_task_id", "task_language", "pending_question", "pending_decision",
+            "return_state", "stuck_return", "stuck_error", "implementation_summary",
+            "verification_blocker", "final_check_report", "internal_review_report",
+            "archive_path", "pr_url", "execution_checkpoint_id", "workspace_path",
+            "last_effective_progress", "quality_report", "proposal_snapshot")
+    view = _safe(copy.deepcopy({k: state[k] for k in keys if k in state}))
+    view["execution_task_id"] = store.task_identity(state, repo)
+    view["decision_version"] = decision_version(state)
+    view["captured_at"] = time.time()
+    view["repo"] = str(repo)
+    # The proposal review package is frozen outside the live checkout. Never read
+    # files which the working session may currently be editing as verified facts.
+    view["proposal"] = {}
+    if state.get("proposal_snapshot"):
+        try:
+            path = Path(state["proposal_snapshot"])
+            if path.stat().st_size <= 1024 * 1024:
+                contents = json.loads(path.read_text())
+                if isinstance(contents, dict):
+                    view["proposal"] = _safe({k: v for k, v in contents.items()
+                                              if k in {"proposal.md", "design.md", "tasks.md"}})
+        except (OSError, ValueError):
+            pass
+    history = store.list("conversation", view["execution_task_id"])
+    view["history"] = _safe([{"id": r["id"], "user": r["data"]["text"],
+                              "bot": r["data"].get("output", "")}
+                             for r in sorted(history, key=lambda r: r["created"])[-6:]])
+    view["inputs"] = _safe([{"id": r["id"], "text": r["data"]["text"],
+                             "kind": r["data"]["kind"], "status": r["status"],
+                             "question": r["data"].get("question")}
+                             for r in store.list("conversation_input", view["execution_task_id"])[:20]])
+    return view
+
+
+def receive(store, state, repo, message_id, text):
+    row = store.record("conversation", state, repo, message_id, {
+        "original_text": text, "text": parse_btw(text) if parse_btw(text) is not None else text,
+        "explicit_btw": parse_btw(text) is not None, "snapshot": snapshot(store, state, repo),
+        "route": None, "session_id": None, "classification": None,
+        "output": None, "notification_id": None})
+    # A new message can reformulate a permanently rejected one. Keep the old
+    # receipt, but do not let its unknown intent block all future delivery.
+    for old in store.list("conversation", row["task_id"], status="failed"):
+        if old["created"] < row["created"] and old["data"].get("generation_failed"):
+            store.update("conversation", old, superseded_by=row["id"])
+    return row
+
+
+def validate(value):
+    if not isinstance(value, dict) or value.get("intent") not in INTENTS:
+        raise ValueError("Invalid conversation intent")
+    if type(value.get("resolves_pending_question")) is not bool:
+        raise ValueError("Conversation classification requires a resolution boolean")
+    if type(value.get("action_depends_on_change", False)) is not bool:
+        raise ValueError("Invalid action dependency")
+    inputs = value.get("inputs", [])
+    if not isinstance(inputs, list) or len(inputs) > 10:
+        raise ValueError("Invalid conversation inputs")
+    for item in inputs:
+        if (not isinstance(item, dict) or item.get("kind") not in INPUT_KINDS
+                or not isinstance(item.get("text"), str) or not item["text"].strip()
+                or type(item.get("needs_clarification", False)) is not bool):
+            raise ValueError("Invalid conversation input")
+        for key in ("replaces", "clarifies"):
+            if item.get(key) is not None and not isinstance(item[key], str):
+                raise ValueError("Invalid input reference")
+    action = value.get("requested_action")
+    if action is not None and not isinstance(action, str):
+        raise ValueError("Invalid requested action")
+    return value
+
+
+def classification_prompt(row):
+    return ("Classify an authorized task-thread message BEFORE any action. No tools. "
+            "Use the entire message, negations, conditions and displayed decision. "
+            "An explanatory question does not resolve a pending decision. A vague 'continue' "
+            "during recovery is ambiguous, not retry. New requirements are change_request, "
+            "not approval. Preserve context and changes even in mixed messages. A reply to "
+            "a lateral clarification references the input ID, not the workflow question. "
+            "Only use replaces/clarifies for an unambiguous existing pending input ID. "
+            "If an action depends on a change, do not authorize the action. /btw is always "
+            "lateral and cannot authorize workflow actions. Without a pending decision, "
+            "non-command messages are conversation/context/change, not answers. "
+            "Return ONLY JSON: {\"intent\":\"answer|conversation|change_request|ambiguous\","
+            "\"resolves_pending_question\":false,\"requested_action\":null,"
+            "\"action_depends_on_change\":false,\"inputs\":[{\"kind\":\"context|change\","
+            "\"text\":\"exact user assertion\",\"needs_clarification\":false,"
+            "\"replaces\":null,\"clarifies\":null}]}. Do not invent user assertions.\n"
+            + prompts.fenced("task snapshot", json.dumps(row["data"]["snapshot"], ensure_ascii=False))
+            + prompts.fenced("explicit btw", str(row["data"]["explicit_btw"]))
+            + prompts.fenced("user message", _safe(row["data"]["text"])))
+
+
+def deterministic(state, text):
+    if parse_btw(text) is not None:
+        return None
+    if parse_command(text) or re.fullmatch(r"(?i)\s*(retry|abort|complete|merge(?: anyway)?)\s*[.!]?\s*", text):
+        return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
+    selection = handoffs.selected_reply(state, text)
+    if selection is not None and not selection.get("prose"):
+        return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
+    return None
+
+
+def save_classification(store, row, value):
+    value = validate(value)
+    if row["data"]["explicit_btw"]:
+        value = {**value, "intent": "change_request" if value.get("inputs") else "conversation",
+                 "resolves_pending_question": False, "requested_action": None}
+    if value["intent"] == "change_request" and not value.get("inputs"):
+        value = {**value, "intent": "ambiguous", "resolves_pending_question": False}
+    view = row["data"]["snapshot"]
+    if view.get("state") not in {"WAIT_REPLY", "WAIT_STUCK", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_CLEAN"}:
+        value = {**value, "intent": "change_request" if value.get("inputs") else "conversation",
+                 "resolves_pending_question": False}
+    if len(row["data"]["text"]) > 5000:
+        value = {**value, "intent": "ambiguous", "resolves_pending_question": False,
+                 "requested_action": None, "inputs": []}
+    route = "flow" if (value["intent"] == "answer" and value["resolves_pending_question"]
+                        and not value.get("action_depends_on_change") and not value.get("inputs")) else "lateral"
+    if value["intent"] == "answer" and route == "lateral":
+        value = {**value, "intent": "ambiguous", "resolves_pending_question": False}
+    return store.update("conversation", row, status="classified", classification=value, route=route)
+
+
+def context_prompt(store, state, repo, invocation=None):
+    rows = [r for r in store.list("conversation_input", store.task_identity(state, repo))
+            if r["data"]["kind"] == "context" and
+            (r["status"] == "ready" or r["status"] == "incorporated" and invocation is not None and
+             r["data"].get("invocation") == invocation)]
+    rows.sort(key=lambda r: r["created"])
+    if not rows:
+        return "", []
+    if invocation is not None:
+        rows = [store.update("conversation_input", r, invocation=invocation) for r in rows]
+    return ("\nUser context received since the previous turn. Incorporate within current phase "
+            "and approved scope; this is not authorization to expand scope or bypass checks.\n"
+            + prompts.fenced("user context", json.dumps([
+                {"id": r["id"], "text": r["data"]["text"]} for r in rows], ensure_ascii=False))), rows
+
+
+def incorporated(store, rows, checkpoint):
+    for row in rows:
+        current = store.get("conversation_input", row["id"])
+        if current["status"] == "ready":
+            store.update("conversation_input", current, status="incorporated", checkpoint=checkpoint)
+
+
+def transfer_changes(store, state, repo):
+    import feedback
+    rows = store.list("conversation_input", store.task_identity(state, repo))
+    changed = False
+    for row in rows:
+        if row["status"] == "ready" and row["data"]["kind"] == "change":
+            event = feedback.receive(store, state, repo, "conversation:" + row["id"], row["data"]["text"])
+            store.update("feedback", event, conversation_input_id=row["id"])
+            store.update("conversation_input", row, status="processing", feedback_id=event["id"])
+            changed = True
+        elif row["status"] == "replaced" and row["data"].get("feedback_id"):
+            event = store.get("feedback", row["data"]["feedback_id"])
+            if event and event["status"] in {"pending", "investigating"}:
+                store.update("feedback", event, status="complete", outcome="replaced")
+    return changed
+
+
+def sync_inputs(store, state, repo):
+    """Expose controller outcomes without treating a queued request as applied."""
+    for row in store.list("conversation_input", store.task_identity(state, repo)):
+        if row["status"] not in {"processing", "waiting_approval"} or not row["data"].get("feedback_id"):
+            continue
+        event = store.get("feedback", row["data"]["feedback_id"])
+        if not event:
+            continue
+        action = event["data"].get("assessment", {}).get("action")
+        if event["status"] == "planning" or action == "replan" and not state.get("approved_proposal"):
+            store.update("conversation_input", row, status="waiting_approval")
+        elif action == "replan" and state.get("approved_proposal"):
+            store.update("conversation_input", row, status="incorporated", approved=True)
+        elif event["status"] == "verifying" and state.get("state") in {"OPEN_PR", "WAIT_REVIEW", "WAIT_MERGE"}:
+            store.update("conversation_input", row, status="applied", outcome="corrected; verification reached delivery")
+        elif event["status"] == "complete":
+            outcome = "applied" if action == "correction" else "incorporated"
+            store.update("conversation_input", row, status=outcome, outcome=event["data"].get("outcome"))
+
+
+def delivery_blockers(store, state, repo):
+    """Unclassified receipts cannot silently race an irreversible handoff."""
+    task = store.task_identity(state, repo)
+    pending = [r for r in store.list("conversation", task)
+               if r["status"] in {"pending", "generating", "failed", "retry", "classified"}
+               and not r["data"].get("superseded_by")
+               and (not r["data"].get("classification") or
+                    r["data"].get("classification", {}).get("inputs") and
+                    not store.list("conversation_input", task, identity=r["id"] + ":0"))]
+    pending += [r for r in store.list("conversation_input", task)
+                if r["data"]["kind"] == "change" and r["status"] in OPEN_INPUTS]
+    return pending
+
+
+def register_inputs(store, row, repo):
+    state = row["data"]["snapshot"]
+    for index, value in enumerate(row["data"]["classification"].get("inputs", [])):
+        identity = row["id"] + ":" + str(index)
+        existing = store.list("conversation_input", row["task_id"], identity=identity)
+        if existing:
+            reference = existing[0]["data"].get("reference")
+            if reference and existing[0]["status"] == "ready":
+                old = store.get("conversation_input", reference)
+                if old and old["task_id"] == row["task_id"] and old["status"] in {"ready", "clarifying"}:
+                    store.update("conversation_input", old, status="replaced", replaced_by=existing[0]["id"])
+            continue  # Do not replay a replacement or duplicate clarification.
+        reference = value.get("replaces") or value.get("clarifies")
+        old = store.get("conversation_input", reference) if reference else None
+        valid = old and old["task_id"] == row["task_id"] and old["status"] in {"ready", "clarifying"}
+        if old and old["status"] == "processing" and old["data"].get("feedback_id"):
+            event = store.get("feedback", old["data"]["feedback_id"])
+            valid = old["task_id"] == row["task_id"] and event and event["status"] in {"pending", "waiting"}
+        status = "clarifying" if value.get("needs_clarification") or reference and not valid else "ready"
+        kind = old["data"]["kind"] if valid and value.get("clarifies") else value["kind"]
+        text = (old["data"]["text"] + "\nUser clarification: " + value["text"]
+                if valid and value.get("clarifies") else value["text"])
+        item = store.record("conversation_input", state, repo, identity,
+                            {"text": text, "original_text": value["text"], "kind": kind,
+                             "message_id": row["id"], "reference": reference,
+                             "snapshot": state, "feedback_id": None}, status=status)
+        if valid:
+            store.update("conversation_input", old, status="replaced", replaced_by=item["id"])
+            if old["data"].get("feedback_id"):
+                event = store.get("feedback", old["data"]["feedback_id"])
+                if event and event["status"] in {"pending", "waiting"}:
+                    store.update("feedback", event, status="complete", outcome="replaced by clarification")
+    return store.list("conversation_input", row["task_id"])
+
+
+def response_prompt(row, inputs):
+    return ("You are the task's lateral conversation assistant, not its coding agent/controller. "
+            "Answer the user's question clearly using ONLY supplied confirmed context. No tools. "
+            "Explain the blocker and alternatives if requested. Do not claim unverified work, "
+            "approve changes, retry, cancel, merge or resolve the workflow decision. "
+            "Existing workflow questions remain pending. Ask a lateral clarification only when "
+            "needed; identify its request ID. Describe registered changes as received, NOT applied. "
+            "Material scope changes require proposal review and explicit approval; context is "
+            "incorporated at the next safe point. If a change invalidates current work, offer "
+            "pause/reorientation but do not interrupt. If intent is ambiguous, ask what action "
+            "is intended rather than guessing. Use the task language. Do not expose secrets.\n"
+            + prompts.fenced("task snapshot", json.dumps(row["data"]["snapshot"], ensure_ascii=False))
+            + prompts.fenced("classification", json.dumps(row["data"]["classification"], ensure_ascii=False))
+            + prompts.fenced("registered requests", json.dumps(_safe([
+                {"id": r["id"], "text": r["data"]["text"], "status": r["status"]}
+                for r in inputs[:20]]), ensure_ascii=False))
+            + prompts.fenced("user message", _safe(row["data"]["text"])))

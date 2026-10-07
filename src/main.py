@@ -1,6 +1,7 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
 import fcntl
+import copy
 import json
 import hashlib
 import tempfile
@@ -26,6 +27,7 @@ import task_records
 import repo_provenance
 import diagnostics
 import feedback
+import parallel_conversation
 import replanning
 import recovery
 import verification_ledger
@@ -78,6 +80,14 @@ def save_state(state: dict) -> None:
     tmp = config.STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(config.STATE_PATH)
+    global _conversation_state
+    with _status_command_lock:
+        _conversation_state = copy.deepcopy(state)
+    if state.get("conversation_flow_id"):
+        store = phase_checkpoint.store()
+        row = store.get("conversation", state["conversation_flow_id"])
+        if row and row["task_id"] == store.task_identity(state, config.REPO_PATH):
+            store.update("conversation", row, flow_applied=True)
 
 
 def _ensure_task_language(state: dict) -> None:
@@ -2063,6 +2073,8 @@ def _publish_existing_pr(state: dict) -> None:
 
 
 def do_open_pr(state: dict) -> None:
+    if _conversation_delivery_blocked(state):
+        return
     if not state.get("archive_path"):
         state["verify_round"] = 0
         state.pop("review_gate_round", None)
@@ -2930,6 +2942,8 @@ def do_merge_reply(state: dict, reply: str) -> None:
     if state.get("replan") and not state.get("approved_proposal"):
         email(state, "merge blocked", "The revised proposal requires approval before merge.")
         return
+    if _conversation_delivery_blocked(state):
+        return
     if state.get("reviewed_pr_snapshot") and content_snapshot(config.REPO_PATH) != state["reviewed_pr_snapshot"]:
         email(state, "merge blocked", "The PR content changed since your review. Review the updated PR before merging.")
         state.pop("reviewed_pr_snapshot", None)
@@ -3382,6 +3396,8 @@ def handle_wait(state: dict) -> None:
         return
     log.info("reply received in %s: %r", state["state"], reply[:200])
     _note_contact(state)
+    if _queue_conversation(state, msg_id, reply):
+        return
     if state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(token in reply.casefold()
             for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
         verification_ledger.waiver(state, reply, "e2e:general", content_snapshot(config.REPO_PATH))
@@ -3482,6 +3498,8 @@ def _receive_feedback(state: dict) -> bool:
     if gmail_client.foreign_command(text):
         gmail_client.mark_processed(message_id)
         return False
+    if _queue_conversation(state, message_id, text):
+        return True
     row = feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH, message_id, text)
     if row is None:
         raise RuntimeError("Feedback receipt could not be recorded")
@@ -3498,6 +3516,8 @@ def _receive_feedback(state: dict) -> bool:
 
 def _dispatch_feedback(state: dict) -> bool:
     database = phase_checkpoint.store()
+    parallel_conversation.transfer_changes(database, state, config.REPO_PATH)
+    parallel_conversation.sync_inputs(database, state, config.REPO_PATH)
     rows = feedback.pending(database, state, config.REPO_PATH)
     if not rows:
         return False
@@ -3515,7 +3535,34 @@ def _dispatch_feedback(state: dict) -> bool:
 def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     text = row["data"]["text"]
     original_phase = state["state"]
+    lateral_change = bool(row["data"].get("conversation_input_id"))
     phase = (state.get("return_state") if original_phase == "WAIT_REPLY" else original_phase)
+    if lateral_change and (phase in ("EXPLORING", "PROPOSING") or
+                           original_phase == "WAIT_APPROVAL" and not state.get("approved_proposal")):
+        # A lateral requirement is not an answer to the working question. Update
+        # initial planning with phase guardrails, preserving an unanswered wait.
+        saved_wait = {key: copy.deepcopy(state[key]) for key in
+                      ("state", "pending_question", "pending_decision", "return_state", "question_rounds")
+                      if key in state}
+        planning_phase = phase if phase in ("EXPLORING", "PROPOSING") else "PROPOSING"
+        result = agent_runner.resume(state["session_id"],
+            "Incorporate this newly received requirement into initial planning only. "
+            "It does NOT answer any existing question or authorize implementation. "
+            "Preserve existing unanswered decisions. Do not edit application code, commit, push or merge.\n"
+            + prompts.PHASE_RULES.get(planning_phase, "") + prompts.fenced("user requirement", text))
+        state["session_id"] = result.session_id
+        if original_phase == "WAIT_REPLY":
+            state.update(saved_wait)
+            email(state, "planning context incorporated", result.output)
+        elif original_phase == "WAIT_APPROVAL":
+            _send_proposal_review(state, result.output, revised=True, feedback=text)
+        elif handle_result(state, result, planning_phase):
+            pass
+        else:
+            email(state, "planning context incorporated", result.output)
+        save_state(state)
+        database.update("feedback", row, status="complete", outcome="initial planning updated")
+        return True
     if phase in ("EXPLORING", "PROPOSING"):
         # These phases are still defining the initial requirements. There is no
         # approved contract to investigate or replan, even when an answer changes
@@ -3530,7 +3577,10 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         database.update("feedback", row, status="complete", outcome=state["state"])
         return True
     interrupted_wait = None
-    if state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and state.get("return_state") != "FEEDBACK_QUESTION":
+    if lateral_change and state["state"] in ("WAIT_STUCK", "WAIT_REPLY", "WAIT_APPROVAL", "WAIT_CLEAN"):
+        state["state"] = state.get("stuck_return") or state.get("return_state") or "VERIFYING"
+        interrupted_wait = original_phase
+    elif state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and state.get("return_state") != "FEEDBACK_QUESTION":
         # Explicit recovery commands/answers keep their existing continuation;
         # a newly asserted feature requirement must be investigated as feedback.
         intent = agent_runner.run("Classify this authorized message without tools. Return ONLY JSON "
@@ -3585,8 +3635,18 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
             raise RuntimeError("Feedback assessment could not be saved")
     if not row["data"].get("assessment_delivered"):
         try:
-            email(state, "feedback investigated", assessment["answer"] + "\n" + assessment["reason"],
-                  visible_question=assessment["answer"] if assessment["action"] == "question" else None)
+            if lateral_change and assessment["action"] == "question":
+                # Do not let email's decision decorator overwrite the working
+                # pending_decision for a clarification owned by lateral chat.
+                import message_delivery
+                message_delivery.deliver(database, state, config.REPO_PATH, config.DATA_DIR,
+                    gmail_client._backend(), subject(state, "request clarification"),
+                    assessment["answer"] + "\n" + assessment["reason"] + "\nRequest: " +
+                    row["data"]["conversation_input_id"], state.get("thread_id"),
+                    identity="request-clarification:" + row["id"])
+            else:
+                email(state, "feedback investigated", assessment["answer"] + "\n" + assessment["reason"],
+                      visible_question=assessment["answer"] if assessment["action"] == "question" else None)
         except Exception:
             state["state"] = original_phase
             raise
@@ -3605,6 +3665,13 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         save_state(state)
         database.update("feedback", row, status="repairing")
     elif assessment["action"] == "question":
+        if lateral_change:
+            request = database.get("conversation_input", row["data"]["conversation_input_id"])
+            database.update("conversation_input", request, status="clarifying", question=assessment["answer"])
+            database.update("feedback", row, status="waiting")
+            state["state"] = original_phase
+            save_state(state)
+            return True
         state["feedback_question_origin"] = state["state"]
         state["feedback_question_id"] = row["id"]
         state["pending_question"] = assessment["answer"]
@@ -3898,7 +3965,8 @@ def _reset_to_base_branch() -> list[str]:
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
 RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
-              "execution_task_id", "conversation_version", "recovery_id", "replan", "approved_proposal",
+              "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
+              "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
               "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
               "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
@@ -4927,6 +4995,79 @@ _work_active = threading.Event()
 _status_command_lock = threading.RLock()
 _current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
+_conversation_worker = None
+_conversation_state = None
+
+
+def _queue_conversation(state, message_id, text):
+    """Receipt first; commands retain their existing owner outside /btw."""
+    if parse_command(text):
+        return False
+    store = phase_checkpoint.store()
+    row = parallel_conversation.receive(store, state, config.REPO_PATH, message_id, text)
+    fixed = parallel_conversation.deterministic(state, text)
+    if fixed and row["status"] == "pending":
+        parallel_conversation.save_classification(store, row, fixed)
+    task_records.contact(store, state, config.REPO_PATH, message_id, state["thread_id"])
+    gmail_client.mark_processed(message_id)
+    if _conversation_worker:
+        _conversation_worker.wake.set()
+    return True
+
+
+def _dispatch_conversation(state):
+    store = phase_checkpoint.store()
+    rows = parallel_conversation.flow_pending(store, state, config.REPO_PATH)
+    if not rows:
+        return False
+    row = rows[0]
+    if row["data"].get("flow_applied") or state.get("conversation_flow_id") == row["id"]:
+        store.update("conversation", row, status="complete", outcome=state["state"])
+        state.pop("conversation_flow_id", None)
+        return True
+    if row["data"]["snapshot"]["decision_version"] != parallel_conversation.decision_version(state):
+        store.update("conversation", row, status="pending", route=None, classification=None,
+                     snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
+        # Reusing a bare choice against a different decision is not safe.
+        if parallel_conversation.deterministic(state, row["data"]["text"]):
+            parallel_conversation.save_classification(store, store.get("conversation", row["id"]),
+                {"intent": "ambiguous", "resolves_pending_question": False, "inputs": []})
+        return True
+    phase = state["state"]
+    try:
+        _dispatch_wait_reply(state, row["identity"], row["data"]["original_text"])
+    except AgentContentFilterError:
+        state["state"] = phase
+        _content_filter_stop(state, phase)
+        store.update("conversation", row, status="failed", last_error="content-filter")
+        return True
+    state["conversation_flow_id"] = row["id"]
+    save_state(state)
+    state.pop("conversation_flow_id", None)
+    store.update("conversation", row, status="complete", outcome=state["state"])
+    return True
+
+
+def _deliver_conversation(row):
+    return parallel_conversation.delivery(phase_checkpoint.store(), row, row["data"]["snapshot"].get("repo", config.REPO_PATH),
+                                         config.DATA_DIR, gmail_client._backend())
+
+
+def _conversation_delivery_blocked(state):
+    store = phase_checkpoint.store()
+    # Drain authorized messages before evaluating the handoff, not after publishing.
+    if state.get("thread_id"):
+        with _status_command_lock:
+            _receive_feedback(state)
+    parallel_conversation.sync_inputs(store, state, config.REPO_PATH)
+    if not parallel_conversation.delivery_blockers(store, state, config.REPO_PATH):
+        state.pop("conversation_delivery_notified", None)
+        return False
+    if not state.get("conversation_delivery_notified"):
+        email(state, "pending conversation changes", "There are pending requests or messages to evaluate before "
+              "publishing or merging. Work is preserved; no publication or merge was authorized by the lateral chat.")
+        state["conversation_delivery_notified"] = True
+    return True
 
 
 def _status_supervisor_once() -> bool:
@@ -4974,8 +5115,8 @@ def _status_supervisor_once() -> bool:
             return False  # normal mailbox polling owns STATUS between turns
         request = gmail_client.poll_status(state.get("thread_id") if working else None)
         if not request:
-            if working and state.get("thread_id"):
-                _receive_feedback(state)
+            if (working or _work_active.is_set()) and state.get("thread_id"):
+                _receive_feedback(copy.deepcopy(_conversation_state or state))
             return False
         if config.COMM_CHANNEL == "email" and not _work_active.is_set():
             return False  # let the normal command loop consume it
@@ -5048,7 +5189,9 @@ class ShutdownRequested(BaseException):
 
 
 def _request_shutdown(signum, _frame) -> None:
-    turn_control.request_kick()
+    if _conversation_worker:
+        _conversation_worker.close()
+    turn_control.request_kick(None)
     raise ShutdownRequested(signal.Signals(signum).name)
 
 
@@ -5171,6 +5314,10 @@ def main() -> None:
     _acquire_single_instance_lock()
     gmail_client.start()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    global _conversation_worker
+    _conversation_worker = parallel_conversation.Worker(phase_checkpoint.store, config.REPO_PATH,
+                                                        agent_runner.converse, _deliver_conversation)
+    _conversation_worker.thread.start()
     threading.Thread(target=_status_supervisor_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.TASK_SOURCE,
@@ -5197,11 +5344,13 @@ def main() -> None:
         log.info("received %s; stopping (the in-flight tick is discarded, state.json "
                  "keeps the last completed one)", sig)
     finally:
+        if _conversation_worker:
+            _conversation_worker.close()
         _release_single_instance_lock()
 
 
 def _run_loop() -> None:
-    global _current_state
+    global _current_state, _conversation_state
     backoff = 1
     while True:
         _liveness["tick_started"] = time.time()
@@ -5218,6 +5367,8 @@ def _run_loop() -> None:
             continue
         prev = state["state"]
         _current_state = state
+        with _status_command_lock:
+            _conversation_state = copy.deepcopy(state)
         try:
             if state.get("item") and state["state"] != "IDLE":
                 agent_runner.set_task_context(state)
@@ -5253,7 +5404,9 @@ def _run_loop() -> None:
                 with _status_command_lock:
                     _receive_feedback(state)
             dispatched_feedback = False
-            if state.get("pending_reply_delivery") and not handled_command:
+            if not handled_command and _dispatch_conversation(state):
+                dispatched_feedback = True
+            elif state.get("pending_reply_delivery") and not handled_command:
                 _continue_reply_delivery(state)
                 dispatched_feedback = True
             elif state.get("item") and not handled_command:
@@ -5378,7 +5531,8 @@ def _run_loop() -> None:
             backoff = min(backoff * 2, 3600)
             continue
         if state["state"] in WAITS or state["state"] == "IDLE":
-            gmail_client.wait(config.POLL_INTERVAL_SECONDS)
+            gmail_client.wait(min(config.POLL_INTERVAL_SECONDS, 2) if state.get("item")
+                              else config.POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

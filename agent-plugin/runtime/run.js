@@ -9,6 +9,8 @@ const input = JSON.parse(await new Promise((resolve, reject) => {
   process.stdin.on('end', () => resolve(text));
   process.stdin.on('error', reject);
 }));
+const permission = input.conversation
+  ? [{permission: '*', pattern: '*', action: 'deny'}] : TRUSTED_PERMISSION;
 const server = spawn('opencode', ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
   cwd: input.directory, stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -52,9 +54,9 @@ try {
   if (input.sessionID) {
     const response = await request('/session/' + input.sessionID);
     root = (await response.json()).id;
-    await request('/session/' + root, 'PATCH', {permission: TRUSTED_PERMISSION});
+    await request('/session/' + root, 'PATCH', {permission});
   } else {
-    root = (await (await request('/session', 'POST', {permission: TRUSTED_PERMISSION})).json()).id;
+    root = (await (await request('/session', 'POST', {permission})).json()).id;
   }
   family.add(root);
   async function addChildren(sessionID) {
@@ -84,7 +86,7 @@ try {
         const event = JSON.parse(raw), p = event.properties || {};
         if (event.type === 'session.created' && family.has(p.info?.parentID)) family.add(p.info.id);
         if (event.type === 'permission.asked' && family.has(p.sessionID)) {
-          await request(`/session/${p.sessionID}/permissions/${p.id}`, 'POST', {response: 'always'});
+          await request(`/session/${p.sessionID}/permissions/${p.id}`, 'POST', {response: input.conversation ? 'reject' : 'always'});
           emit('permission_resolved', {sourceSessionID: p.sessionID});
         }
         if (event.type === 'session.error' && family.has(p.sessionID)) {
@@ -112,7 +114,7 @@ try {
   const [providerID, ...model] = input.model.split('/');
    const history = await runAsyncTurn(request, root, {
     model: {providerID, modelID: model.join('/')}, variant: input.variant,
-    ...(input.utility ? {tools: {read:false, write:false, edit:false, apply_patch:false,
+     ...(input.utility || input.conversation ? {tools: {read:false, write:false, edit:false, apply_patch:false,
       bash:false, task:false, grep:false, glob:false, webfetch:false, skill:false}} : {}),
     agent: input.agent || 'build', parts: [{type: 'text', text: input.prompt}],
    }, {failure: () => failure});

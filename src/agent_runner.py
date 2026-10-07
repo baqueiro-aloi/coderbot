@@ -37,6 +37,8 @@ EVIDENCE_CONTRACT = claude_runner.EVIDENCE_CONTRACT
 _task_language: ContextVar[str | None] = ContextVar("task_language", default=None)
 _task_context: ContextVar[dict | None] = ContextVar("task_context", default=None)
 _utility: ContextVar[bool] = ContextVar("utility", default=False)
+_lateral: ContextVar[bool] = ContextVar("lateral", default=False)
+_lateral_session: ContextVar = ContextVar("lateral_session", default=None)
 _invocation: ContextVar[dict | None] = ContextVar("invocation", default=None)
 _turn_lock = threading.Lock()
 _turn: dict = {"active": False}
@@ -92,6 +94,11 @@ def _end_turn() -> None:
 
 
 def _observe(event: dict) -> None:
+    if _lateral.get():
+        root = event.get("sessionID")
+        if root and event.get("sourceSessionID", root) == root and _lateral_session.get():
+            _lateral_session.get()(root)
+        return
     invocation = _invocation.get()
     root = event.get("sessionID")
     # HTTP bridge events carry the root in sessionID and the child in
@@ -291,6 +298,18 @@ def _opencode_environment() -> dict[str, str]:
         inline["agent"] = {"utility": {"mode": "primary", "description": "Text-only utility", "permission": {"*": "allow"}}}
         inline["default_agent"] = "utility"
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
+        # Do not discover project plugins/agents, including hooks which grant all
+        # permissions. The conversation has no reason to run inside the checkout.
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    if _lateral.get():
+        inline["permission"] = {"*": "deny"}
+        inline["mcp"] = {}
+        inline["plugin"] = []
+        inline["skills"] = {"paths": []}
+        inline["agent"] = {"conversation": {"mode": "primary", "description": "Text-only conversation",
+                                            "permission": {"*": "deny"}}}
+        inline["default_agent"] = "conversation"
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline)
     return env
 
 
@@ -362,7 +381,8 @@ def _stream_line(line: str) -> None:
     if not isinstance(event, dict):
         return
     _observe(event)
-    operations.observe(event)
+    if not _lateral.get():
+        operations.observe(event)
     summary = summarize_event(event)
     if summary is None:
         return
@@ -395,6 +415,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     timed_out = threading.Event()
     expired_operation = []
     started = time.monotonic()
+    invocation_role = turn_control.role.get()
 
     def _kill_on_timeout() -> None:
         timed_out.set()
@@ -409,7 +430,7 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
     stop_watch = threading.Event()
     def watch():
         while not stop_watch.wait(.5):
-            if expired := operations.expired():
+            if expired := operations.expired(invocation_role):
                 expired_operation.extend(expired[:1])
                 _kill_on_timeout()
                 return
@@ -452,26 +473,34 @@ def _run_streaming(cmd: list[str], *, cwd, env: dict[str, str], timeout: float,
 
 
 def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
-    cmd = ["opencode", "run", "--dir", str(config.REPO_PATH), "--model", config.OPENCODE_MODEL,
+    directory = config.DATA_DIR / "conversation_runtime" if _lateral.get() else config.REPO_PATH
+    if _lateral.get():
+        directory.mkdir(parents=True, exist_ok=True)
+    cmd = ["opencode", "run", "--dir", str(directory), "--model", config.OPENCODE_MODEL,
            "--auto", "--format", "json"]
+    if _lateral.get():
+        cmd.remove("--auto")  # Never let auto-approval override lateral denials.
     if config.OPENCODE_EFFORT:
         cmd.extend(["--variant", "coderbot-effort"])
     if session_id:
         cmd.extend(["--session", session_id])
+    if _lateral.get():
+        cmd.extend(["--agent", "conversation"])
     cmd.append(prompt)
     log.info("opencode %s model=%s effort=%s (prompt %d chars)",
              "resume" if session_id else "run", config.OPENCODE_MODEL,
              config.OPENCODE_EFFORT or "default", len(prompt))
     if config.OPENCODE_TRANSPORT == "http":
         bridge = Path(config.BRIDGE_PLUGIN_DIR) / "runtime" / "run.js"
-        proc = _run_streaming(["node", str(bridge)], cwd=config.REPO_PATH,
+        proc = _run_streaming(["node", str(bridge)], cwd=directory,
             env=_opencode_environment(), timeout=config.AGENT_TIMEOUT_SECONDS,
-            input_text=json.dumps({"directory": str(config.REPO_PATH), "model": config.OPENCODE_MODEL,
+            input_text=json.dumps({"directory": str(directory), "model": config.OPENCODE_MODEL,
                 "sessionID": session_id, "variant": "coderbot-effort" if config.OPENCODE_EFFORT else None,
-                "agent": "utility" if _utility.get() else "build", "utility": _utility.get(),
+                "agent": "conversation" if _lateral.get() else "utility" if _utility.get() else "build",
+                "utility": _utility.get(), "conversation": _lateral.get(),
                 "prompt": prompt}))
     else:
-        proc = _run_streaming(cmd, cwd=config.REPO_PATH, env=_opencode_environment(),
+        proc = _run_streaming(cmd, cwd=directory, env=_opencode_environment(),
                               timeout=config.AGENT_TIMEOUT_SECONDS)
 
     output, errors, observed_session = [], [], None
@@ -513,6 +542,36 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
     return result
 
 
+def converse(prompt: str, session_id: str | None = None, *, on_session=None):
+    """Text-only independent harness session; never starts/ends the work turn."""
+    tokens = [(turn_control.role, turn_control.role.set("conversation")),
+              (_lateral, _lateral.set(True)), (_utility, _utility.set(True)),
+              (_task_context, _task_context.set(None)), (_invocation, _invocation.set(None)),
+              (_lateral_session, _lateral_session.set(on_session))]
+    try:
+        with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
+            if config.AGENT == "claude":
+                args = ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                        "--setting-sources", "", "--disable-slash-commands"]
+                if session_id:
+                    args.extend(["--resume", session_id])
+                result = claude_runner._invoke(args, prompt)
+                if on_session:
+                    on_session(result.session_id)
+                return result
+            if config.AGENT == "opencode":
+                try:
+                    return _opencode(prompt, session_id)
+                except RuntimeError as error:
+                    if session_id and "Session not found" in str(error):
+                        return _opencode(prompt)
+                    raise
+            raise RuntimeError(f"unsupported conversation harness: {config.AGENT!r}")
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
@@ -522,8 +581,14 @@ def run(prompt: str, contract: bool = True):
     context = None
     before = None
     invocation_token = _invocation.set(None)
+    input_rows = []
     try:
         context = _task_context.get() if contract else None
+        if context:
+            import parallel_conversation
+            extra, input_rows = parallel_conversation.context_prompt(phase_checkpoint.store(), context, config.REPO_PATH,
+                                                                    invocation=phase_checkpoint.key(context, prompt))
+            prompt += extra
         before = None
         if context:
             try:
@@ -533,6 +598,8 @@ def run(prompt: str, contract: bool = True):
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
+            if input_rows:
+                parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, saved["session_id"])
             return OpenCodeResult(saved["session_id"], saved["output"])
         recovering = phase_checkpoint.interrupted(context, original_prompt) if context and config.AGENT == "opencode" else None
         if context and config.AGENT == "opencode":
@@ -550,6 +617,8 @@ def run(prompt: str, contract: bool = True):
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
             phase_checkpoint.record(context, original_prompt, result)
+            if input_rows:
+                parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, result.session_id)
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         return result
     finally:
@@ -571,8 +640,14 @@ def resume(session_id: str, prompt: str):
     context = None
     before = None
     invocation_token = _invocation.set(None)
+    input_rows = []
     try:
         context = _task_context.get()
+        if context:
+            import parallel_conversation
+            extra, input_rows = parallel_conversation.context_prompt(phase_checkpoint.store(), context, config.REPO_PATH,
+                                                                    invocation=phase_checkpoint.key(context, prompt))
+            prompt += extra
         before = None
         if context:
             try:
@@ -582,6 +657,8 @@ def resume(session_id: str, prompt: str):
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
+            if input_rows:
+                parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, saved["session_id"])
             return OpenCodeResult(saved["session_id"], saved["output"])
         recovering = phase_checkpoint.interrupted(context, original_prompt) if context and config.AGENT == "opencode" else None
         if context and config.AGENT == "opencode":
@@ -609,6 +686,8 @@ def resume(session_id: str, prompt: str):
             raise RuntimeError(f"unsupported CODEBOT_AGENT: {config.AGENT!r}")
         if context:
             phase_checkpoint.record(context, original_prompt, result)
+            if input_rows:
+                parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, result.session_id)
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
             context.setdefault("phase_sessions", {})[context["state"]] = result.session_id
         return result

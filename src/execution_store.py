@@ -10,7 +10,8 @@ import uuid
 
 ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
             "checkpoint", "artifact", "delivery_step", "feedback", "recovery",
-            "incident", "delivery_receipt", "contact", "provenance", "check_environment")
+            "incident", "delivery_receipt", "contact", "provenance", "check_environment",
+            "conversation", "conversation_input")
 
 
 class ExecutionStore:

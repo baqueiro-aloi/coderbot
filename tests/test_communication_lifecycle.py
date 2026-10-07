@@ -7,12 +7,27 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+# Keep Markdown outside the temporary module registry. Otherwise patch.dict
+# removes it after importing main, leaving proposal_package with a stale core
+# whose Extension class differs from subsequently imported extension modules.
+import markdown
+
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
                               "gmail_client": Mock()}):
     import main
 
 
 class CommunicationLifecycle(unittest.TestCase):
+    def test_review_markdown_extensions_share_the_renderer_module(self):
+        self.assertIs(main.proposal_package.markdown, markdown)
+        document = main.proposal_package.render({
+            "design.md": "## Design\n\n```python\nprint('ok')\n```\n\n"
+                         "| Check | Result |\n| --- | --- |\n| Tests | Passed |\n"
+        }, "Review")
+        self.assertIn("<pre><code>", document)
+        self.assertIn("<table>", document)
+        self.assertIn("Passed", document)
+
     def test_proposal_architecture_pr_and_merge_in_email_and_slack(self):
         for channel in ("email", "slack"):
             with self.subTest(channel=channel), tempfile.TemporaryDirectory() as tmp:

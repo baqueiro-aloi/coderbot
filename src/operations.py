@@ -61,6 +61,7 @@ def begin(kind, label, seconds, *, id=None):
     id = id or uuid.uuid4().hex
     with _lock:
         _active[id] = {"id": id, "kind": kind, "label": label[:140],
+                       "role": turn_control.role.get(),
                        "started_at": time.time(), "deadline": time.monotonic() + remaining(seconds),
                        "timeout": seconds,
                        "last_progress": time.time()}
@@ -72,14 +73,14 @@ def finish(id):
         _active.pop(id, None)
 
 
-def snapshot():
+def snapshot(role="work"):
     with _lock:
         return [{**entry, "remaining": max(0, entry["deadline"] - time.monotonic())}
-                for entry in _active.values()]
+                for entry in _active.values() if role is None or entry.get("role", "work") == role]
 
 
-def expired():
-    return [entry for entry in snapshot() if not entry["remaining"]]
+def expired(role="work"):
+    return [entry for entry in snapshot(role) if not entry["remaining"]]
 
 
 def observe(event):
@@ -125,7 +126,9 @@ def observe(event):
 
 def clear():
     with _lock:
-        _active.clear()
+        for id in list(_active):
+            if _active[id].get("role", "work") == turn_control.role.get():
+                del _active[id]
 
 
 def terminate(process, grace=3):

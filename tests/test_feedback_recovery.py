@@ -288,8 +288,9 @@ class FeedbackRecoveryTests(unittest.TestCase):
                  patch.object(main.gmail_client, "mark_processed") as processed:
                 main._receive_feedback(state)
                 main._receive_feedback(state)
-            self.assertEqual(len(feedback.pending(database, state, root)), 1)
-            ack.assert_called_once()
+            self.assertEqual(len(database.list("conversation", database.task_identity(state, root))), 1)
+            self.assertEqual(len(feedback.pending(database, state, root)), 0)
+            ack.assert_not_called()  # The lateral worker answers after classification.
             with patch.object(main.gmail_client, "poll_reply", return_value=("m2", "ABORT")), \
                  patch.object(main.gmail_client, "mark_processed") as processed:
                 self.assertFalse(main._receive_feedback(state))

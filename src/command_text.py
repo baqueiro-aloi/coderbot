@@ -3,6 +3,12 @@ import re
 
 COMMANDS = ("ABORT", "STATUS", "KICK", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME", "VERIFY")
 _ALIASES = {"PAUSE": "HOLD", "RESUME": "CONTINUE"}
+
+
+def parse_btw(body: str) -> str | None:
+    match = re.match(r"^\s*/btw(?:\s+|$)(.*)$", body, re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else None
+
 _CMD_RE = re.compile(r"^(ABORT|STATUS|KICK|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
                      re.IGNORECASE)
 _CONTINUE_RE = re.compile(
