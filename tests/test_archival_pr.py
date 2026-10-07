@@ -71,11 +71,11 @@ class ArchivalTests(unittest.TestCase):
             commands)
         expected_archive = self.state["archive_path"]
         self.assertIn(call(
-            "add", "-A", "--", "openspec/specs", "openspec/changes/api-version",
+            "add", "-A", "--", "openspec/specs",
             expected_archive), git.call_args_list)
         self.assertIn(call(
             "commit", "-m", "chore: archive OpenSpec change", "--", "openspec/specs",
-            "openspec/changes/api-version", expected_archive), git.call_args_list)
+            expected_archive), git.call_args_list)
         self.assertNotIn(call("add", "--", "openspec/"), git.call_args_list)
         self.assertEqual(self.state["state"], "OPEN_PR")
         self.assertNotIn("archive_error", self.state)
@@ -92,6 +92,56 @@ class ArchivalTests(unittest.TestCase):
         self.assertEqual(self.state["state"], "ARCHIVING")
         self.assertEqual(self.state["archive_round"], 1)
         self.assertIn("archive failed", self.state["archive_error"])
+
+    def test_resuming_committed_archive_preserves_recovery_note_and_finishes(self):
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        for key, value in (("user.name", "Fixture"), ("user.email", "fixture@example.test")):
+            subprocess.run(["git", "config", key, value], cwd=self.repo, check=True)
+        active = self.repo / "openspec/changes/api-version"
+        (active / "proposal.md").write_text("Approved proposal")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "active change"], cwd=self.repo, check=True)
+        self.state["archive_path"] = "openspec/changes/archive/2026-10-07-api-version"
+        target = self.repo / self.state["archive_path"]
+        target.parent.mkdir(parents=True)
+        active.rename(target)
+        note = target / main.TRANSCRIPT_NAME
+        note.write_text("Preserved recovery note")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "archive already committed"], cwd=self.repo, check=True)
+        # An extra archive-owned file requires a closing commit; active path no
+        # longer exists either in the filesystem or Git's index.
+        (target / "design.md").write_text("Recovered approved design")
+        source = self.repo / ".git/transcript.txt"
+        source.write_text("Growing recovery transcript" * 100)
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main, "_transcript_path", return_value=source), \
+             patch.object(main, "_run_checked", return_value="valid") as commands, \
+             patch.object(main, "_validate_archived_change"), \
+             patch.object(main, "save_state"), patch.object(main, "trail"):
+            main.do_archive(self.state)
+            first_head = main.git("rev-parse", "HEAD")
+            self.state["state"] = "ARCHIVING"
+            source.write_text("Even more recovery activity")
+            main.do_archive(self.state)
+            self.assertEqual(first_head, main.git("rev-parse", "HEAD"))
+            self.assertEqual(main.git("status", "--porcelain"), "")
+        self.assertEqual(self.state["state"], "OPEN_PR")
+        self.assertEqual(note.read_text(), "Preserved recovery note")
+        self.assertFalse(active.exists())
+        self.assertFalse(any(call.args[0][:2] == ["openspec", "archive"] for call in commands.call_args_list))
+
+    def test_archive_commit_paths_keep_deleted_active_files_only_when_pending(self):
+        self.state["archive_path"] = "openspec/changes/archive/2026-10-07-api-version"
+        (self.repo / "openspec/changes/api-version").rmdir()
+        with patch.object(main.config, "REPO_PATH", self.repo):
+            roots = main._archive_commit_paths(self.state,
+                "D openspec/changes/api-version/proposal.md\n"
+                "?? openspec/changes/archive/2026-10-07-api-version/proposal.md")
+            self.assertIn("openspec/changes/api-version", roots)
+            roots = main._archive_commit_paths(self.state,
+                " M openspec/changes/archive/2026-10-07-api-version/agent-log.md")
+            self.assertNotIn("openspec/changes/api-version", roots)
 
     def test_strict_validation_failure_stays_before_open_pr(self):
         def run(command, **kwargs):
@@ -229,7 +279,7 @@ class ArchivalTests(unittest.TestCase):
         self.assertFalse(any(c.args[0][:2] == ["openspec", "archive"]
                              for c in process.call_args_list))
         self.assertIn(call(
-            "add", "-A", "--", "openspec/specs", "openspec/changes/api-version",
+            "add", "-A", "--", "openspec/specs",
             "openspec/changes/archive/2026-09-01-api-version"), git.call_args_list)
         self.assertEqual(self.state["state"], "OPEN_PR")
 

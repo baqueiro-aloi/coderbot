@@ -360,10 +360,15 @@ def _archive_transcript(state: dict, target: Path) -> None:
     archive must not fail over the log."""
     source = _transcript_path(state)
     try:
+        destination = target / TRANSCRIPT_NAME
+        if destination.exists():
+            log.info("preserving existing archived agent log for %s", state.get("slug"))
+            return
         if not source.is_file():
             log.info("no agent log to archive for %s", state.get("slug"))
             return
-        (target / TRANSCRIPT_NAME).write_text(source.read_text())
+        with destination.open("x") as output:
+            output.write(source.read_text())
         log.info("archived agent log (%d bytes) to %s/%s",
                  source.stat().st_size, target.name, TRANSCRIPT_NAME)
     except OSError:
@@ -1843,6 +1848,18 @@ def _unrelated_archive_changes(state: dict, status: str) -> list[str]:
     return unrelated
 
 
+def _archive_commit_paths(state: dict, status: str) -> tuple[str, ...]:
+    """Keep deleted tracked paths, omit paths already removed from Git on restart."""
+    roots = ("openspec/specs", f"openspec/changes/{state['slug']}", state["archive_path"])
+    changed = []
+    for line in status.splitlines():
+        match = re.match(r"^ ?[A-Z?!]{1,2} (.*)$", line)
+        rest = match.group(1) if match else line
+        changed.extend(path.strip().strip('"') for path in rest.split(" -> "))
+    return tuple(root for root in roots if (config.REPO_PATH / root).exists() or
+                 any(path == root or path.startswith(root + "/") for path in changed))
+
+
 def _validate_archived_change(target: Path) -> None:
     """Strict-validate only the change we just archived.
 
@@ -1914,8 +1931,7 @@ def do_archive(state: dict) -> None:
             raise RuntimeError("archival produced unrelated tracked changes: "
                                + ", ".join(unrelated[:10]))
         if status:
-            paths = ("openspec/specs", f"openspec/changes/{state['slug']}",
-                     state["archive_path"])
+            paths = _archive_commit_paths(state, status)
             git("add", "-A", "--", *paths)
             git("commit", "-m", "chore: archive OpenSpec change", "--", *paths)
         state.pop("archive_round", None)
