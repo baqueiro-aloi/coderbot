@@ -35,7 +35,7 @@ def report(store, state, repo, directory, phase, *, error=None, detail="", ident
                 value = value.decode("utf-8", errors="replace")
             if value is not None:
                 fields[key] = value
-    # Human-readable .txt: don't wrap conversation/logs in escaped JSON strings.
+    # Keep the incident identity independent of its presentation format.
     text = redact(f"Task: {state.get('item', '-')}\nPhase: {phase}\n"
                   f"Attempt: {state.get('execution_attempt_id') or '-'}\n\n{detail}")
     for key in ("cmd", "returncode", "stdout", "stderr", "output"):
@@ -48,12 +48,32 @@ def report(store, state, repo, directory, phase, *, error=None, detail="", ident
     folder = Path(directory) / "diagnostics"
     folder.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^a-zA-Z0-9_-]", "-", phase.lower())
-    path = folder / f"diagnostic-{name}-{row['id'][:12]}.txt"
+    path = folder / f"diagnostic-{name}-{row['id'][:12]}.md"
     if not path.is_file():
         timestamp = datetime.fromtimestamp(row["created"], timezone.utc).isoformat()
-        path.write_text(f"Incident: {row['id']}\nTime: {timestamp}\n{text}\n", encoding="utf-8")
+        document = (f"# Diagnostic report\n\n"
+                    f"- Incident: {row['id']}\n"
+                    f"- Time: {timestamp}\n"
+                    f"- Task: {state.get('item', '-')}\n"
+                    f"- Phase: {phase}\n"
+                    f"- Attempt: {state.get('execution_attempt_id') or '-'}\n")
+        if detail:
+            document += "\n## Details\n\n" + str(detail) + "\n"
+        for key in ("cmd", "returncode", "stdout", "stderr", "output"):
+            if key in fields:
+                document += f"\n## {key}\n\n" + _code_block(fields[key])
+        if trace:
+            document += "\n## Full exception chain\n\n" + _code_block(trace)
+        path.write_text(redact(document), encoding="utf-8")
     store.update("incident", row, path=str(path), hash=hashlib.sha256(path.read_bytes()).hexdigest())
     return path
+
+
+def _code_block(value):
+    """Fence raw output without letting embedded backticks close the block."""
+    text = str(value)
+    fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
+    return f"{fence}text\n{text}" + ("" if text.endswith("\n") else "\n") + f"{fence}\n"
 
 
 def summary(error=None, detail=""):

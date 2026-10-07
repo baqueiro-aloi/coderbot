@@ -7,9 +7,29 @@ from execution_store import ExecutionStore
 import message_delivery
 import slack_client
 import gmail_client
+import diagnostics
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_generated_markdown_diagnostic_delivery_in_both_channels(self):
+        for backend in (slack_client, gmail_client):
+            with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:
+                store = ExecutionStore(Path(root) / "db")
+                path = diagnostics.report(store, {"item": "task"}, root, root, "VERIFYING", detail="Full details")
+                def send(envelope, receipts, confirm):
+                    artifact = envelope["attachments"][0]
+                    self.assertEqual(artifact["filename"], path.name)
+                    self.assertEqual(artifact["media_type"], "text/markdown")
+                    self.assertEqual(artifact["role"], "diagnostic")
+                    self.assertEqual(Path(artifact["path"]).read_bytes(), path.read_bytes())
+                    confirm("body", {"status": "confirmed"})
+                    confirm(artifact["id"], {"status": "confirmed"})
+                    return "thread"
+                with patch.object(backend, "send_envelope", side_effect=send):
+                    result = message_delivery.deliver(store, {"item": "task"}, root, root,
+                        backend, "Results", "Supporting details: " + path.name, "C:1", [path])
+                self.assertTrue(result["complete"])
+
     def test_empty_slack_attachment_is_delivered_as_explicit_empty_output_not_pass(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "green-eslint.txt"
@@ -109,8 +129,8 @@ class DeliveryTests(unittest.TestCase):
         from email.parser import BytesParser
         from email.policy import default
         with tempfile.TemporaryDirectory() as root:
-            path = Path(root) / "diagnostic.log"
-            path.write_text("Full traceback\n" + "frame\n" * 1000)
+            path = diagnostics.report(ExecutionStore(Path(root) / "db"), {"item": "task"},
+                root, root, "VERIFYING", detail="Full traceback\n" + "frame\n" * 1000)
             service = Mock()
             service.users.return_value.messages.return_value.send.return_value.execute.return_value = {
                 "id": "sent", "threadId": "thread"}
@@ -120,8 +140,8 @@ class DeliveryTests(unittest.TestCase):
             message = BytesParser(policy=default).parsebytes(base64.urlsafe_b64decode(raw))
             file = next(message.iter_attachments())
             self.assertEqual(file.get_payload(decode=True), path.read_bytes())
-            self.assertEqual(file.get_filename(), "diagnostic.txt")
-            self.assertEqual(file.get_content_type(), "text/plain")
+            self.assertEqual(file.get_filename(), path.name)
+            self.assertEqual(file.get_content_type(), "text/markdown")
             self.assertEqual(message["Message-ID"], "<stable@coderbot.local>")
 
     def test_pending_attachment_content_cannot_be_silently_replaced(self):

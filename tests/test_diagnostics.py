@@ -22,12 +22,54 @@ class DiagnosticsTests(unittest.TestCase):
                 path = diagnostics.report(store, {"item": "task"}, root, root,
                                           "VERIFYING", error=error)
             text = path.read_text()
+            self.assertEqual(path.suffix, ".md")
+            self.assertTrue(text.startswith("# Diagnostic report\n"))
+            self.assertIn("## Full exception chain\n\n```text\n", text)
             self.assertIn("x" * 5000, text)
             self.assertIn("direct cause", text)
             self.assertIn("wrapper", text)
             self.assertNotIn("ghp_exampleSecretToken", text)
             reopened = ExecutionStore(Path(root) / "db")
             self.assertEqual(len(reopened.list("incident", store.task_identity({"item": "task"}, root))), 1)
+
+    def test_markdown_sections_preserve_prose_and_fence_raw_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            error = RuntimeError("failed")
+            error.cmd = ["python", "check.py"]
+            error.returncode = 1
+            error.stdout = b"# literal heading\n```\noutput\n```\n"
+            error.stderr = "Authorization: Bearer bearersecret"
+            state = {"item": "task", "execution_attempt_id": "attempt-1"}
+            path = diagnostics.report(store, state, root, root, "VERIFYING", error=error,
+                                      detail="**Context**\n\n- Check failed.")
+            text = path.read_text()
+            self.assertIn("- Attempt: attempt-1\n", text)
+            self.assertIn("## Details\n\n**Context**\n\n- Check failed.\n", text)
+            self.assertIn("## cmd\n\n```text\n['python', 'check.py']\n```", text)
+            self.assertIn("## returncode\n\n```text\n1\n```", text)
+            self.assertIn("## stdout\n\n````text\n# literal heading\n```\noutput\n```\n````", text)
+            self.assertIn("Authorization: Bearer [REDACTED]", text)
+            self.assertNotIn("bearersecret", text)
+            repeated = diagnostics.report(store, state, root, root, "VERIFYING", error=error,
+                                          detail="**Context**\n\n- Check failed.")
+            self.assertEqual(repeated, path)
+            self.assertEqual(repeated.read_text(), text)
+
+    def test_markdown_migrates_existing_incident_without_changing_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"item": "task"}
+            row = store.record("incident", state, root, "stable", {"phase": "VERIFYING"}, status="recorded")
+            legacy = Path(root) / "diagnostics" / f"diagnostic-verifying-{row['id'][:12]}.txt"
+            legacy.parent.mkdir()
+            legacy.write_text("Original diagnostic")
+            store.update("incident", row, path=str(legacy))
+            path = diagnostics.report(store, state, root, root, "VERIFYING", detail="Details", identity="stable")
+            self.assertEqual(path, legacy.with_suffix(".md"))
+            self.assertEqual(legacy.read_text(), "Original diagnostic")
+            self.assertEqual(len(store.list("incident", store.task_identity(state, root))), 1)
+            self.assertEqual(store.get("incident", row["id"])["data"]["path"], str(path))
 
     def test_size_limits_are_lossless_for_compression_and_parts(self):
         with tempfile.TemporaryDirectory() as root:

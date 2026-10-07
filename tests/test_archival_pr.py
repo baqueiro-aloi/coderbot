@@ -940,7 +940,7 @@ class PushPhaseTests(unittest.TestCase):
         args = email.call_args.args
         self.assertIn("fixed details", args[2])
         self.assertEqual(args[3][0], Path("/tmp/evidence.txt"))
-        self.assertEqual(args[3][-1].suffix, ".txt")
+        self.assertEqual(args[3][-1].suffix, ".md")
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("push_context", state)
 

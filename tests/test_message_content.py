@@ -57,7 +57,7 @@ class ConversationContentTests(unittest.TestCase):
                 self.assertIn(question, body)
                 self.assertIn(question, state['last_email']['body'])
                 file = deliver.call_args.args[4][0]
-                self.assertEqual(file.suffix, '.txt')
+                self.assertEqual(file.suffix, '.md')
                 self.assertIn(context, file.read_text())
                 self.assertNotIn('"detail":', file.read_text())
 
