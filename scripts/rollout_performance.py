@@ -92,7 +92,7 @@ def deploy(app, release, image, *, probes=()):
         result['functional'] = verify(image=current['Image'], expected_image=expected_image,
             release_sha=command(['git', 'rev-parse', 'HEAD'], cwd=release).stdout.strip(),
             expected_sha=expected_sha, state_before=before, state_after=after, probes=list(probes))
-        if probes and result['functional']['status'] != 'pass':
+        if result['functional']['status'] != 'pass':
             raise RuntimeError('Functional release verification failed; restoring original image')
         (backup / "result.json").write_text(json.dumps(result, indent=2))
         return result
@@ -108,5 +108,13 @@ if __name__ == "__main__":
     parser.add_argument("app")
     parser.add_argument("release")
     parser.add_argument("image")
+    parser.add_argument('--readiness-probe', action='append', default=[], metavar='COMMAND',
+                        help='shell-free argv encoded as JSON, required with --smoke-probe')
+    parser.add_argument('--smoke-probe', action='append', default=[], metavar='COMMAND',
+                        help='shell-free argv encoded as JSON, required with --readiness-probe')
     args = parser.parse_args()
-    print(json.dumps(deploy(args.app, args.release, args.image), indent=2))
+    probes = ([{'id': 'readiness-' + str(i), 'kind': 'readiness', 'argv': json.loads(value), 'timeout': 120}
+               for i, value in enumerate(args.readiness_probe)] +
+              [{'id': 'smoke-' + str(i), 'kind': 'smoke', 'argv': json.loads(value), 'timeout': 120}
+               for i, value in enumerate(args.smoke_probe)])
+    print(json.dumps(deploy(args.app, args.release, args.image, probes=probes), indent=2))
