@@ -162,3 +162,24 @@ task state. `postdeployment` needs its own functional smoke/readiness receipt;
 systemd, Docker health and heartbeat are liveness only. These classes appear
 separately in bot-owned PR validation sections. An accepted omission remains
 `not_run`, with original decision and reason, in every class.
+
+## Durable schema and rollout operation
+
+`check_run` records created by the current controller carry
+`result.provenance: "verified_v2"`. On database open, an older completed receipt
+that has a result but lacks provenance is preserved and labelled
+`legacy_unverified`; it cannot be reused as proof. Records with no result are
+ordinary historical rows and are not rewritten. Legacy free-text `check_waivers`
+are moved to `legacy_validation_waivers` for audit and never omit a check. A new
+exception requires the version-2 exact-check receipt described above.
+
+`scripts/rollout_performance.py` is a local-host helper, not an AWS or Azure
+deployment mechanism. It requires an existing state file, a release checkout and
+an already-built image. It snapshots private runtime inputs with restrictive
+permissions, binds the authorized image digest and release SHA, recreates the
+container without changing the original target checkout, and records an explicit
+readiness plus smoke-probe receipt. Docker health, systemd and heartbeat alone
+are liveness, not functional verification. A failed recreation or functional
+probe restores the captured image/mount configuration; operators must review the
+private backup and rollback result before retrying. No command in this project
+selects a cloud account, changes IAM, provisions infrastructure or spends money.
