@@ -160,8 +160,12 @@ def _restore_config() -> bool:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    # Overrides inherited/project defaults, including headless Claude's manual default.
+    env["CAVEMAN_DEFAULT_MODE"] = (
+        "caveman" if config.USE_CAVEMAN and "--tools" not in cmd else "off")
     return operations.run(cmd, cwd=config.REPO_PATH, timeout=config.AGENT_TIMEOUT_SECONDS,
-                          kind="agent")
+                          kind="agent", env=env)
 
 
 # Monotonic deadline until which _active_model() keeps returning the fallback model.
@@ -232,6 +236,8 @@ def _invoke_with_model(args: list[str], prompt: str,
         for _ in range(3):
             index = cmd.index("--plugin-dir")
             del cmd[index:index + 2]
+    elif config.USE_CAVEMAN:
+        cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, config.CLAUDE_EFFORT,
              len(prompt), _config_report())

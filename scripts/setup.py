@@ -102,7 +102,7 @@ def fields_for(page: str, values: dict[str, str], search: str = ""):
         return [s for s in SETTINGS if s.key == "CODEBOT_COMM_CHANNEL" or
                 (s.group in ("Email", "Slack") and relevant(s, values) and not s.advanced)]
     if page == "Agent":
-        return [s for s in SETTINGS if s.key == "CODEBOT_AGENT" or
+        return [s for s in SETTINGS if s.group == "Agent" or
                 (s.group in ("Claude", "OpenCode") and relevant(s, values) and not s.advanced)]
     if page == "Evidence":
         return [s for s in SETTINGS if s.group == "Evidence" and not s.advanced]

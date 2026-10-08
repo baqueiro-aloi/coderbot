@@ -900,6 +900,21 @@ for anyone. In Slack mode each instance uses separate app credentials; commands
 only work as replies in that app's own task threads, never as fleet-wide top-level
 messages.
 
+## Optional Caveman mode
+
+In `scripts/setup.sh`, open **Agent** and select **Usar Caveman: YES/NO**.
+YES saves `USE_CAVEMAN=true`; NO saves `USE_CAVEMAN=false`.
+Only the exact lowercase string `true` enables the mode; every other value
+(including unset, empty, `TRUE`, `yes`, `1` or surrounding spaces) disables it.
+Recreate the container after changing `.env`.
+
+The image includes the official `JuliusBrussee/caveman` plugin, pinned to v3.2.0
+commit `e20f07e8152a0c0360f58c09e79d30ac94329991`. Rebuild the image once to install it.
+When enabled, the selected Claude Code or OpenCode coding harness starts in
+Caveman mode and supports `/caveman`; text-only utility/conversation sessions
+retain their plugin isolation. No proxy, global installer or target-repo rules
+are installed. Machine-readable output contracts and permission settings stay unchanged.
+
 ## Toolchain versions
 
 The image pins exact versions for reproducible rebuilds: the base image

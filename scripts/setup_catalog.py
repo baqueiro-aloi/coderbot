@@ -66,6 +66,7 @@ SETTINGS = (
     field("CODEBOT_SLACK_APP_TOKEN", "Slack", f"In the same app at {SLACK_APP_SETTINGS_URL}, enable Socket Mode and Event Subscriptions > Subscribe to bot events > message.channels; then Basic Information > App-Level Tokens > Generate Token and Scopes (connections:write); copy its xapp-... token.", secret=True),
     field("CODEBOT_SLACK_CHANNEL_ID", "Slack", "Select a public channel this bot has joined; setup fetches its name and stores the C... ID."),
     field("CODEBOT_AGENT", "Agent", "Coding agent CLI.", "claude", "choice", choices=("claude", "opencode")),
+    field("USE_CAVEMAN", "Agent", "Usar Caveman", "false", "exact_bool"),
     field("CLAUDE_CODE_OAUTH_TOKEN", "Claude", "Headless Claude Code authentication token.", secret=True),
     field("CLAUDE_MODEL", "Claude", "Primary Claude model.", "claude-fable-5"),
     field("CLAUDE_EFFORT", "Claude", "Claude effort level.", "medium", "choice", choices=("low", "medium", "high")),
@@ -156,6 +157,9 @@ def normalize_value(setting: Setting, value: str) -> str:
 def validate_value(setting: Setting, value: str) -> str | None:
     if "\n" in value or "\r" in value or "\0" in value:
         return "must be a single-line value"
+    # Every single-line value except exact 'true' is a valid disabled setting.
+    if setting.kind == "exact_bool":
+        return None
     if setting.choices and value and value not in setting.choices:
         return "choose one of: " + ", ".join(setting.choices)
     if setting.kind in ("positive", "nonnegative") and value:

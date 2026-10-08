@@ -30,6 +30,17 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.257 opencode-ai@1.18.18 @fissio
         "superpowers@git+https://github.com/obra/superpowers.git#v6.3.0"
 
 COPY requirements.txt /tmp/requirements.txt
+# Fetch the official plugin without running its global installer (which also
+# installs a proxy CLI and modifies user settings). v3.2.0, immutable commit.
+RUN mkdir -p /opt/coderbot/caveman \
+    && curl -fsSL https://codeload.github.com/JuliusBrussee/caveman/tar.gz/e20f07e8152a0c0360f58c09e79d30ac94329991 \
+        | tar -xz --strip-components=1 -C /opt/coderbot/caveman \
+    && test -f /opt/coderbot/caveman/skills/caveman/SKILL.md \
+    && test -f /opt/coderbot/caveman/src/hooks/caveman-config.js \
+    && test -f /opt/coderbot/caveman/src/hooks/caveman-parse.js \
+    && node --check /opt/coderbot/caveman/src/plugins/opencode/plugin.js \
+    && claude plugin validate /opt/coderbot/caveman/.claude-plugin/plugin.json \
+    && chmod -R a+rX /opt/coderbot/caveman
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # claude refuses --dangerously-skip-permissions as root; uid 501 matches the

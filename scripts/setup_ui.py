@@ -265,6 +265,10 @@ class SetupApp(App[bool]):
                                       value=value if value in joined_ids else Select.NULL,
                                       prompt="Choose a joined public channel",
                                       id=f"setting-{setting.key}"))
+            elif setting.kind == "exact_bool":
+                widgets.append(Select([("YES", "true"), ("NO", "false")],
+                                      value="true" if value == "true" else "false",
+                                      allow_blank=False, id=f"setting-{setting.key}"))
             elif setting.choices:
                 widgets.append(Select([(choice or "Default (OpenCode/provider)", choice) for choice in setting.choices],
                                       value=value if value in setting.choices else setting.choices[0],

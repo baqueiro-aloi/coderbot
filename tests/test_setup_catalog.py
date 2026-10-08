@@ -33,7 +33,8 @@ def runtime_names() -> set[str]:
     for filename in ("scripts/entrypoint.sh", "scripts/healthcheck.sh", "docker-compose.yml",
                      "docker-compose.ec2.yml", "deploy/aws/docker-compose.aws.yml"):
         found.update(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", (ROOT / filename).read_text()))
-    return {name for name in found if name.startswith(("CODEBOT_", "CLAUDE_", "OPENCODE_", "GH_", "GIT_"))}
+    return {name for name in found if name == "USE_CAVEMAN" or
+            name.startswith(("CODEBOT_", "CLAUDE_", "OPENCODE_", "GH_", "GIT_"))}
 
 
 class CatalogAudit(unittest.TestCase):

@@ -174,6 +174,9 @@ BASE_BRANCH = os.environ.get("CODEBOT_BASE_BRANCH") or "main"
 # The coding CLI used for autonomous work. Claude remains the default so existing
 # deployments continue to work without changing their .env file.
 AGENT = os.environ.get("CODEBOT_AGENT") or "claude"
+# Deliberately exact: no aliases, whitespace trimming or case folding.
+USE_CAVEMAN = os.environ.get("USE_CAVEMAN") == "true"
+CAVEMAN_PLUGIN_DIR = Path("/opt/coderbot/caveman")
 
 # `or` (not a get-default) so an empty env value from .env still falls back,
 # rather than passing --model "" to the claude CLI.

@@ -252,11 +252,24 @@ def _opencode_environment() -> dict[str, str]:
         raise RuntimeError("OPENCODE_CONFIG_CONTENT skills.paths entries must be strings")
 
     managed_plugins = [str(config.SUPERPOWERS_PLUGIN_DIR), str(config.BRIDGE_PLUGIN_DIR)]
+    caveman_enabled = config.USE_CAVEMAN and not (_utility.get() or _lateral.get())
+    env["CAVEMAN_DEFAULT_MODE"] = "caveman" if caveman_enabled else "off"
+    if caveman_enabled:
+        managed_plugins.append(str(config.CAVEMAN_PLUGIN_DIR / "src/plugins/opencode"))
     inline["plugin"] = list(dict.fromkeys([*plugins, *managed_plugins]))
     # The bridge plugin adds its own skills dir; the openspec-* skills live outside any
     # plugin, so they are added here (the OpenCode variant of the generated set).
     openspec_skills = str(config.OPENSPEC_SKILLS_DIR / "opencode")
     inline["skills"] = {**skills, "paths": list(dict.fromkeys([*paths, openspec_skills]))}
+    if caveman_enabled:
+        inline["skills"]["paths"] = list(dict.fromkeys([
+            *inline["skills"]["paths"], str(config.CAVEMAN_PLUGIN_DIR / "skills")]))
+        # HTTP and CLI both receive the native slash-command template.
+        commands = inline.setdefault("command", {})
+        if not isinstance(commands, dict):
+            raise RuntimeError("OPENCODE_CONFIG_CONTENT command must contain a JSON object")
+        commands["caveman"] = {"description": "Activate caveman mode (off | status)",
+                               "template": "Activate caveman mode: $ARGUMENTS"}
     inline.update(model=config.OPENCODE_MODEL, share="disabled", autoupdate=False)
     # This runtime is explicitly trusted. The managed hook also overrides agents
     # loaded from project/global files after this inline configuration is merged.

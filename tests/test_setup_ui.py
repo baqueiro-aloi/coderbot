@@ -17,6 +17,32 @@ except ImportError:
 
 @unittest.skipIf(SetupApp is None, "host Textual dependency not installed")
 class SetupMenu(unittest.IsolatedAsyncioTestCase):
+    async def test_caveman_yes_no_persists_exact_boolean(self):
+        for agent in ("claude", "opencode"):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / ".env"
+                path.write_text(f"CODEBOT_AGENT={agent}\nUSE_CAVEMAN=TRUE\n")
+                app = SetupApp(EnvFile(path))
+                with patch.object(setup_ui, "test_section", return_value=[]):
+                    async with app.run_test(size=(120, 100)) as pilot:
+                        await pilot.click("#section-Agent")
+                        await pilot.pause()
+                        select = app.query_one("#setting-USE_CAVEMAN", Select)
+                        self.assertEqual(select.value, "false")
+                        select.value = "true"
+                        await pilot.pause()
+                        await pilot.click("#save")
+                        await pilot.pause()
+                        self.assertEqual(EnvFile(path).values["USE_CAVEMAN"], "true")
+                        await pilot.click("#section-Agent")
+                        await pilot.pause()
+                        self.assertEqual(app.query_one("#setting-USE_CAVEMAN", Select).value, "true")
+                        app.query_one("#setting-USE_CAVEMAN", Select).value = "false"
+                        await pilot.pause()
+                        await pilot.click("#save")
+                        await pilot.pause()
+                        self.assertEqual(EnvFile(path).values["USE_CAVEMAN"], "false")
+
     async def test_agent_effort_can_be_saved_and_reset_to_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"
