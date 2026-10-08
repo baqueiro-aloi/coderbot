@@ -73,4 +73,4 @@
 - [x] 8.3 Documentar schemas/migración, configuración del receptor privado, presupuesto, TTL, excepciones, limitaciones del chat y operación/rollback.
 - [x] 8.4 Ejecutar suite Python completa, tests JavaScript/runtime y validación OpenSpec strict; registrar resultados reales y corregir regresiones sin reducir alcance.
 - [ ] 8.5 Obtener revisión independiente del cambio completo y revalidar fixes con evidencia trazable.
-- [ ] 8.6 Entregar implementación y checklist de piloto autorizado con integración real y override sin key; declarar pendientes externos honestamente sin desplegar ni gastar automáticamente.
+- [x] 8.6 Entregar implementación y checklist de piloto autorizado con integración real y override sin key; declarar pendientes externos honestamente sin desplegar ni gastar automáticamente.
