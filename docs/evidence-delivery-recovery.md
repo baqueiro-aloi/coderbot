@@ -10,15 +10,29 @@ No evidence belongs in Git.
 - `CODEBOT_EVIDENCE_UPLOAD=on` enables upload.
 - `CODEBOT_DRIVE_FOLDER_ID` selects an authorized destination; empty uses the existing
   `Codebot evidence` folder convention.
-- `CODEBOT_DRIVE_SHARE_MODE=inherited` (default) changes no permissions and requires
-  `CODEBOT_DRIVE_REVIEWERS` email identities whose access can be verified.
-- `CODEBOT_DRIVE_SHARE_MODE=reviewers` grants reader access only to those identities.
-- `CODEBOT_DRIVE_SHARE_MODE=anyone` explicitly authorizes anyone-with-link access.
-  Do not select it without permission to make this evidence public.
+- Delivery ALWAYS inherits the folder permissions. Codebot verifies the parent and
+  effective ACL, including domain permissions, without creating or modifying permissions.
+- `CODEBOT_DRIVE_SHARE_MODE` and `CODEBOT_DRIVE_REVIEWERS` remain compatibility settings;
+  neither enables public sharing nor creates individual grants.
 
 The Google token needs Drive write scope. Do not paste tokens or secrets into Slack.
-Upload failure is retryable; unconfigured reviewer access is blocked, not successful.
-An uploaded file is reused by SHA-256 if permissions need repairing.
+Upload failure is retryable; unverifiable inherited access is blocked, not successful.
+An uploaded file is reused by SHA-256 if access needs checking again.
+
+## Reconcile before recording
+
+After a controller-approved verification or internal review, attached MP4 files are
+registered with hashes and an implementation-content identity (excluding OpenSpec
+planning/archive paths). Finalization first rechecks an attested published file against
+Drive size/checksum, parent ACL and the current PR link. It reuses that link without
+recapturing or uploading. Local attested media can also be reused before publication.
+An arbitrary PR link or agent prose alone is never proof of current evidence.
+
+Legacy deliveries without this attestation need a controller-accepted verification
+of the existing MP4; keep the MP4 and delivery receipt attached to that result. A failed
+remote reconciliation does not start duplicate capture or upload. `/results/` paths in
+Playwright reports are mapped only into the current run's `test-results/` directory;
+traversal, unrelated paths and escaping symlinks are rejected.
 
 ## Separate PICA harness correction
 
@@ -34,6 +48,13 @@ an incomplete unfiltered suite fail. Codebot does not waive a rejected harness e
 Its diagnostics distinguish capture from post-capture validation and retain clips.
 
 ## Deployment and PR #114 recovery
+
+Exact `merge`, `merge anyway` and bare displayed PR options received during review
+repairs or pushing are retained for the same PR decision and processed at WAIT_MERGE.
+They do not interrupt a running repair, authorize a changed decision or bypass the
+normal merge handler. `/btw merge anyway` remains informational, never authorization.
+If the reviewed implementation changed, normal content checks can require renewed
+review before merge. Sending a decision is not confirmation that GitHub merged it.
 
 1. Review and test the codebot change; separately correct/test the PICA validator.
 2. Obtain explicit deployment authorization and configure authorized Drive access.

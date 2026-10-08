@@ -301,8 +301,7 @@ EVIDENCE_UPLOAD = (os.environ.get("CODEBOT_EVIDENCE_UPLOAD") or "on").strip().lo
 # Empty: a "Codebot evidence" folder is found or created at the root of My Drive.
 DRIVE_FOLDER_ID = (os.environ.get("CODEBOT_DRIVE_FOLDER_ID") or "").strip()
 DRIVE_FOLDER_NAME = "Codebot evidence"
-# Public sharing must be explicitly authorized; inherited access is verified against
-# configured reviewer identities instead of assuming folder permissions suffice.
+# Legacy settings remain readable, but delivery always preserves folder permissions.
 DRIVE_SHARE_MODE = (os.environ.get("CODEBOT_DRIVE_SHARE_MODE") or "inherited").strip().lower()
 DRIVE_REVIEWERS = [p.strip() for p in (os.environ.get("CODEBOT_DRIVE_REVIEWERS") or "").split(",") if p.strip()]
 

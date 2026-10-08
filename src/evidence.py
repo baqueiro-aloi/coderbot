@@ -56,6 +56,21 @@ def supplied_artifacts(files: list[Path], content: str) -> list[Path]:
     return found
 
 
+def report_video_path(report: Path, raw: str) -> Path:
+    """Map only the documented container results mount; reject traversal/symlinks."""
+    path = Path(raw)
+    if ".." in path.parts:
+        raise ValueError("Unsafe report video path")
+    if path.is_absolute() and path.is_relative_to(Path("/results")):
+        path = report.parent / path.relative_to("/results")
+    elif not path.is_absolute():
+        path = report.parent / path
+    resolved = path.resolve()
+    if not resolved.is_relative_to(report.parent.resolve() / "test-results"):
+        raise ValueError("Video outside current run")
+    return resolved
+
+
 def validate_playwright_report(path: Path) -> bool:
     """Validate selected results, never infer full-suite success from a demo run."""
     try:
@@ -81,7 +96,7 @@ def validate_playwright_report(path: Path) -> bool:
             result = results[0]
             if result.get("status") != "passed" or result.get("retry", 0) or result.get("errors"):
                 return False
-            videos = [Path(a["path"]).resolve() for a in result.get("attachments", []) if a.get("contentType") == "video/webm"]
+            videos = [report_video_path(path, a["path"]) for a in result.get("attachments", []) if a.get("contentType") == "video/webm"]
             if not videos:
                 return False
             for video in videos:
@@ -347,7 +362,7 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
                     for result in test.get("results", []):
                         for item in result.get("attachments", []):
                             if item.get("contentType") == "video/webm":
-                                yield Path(item["path"]).resolve()
+                                yield report_video_path(report_path, item["path"])
             for nested in suite.get("suites", []):
                 yield from attachments(nested)
         selected.update(p for suite in json.loads(report_path.read_text())["suites"] for p in attachments(suite))

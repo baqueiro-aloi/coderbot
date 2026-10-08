@@ -74,6 +74,7 @@ class FinalizePrTests(unittest.TestCase):
         for p in (patch.object(main.config, "EVIDENCE_UPLOAD", True),
                   patch.object(main.config, "DATA_DIR", Path(self.scratch.name) / "data"),
                   patch.object(main, "content_snapshot", return_value="fixture"),
+                  patch.object(main, "_run_checked", return_value='{"body":"summary"}'),
                   patch.object(main, "save_state"),
                   patch.object(main, "_publish_progress"),
                   patch.object(main, "_sync_pr_video"),

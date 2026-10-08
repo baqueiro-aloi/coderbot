@@ -255,12 +255,33 @@ def classification_prompt(row):
 def deterministic(state, text):
     if parse_btw(text) is not None:
         return None
+    if deferred_pr_reply(state, text):
+        return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
     if parse_command(text) or re.fullmatch(r"(?i)\s*(retry|abort|complete|merge(?: anyway)?)\s*[.!]?\s*", text):
         return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
     selection = handoffs.selected_reply(state, text)
     if selection is not None and not selection.get("prose"):
         return {"intent": "answer", "resolves_pending_question": True, "inputs": []}
     return None
+
+
+def pr_decision_key(state):
+    """Stable across repair phases, never across another displayed PR decision."""
+    decision = state.get("pending_decision", {})
+    if decision.get("wait_state") != "WAIT_MERGE" or decision.get("task") != state.get("slug") or not state.get("pr_url"):
+        return None
+    return hashlib.sha256(json.dumps([state["pr_url"], decision], sort_keys=True).encode()).hexdigest()
+
+
+def deferred_pr_reply(view, text):
+    if parse_btw(text) is not None or not pr_decision_key(view):
+        return False
+    if view.get("state") not in ("ADDRESS_PR_THREADS", "ADDRESS_REVIEW", "PUSHING", "WAIT_REVIEW"):
+        return False
+    if re.fullmatch(r"(?i)\s*merge(?: anyway)?[.!]?\s*", text):
+        return True
+    selection = handoffs.selected_reply({**view, "state": "WAIT_MERGE"}, text)
+    return bool(selection and not selection.get("prose") and not selection.get("error"))
 
 
 def save_classification(store, row, value):
@@ -271,6 +292,10 @@ def save_classification(store, row, value):
     if value["intent"] == "change_request" and not value.get("inputs"):
         value = {**value, "intent": "ambiguous", "resolves_pending_question": False}
     view = row["data"]["snapshot"]
+    if deferred_pr_reply(view, row["data"]["original_text"]) and not value.get("inputs") and not value.get("action_depends_on_change"):
+        return store.update("conversation", row, status="classified", route="flow",
+            classification={"intent": "answer", "resolves_pending_question": True, "inputs": []},
+            deferred_pr_decision=pr_decision_key(view))
     if view.get("state") not in {"WAIT_REPLY", "WAIT_STUCK", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_CLEAN"}:
         value = {**value, "intent": "change_request" if value.get("inputs") else "conversation",
                  "resolves_pending_question": False}

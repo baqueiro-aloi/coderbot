@@ -2,19 +2,23 @@
 
 ## Completed verification
 
-- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests`: 891 tests, zero failures, one skipped (full-tests6.log in the session temporary directory).
+- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests`: 906 tests, zero failures, one skipped (merge-final4.log in the session temporary directory).
 - Subsequent focused evidence regressions, including conversion failure/retry: passed.
 - `openspec validate fix-evidence-delivery --strict --json`: passed.
 - `git diff --check`: passed.
 
-## Remaining implementation gaps
+## Implemented behavior and operational limits
 
-- Upload and access now have separate durable checkpoints; permission failures preserve the completed upload and remote identity.
-- Mixed product/delivery assessments retain an independent pending delivery request, gated on product feedback completion and return to review. Additional mixed-request restart tests remain pending.
-- Requests received during initial proposal waits still follow the existing planning route; delivery-only requests there need independent classification without changing pending approval.
-- Access configuration failures are reported and retained with retry backoff, but a targeted clarification/reply flow is not yet wired.
-- Shared publication is used across finalization, feedback push and explicit requests; recording/conversion/notification orchestration is not yet entirely unified across all callers.
-- Explicit delivery notifications now use the existing durable message receipt/reconciliation transport even for link-only replies. The full interruption matrix still needs integration coverage.
-- Integration coverage still needs the complete fresh-delivery, existing-manifest reuse and interruption matrix before task 6.1 is complete.
+- Upload and inherited-access verification have separate durable checkpoints. No permission mutation is performed; domain ACLs do not require individual reviewer emails.
+- Mixed product/delivery assessments retain an independent pending delivery request, gated on product feedback completion and return to review; durable ordering is covered by regression tests.
+- Delivery-only requests for an existing PR during proposal waits are independently classified and executed without approving or reimplementing the proposal. Requests without an existing PR remain initial planning context.
+- Access failures retain the delivery request with retry backoff and ask for confirmation of the destination folder's existing access settings, never public or individual grants. Retried requests preserve the outstanding merge/approval decision.
+- Finalization now first adopts controller-attested current published media after live remote checksum/parent/ACL and PR-link checks, or reuses local attested media. OpenSpec-only changes do not invalidate the implementation identity. Legacy agent deliveries without attestation require a controller-accepted verification attaching the existing MP4. Controller callers share prepare/publication/sync/confirmed-notification checkpoint services.
+- Explicit delivery notifications use the existing durable message receipt/reconciliation transport even for link-only replies; controller restart and transport-failure regressions confirm completed recording/publication/sync are not repeated.
+- Integration tests cover fresh delivery, current manifest adoption, stale manifest rejection, conversion/upload/access/PR/notification failures, and reuse after restart without duplicate side effects.
 
 No deployment, bot restart, Drive publication, PR mutation or PICA checkout edits were performed. The PICA filtered validator requires its separately scoped follow-up.
+
+## PR reply routing
+
+Exact `merge`/`merge anyway` and bare displayed PR choices received during repair/push/review now remain controller-owned durable flow records. They wait for WAIT_MERGE and the same PR/displayed decision. Changed decisions require confirmation, explicit /btw stays lateral, and the ordinary merge handler still applies content/conflict/approval/requirement checks. No remote merge was performed.

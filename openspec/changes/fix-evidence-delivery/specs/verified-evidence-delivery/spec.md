@@ -4,6 +4,17 @@ Ensure implementation demos are valid, attributable to the delivered implementat
 
 ## ADDED Requirements
 
+### Requirement: Retain PR decisions during repairs
+The system SHALL durably retain explicit replies to the displayed PR decision received while repairing, pushing or reviewing that same PR, and process them only when its decision becomes actionable. The existing merge gates SHALL remain in effect. Changed PR or displayed decisions SHALL require confirmation; explicit lateral messages SHALL NOT authorize merge.
+
+#### Scenario: Merge anyway during review repairs
+- **WHEN** the user replies merge anyway during repairs to a PR with a pending merge decision
+- **THEN** the reply waits in the controller queue and reaches the existing merge handler at WAIT_MERGE rather than becoming a lateral conversation
+
+#### Scenario: Different pending decision
+- **WHEN** the PR or displayed decision changes before the retained reply becomes actionable
+- **THEN** codebot requests confirmation and does not merge using that reply
+
 ### Requirement: Separate evidence selection from full-suite verification
 The system SHALL distinguish a selected demo run from full-suite verification. Evidence SHALL require passing selected cases without skips, failures, retries or report errors and nonempty current-run videos. Missing matches or a harness validation failure SHALL NOT count as successful evidence. Diagnostics SHALL distinguish capture, validation and conversion failures.
 
@@ -45,7 +56,15 @@ Authorized requests to capture, convert, publish or share implementation evidenc
 - **THEN** delivery is scheduled without changing the pending merge decision or requesting a new product proposal solely for publication
 
 ### Requirement: Verifiable reviewer delivery
-The system SHALL distinguish uploaded files, authorized reviewer access, verified PR-link synchronization and actual message delivery. It SHALL use explicit sharing configuration, preserve human PR edits, pass attachments as actual validated files, and report unmet steps accurately. Local file paths SHALL NOT be presented as delivered attachments or shareable links.
+The system SHALL distinguish uploaded files, inherited folder access, verified PR-link synchronization and actual message delivery. It SHALL always preserve existing folder permissions without creating public or individual grants, recognize effective domain ACLs, preserve human PR edits, pass attachments as actual validated files, and report unmet steps accurately. Local file paths SHALL NOT be presented as delivered attachments or shareable links.
+
+#### Scenario: Already published current evidence
+- **WHEN** controller-attested current media matches the existing Drive file and the PR link
+- **THEN** finalization reuses that link in its conversation summary without another capture or upload, including after planning-only archival changes
+
+#### Scenario: Inherited domain access
+- **WHEN** the destination folder grants domain readership and the uploaded file retains that effective access
+- **THEN** codebot verifies inherited access without requiring individual reviewer emails or creating permissions
 
 #### Scenario: Investigation includes attachment markers
 - **WHEN** an investigation response identifies valid attachment files

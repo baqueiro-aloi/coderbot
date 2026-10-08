@@ -1511,6 +1511,7 @@ def _complete_verify(state: dict, result) -> None:
     state["quality_report"] = parsed
     state["quality_snapshot"] = content_snapshot(config.REPO_PATH)
     state["quality_controller_validated"] = True
+    evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
     _advance_verified(state)
 
 
@@ -1561,6 +1562,7 @@ def _complete_internal_review(state: dict, result) -> None:
     state.pop("review_gate_round_feedback", None)
     state["internal_review_report"] = parsed
     state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
+    evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
     state["state"] = "E2E"  # Final unit/lint/build checks also apply without a UI harness.
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
@@ -2343,16 +2345,25 @@ def finalize_pr(state: dict, note: str = "") -> None:
     database = phase_checkpoint.store()
     task_id = database.task_identity(state, config.REPO_PATH)
     identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
-    recorded = delivery_checkpoint.step(database, task_id, identity, "RECORD",
-        lambda: [str(p) for p in evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))],
-        validate=evidence.valid_paths)
+    try:
+        manifests = config.DATA_DIR / "outbox/evidence"
+        adopted = None
+        if manifests.exists() and any(manifests.rglob("verified-delivery.json")):
+            existing_body = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json", "body"]))["body"]
+            adopted = evidence_delivery.reconcile(state, config.REPO_PATH, existing_body)
+    except Exception:
+        log.exception("existing evidence could not be reconciled; not duplicating capture/publication")
+        email(state, "evidence reconciliation pending",
+              "Existing video delivery could not be verified just now. No new recording or upload was started; retry reconciliation.")
+        return
+    recorded = [] if adopted else evidence_delivery.prepare(database, state, config.REPO_PATH, identity=identity)
     evidence_files = [Path(p) for p in recorded]
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
     def upload():
         files, url = _offload_evidence_video(state, evidence_files)
         return {"files": [str(p) for p in files], "url": url}
     upload_key = identity + ":" + digest([config.DRIVE_FOLDER_ID, config.DRIVE_SHARE_MODE, config.DRIVE_REVIEWERS])
-    uploaded = delivery_checkpoint.step(database, task_id, upload_key, "UPLOAD", upload,
+    uploaded = {"files": [], "url": adopted["url"]} if adopted else delivery_checkpoint.step(database, task_id, upload_key, "UPLOAD", upload,
         validate=lambda result: bool(result.get("url")))
     evidence_files, video_url = [Path(p) for p in uploaded["files"]], uploaded["url"]
     if video_url:
@@ -2360,8 +2371,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
         state["evidence_url"] = video_url.splitlines()[0]
         save_state(state)
         _publish_progress(state)
-        delivery_checkpoint.step(database, task_id, identity, "PR_SYNC",
-            lambda: (_sync_pr_video(state, video_url), True)[1], validate=bool)
+        if not adopted:
+            evidence_delivery.sync(database, state, config.REPO_PATH, video_url, _sync_pr_video)
     # Match Gmail's attachment cap before indexing evidence as available. The sender
     # can still explain an omitted file, but the cover must not claim it was attached.
     deliverable, omitted, size = [], [], 0
@@ -2391,7 +2402,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
         body += note + "\n\n"
     if not video_url and any(path.suffix in (".mp4", ".webm", ".html") for path in evidence_files):
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
-                            else "a Playwright video (mp4)")
+                            else "a Playwright video (mp4)" if any(p.suffix.lower() == ".mp4" for p in evidence_files)
+                            else "a Playwright source video (webm); MP4 conversion pending")
         body += f"Evidence: {attachment_desc} queued for delivery.\n"
         if state.get("evidence_delivery", {}).get("status") != "complete":
             outcome = state.get("evidence_delivery", {})
@@ -2446,7 +2458,8 @@ def finalize_pr(state: dict, note: str = "") -> None:
                      "were set aside — please re-send your instruction against the updated "
                      "PR.\n\n")
     body += "Reply with change requests, or tell me to merge."
-    delivery_checkpoint.step(database, task_id, identity, "NOTIFY",
+    notification_identity = identity + ":" + digest([video_url, [str(p) for p in evidence_files]])
+    evidence_delivery.notification(database, state, config.REPO_PATH, notification_identity,
         lambda: email(state, "PR ready for review", body, evidence_files, milestone="pr_review"))
     # pr_summary is kept (until the task ends) so a later re-finalize — e.g. after a
     # conflict resolution — doesn't email an empty summary.
@@ -3145,16 +3158,14 @@ def do_push(state: dict) -> None:
         else:
             finalize_pr(state)
     elif continuation == "feedback":
-        recorded = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind")) if state.get("has_e2e_harness") else []
+        recorded = [Path(p) for p in evidence_delivery.prepare(phase_checkpoint.store(), state, config.REPO_PATH)] if state.get("has_e2e_harness") else []
         attachments = [Path(path) for path in context.get("attachments", [])]
         attachments.extend(path for path in recorded if path not in attachments)
         attachments, video_url = _offload_evidence_video(state, attachments)
         if video_url:
             _publish_progress(state)
             store = phase_checkpoint.store()
-            delivery_checkpoint.step(store, store.task_identity(state, config.REPO_PATH),
-                digest([state["pr_url"], video_url]), "PR_SYNC",
-                lambda: (_sync_pr_video(state, video_url), True)[1], validate=bool)
+            evidence_delivery.sync(store, state, config.REPO_PATH, video_url, _sync_pr_video)
         body = (f"PR updated: {state['pr_url']}\n\n"
                 f"Requested: {context.get('feedback') or '(see earlier message)'}\n\n"
                 f"Changed (implementation report): {context.get('output', '')}\n\n"
@@ -3165,7 +3176,10 @@ def do_push(state: dict) -> None:
         attachments.append(detailed)
         if video_url:
             body += f"\n\nVideo: {video_url}"
-        email(state, "PR updated", body, attachments)
+        store = phase_checkpoint.store()
+        evidence_delivery.notification(store, state, config.REPO_PATH,
+            digest([state["pr_url"], str(state.get("delivered_sha")), video_url, body]),
+            lambda: email(state, "PR updated", body, attachments))
         state.pop("pending_feedback", None)
         state["state"] = "WAIT_MERGE"
         state["reviewed_pr_snapshot"] = (state.get("final_check_report") or {}).get("snapshot")
@@ -3593,8 +3607,19 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     original_phase = state["state"]
     lateral_change = bool(row["data"].get("conversation_input_id"))
     phase = (state.get("return_state") if original_phase == "WAIT_REPLY" else original_phase)
+    # A PR already exists, but a supplementary proposal can still be awaiting
+    # approval. Classify delivery without interpreting it as that approval.
+    if original_phase == "WAIT_APPROVAL" and state.get("pr_url") and not row["data"].get("assessment"):
+        classified = agent_runner.run("Classify only whether this entire message requests evidence delivery "
+            "without product changes or approval. No tools. Return JSON {\"delivery_only\":true|false}. "
+            "Mixed product changes, approval replies and ambiguous messages are false.\n" + prompts.fenced("message", text), contract=False)
+        if parse_json_reply(classified.output).get("delivery_only") is True:
+            row = database.update("feedback", row, assessment=feedback.validate({"action": "delivery",
+                "answer": "Deliver existing evidence", "reason": "Delivery does not approve the proposal",
+                "references": "Authorized user request: " + text}))
+    delivery_only = row["data"].get("assessment", {}).get("action") == "delivery"
     if lateral_change and (phase in ("EXPLORING", "PROPOSING") or
-                           original_phase == "WAIT_APPROVAL" and not state.get("approved_proposal")):
+                           original_phase == "WAIT_APPROVAL" and not state.get("approved_proposal")) and not delivery_only:
         # A lateral requirement is not an answer to the working question. Update
         # initial planning with phase guardrails, preserving an unanswered wait.
         saved_wait = {key: copy.deepcopy(state[key]) for key in
@@ -3701,7 +3726,8 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         # Preserve the pending decision and resume it after success or a retryable failure.
         try:
             outcome = evidence_delivery.deliver(database, state, config.REPO_PATH,
-                sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"))
+                sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"),
+                read_pr=lambda s: json.loads(_run_checked(["gh", "pr", "view", s["pr_url"], "--json", "body"]))["body"])
             if outcome["status"] != "complete":
                 raise RuntimeError(f"Evidence delivery pending at {outcome['stage']}: {outcome.get('error', outcome['status'])}")
         except Exception as exc:
@@ -3709,9 +3735,8 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
             if not row["data"].get("delivery_error"):
                 detail = str(exc) + "\nNo product replanning or merge is authorized."
                 if "access" in str(exc):
-                    detail += ("\nWhich authorized reviewer emails should receive reader access, or should existing "
-                               "configured access be used? Configure CODEBOT_DRIVE_SHARE_MODE and "
-                               "CODEBOT_DRIVE_REVIEWERS; do not send credentials here.")
+                    detail += ("\nConfirm the destination folder and its existing access settings. "
+                               "Codebot will not create or modify permissions; do not send credentials here.")
                 email(state, "evidence delivery pending", detail)
         else:
             database.update("feedback", row, status="complete", outcome="evidence delivered")
@@ -5116,7 +5141,20 @@ def _dispatch_conversation(state):
     rows = parallel_conversation.flow_pending(store, state, config.REPO_PATH)
     if not rows:
         return False
+    rows = [r for r in rows if not r["data"].get("deferred_pr_decision") or state["state"] == "WAIT_MERGE"]
+    if not rows:
+        return False
     row = rows[0]
+    if row["data"].get("deferred_pr_decision"):
+        if state["state"] != "WAIT_MERGE":
+            return False  # Repairs and push continue; lateral worker does not consume it.
+        if row["data"]["deferred_pr_decision"] != parallel_conversation.pr_decision_key(state):
+            store.update("conversation", row, status="complete", outcome="stale PR decision; not authorized")
+            email(state, "PR decision needs confirmation", "The displayed PR decision changed. Please review it and send your decision again; I did not merge.")
+            return True
+        # Only phase drift is permitted. The existing merge handler still validates
+        # reviewed content, conflicts, pending requirements and GitHub protections.
+        row = store.update("conversation", row, snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
     if row["data"].get("flow_applied") or state.get("conversation_flow_id") == row["id"]:
         store.update("conversation", row, status="complete", outcome=state["state"])
         state.pop("conversation_flow_id", None)

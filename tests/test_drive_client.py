@@ -30,8 +30,9 @@ class DriveClientTests(unittest.TestCase):
         self.files = self.service.files.return_value
         self.files.create.return_value.execute.return_value = {"id": "f1", "webViewLink": LINK}
         self.files.list.return_value.execute.return_value = {"files": []}
+        self.files.get.return_value.execute.return_value = {"parents": ["folder-42", "folder-new", "folder-old", "f1"]}
         self.service.permissions.return_value.list.return_value.execute.return_value = {
-            "permissions": [{"type": "anyone", "role": "reader"}]}
+            "permissions": [{"type": "domain", "domain": "aloi.tech", "role": "reader"}]}
         patches = [
             patch.object(drive_client, "_drive_service", return_value=self.service),
             patch.object(config, "DRIVE_FOLDER_ID", ""),
@@ -106,19 +107,18 @@ class DriveClientTests(unittest.TestCase):
 
     def test_sharing_failure_preserves_upload_but_does_not_claim_access(self):
         self.service.permissions.return_value.list.return_value.execute.return_value = {"permissions": []}
-        self.service.permissions.return_value.create.return_value.execute.side_effect = \
-            RuntimeError("policy forbids link sharing")
+        self.service.permissions.return_value.list.return_value.execute.side_effect = RuntimeError("cannot inspect ACL")
         with patch.object(config, "DRIVE_FOLDER_ID", "folder-42"):
             result = drive_client.publish_evidence(self.video, "a.mp4")
             self.assertEqual(result["url"], LINK)
             self.assertFalse(result["access"])
             self.assertEqual(result["status"], "retryable")
 
-    def test_inherited_access_requires_known_reviewers_and_does_not_make_public(self):
+    def test_inherited_domain_access_needs_no_reviewers_and_never_changes_permissions(self):
         with patch.object(config, "DRIVE_SHARE_MODE", "inherited"), patch.object(config, "DRIVE_REVIEWERS", []):
             result = drive_client.publish_evidence(self.video, "a.mp4")
-        self.assertEqual(result["status"], "blocked")
-        self.assertFalse(result["access"])
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["access"])
         self.service.permissions.return_value.create.assert_not_called()
 
     def test_existing_upload_is_reused_and_access_verified(self):

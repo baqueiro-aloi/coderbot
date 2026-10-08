@@ -10,6 +10,7 @@ PR #114 recorded passing demos but its filtered-run validator rejected them; cod
 - Route evidence delivery requests through controller-owned delivery at safe points, independently of product replanning and merge authorization.
 - Deliver real attachments or verified links; distinguish upload, reviewer access, PR synchronization and notification outcomes.
 - Provide an explicit, nonautomatic recovery procedure for PR #114 after deployment.
+- Retain explicit PR decisions received during review repairs until the same decision is actionable; never treat them as lateral chat or bypass existing merge gates.
 
 ## Capabilities
 

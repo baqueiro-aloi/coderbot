@@ -83,7 +83,7 @@ def publish_evidence(path: Path, name: str, *, upload_only=False, uploaded=None)
         service = _drive_service()
         folder = _folder_id(service)
         identity = hashlib.sha256(path.read_bytes()).hexdigest()
-        existing = [uploaded] if uploaded else service.files().list(
+        existing = [{"id": uploaded["id"], "webViewLink": uploaded.get("url") or uploaded.get("webViewLink")}] if uploaded else service.files().list(
             q=f"'{_escape(folder)}' in parents and trashed = false and appProperties has {{ key='codebotEvidence' and value='{identity}' }}",
             fields="files(id,webViewLink)", pageSize=1, supportsAllDrives=True,
             includeItemsFromAllDrives=True).execute(num_retries=3).get("files", [])
@@ -102,30 +102,10 @@ def publish_evidence(path: Path, name: str, *, upload_only=False, uploaded=None)
         try:
             permissions = service.permissions().list(fileId=created["id"],
                 fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
-            mode = config.DRIVE_SHARE_MODE
-            targets = ([{"type": "anyone", "role": "reader"}] if mode == "anyone" else
-                       [{"type": "user", "role": "reader", "emailAddress": email} for email in config.DRIVE_REVIEWERS]
-                       if mode == "reviewers" else [])
-            for target in targets:
-                if not any(all(p.get(k) == v for k, v in target.items() if k != "role") for p in permissions):
-                    service.permissions().create(fileId=created["id"], body=target,
-                        fields="id", supportsAllDrives=True).execute(num_retries=3)
-            permissions = service.permissions().list(fileId=created["id"],
-                fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
-            public = any(p.get("type") == "anyone" and p.get("role") in ("reader", "writer", "owner") for p in permissions)
-            reviewers = config.DRIVE_REVIEWERS
-            known = bool(reviewers) and all(any(p.get("emailAddress", "").casefold() == email.casefold() and
-                p.get("role") in ("reader", "writer", "owner") for p in permissions) for email in reviewers)
-            if mode not in ("anyone", "reviewers", "inherited"):
-                result["error"] = "Invalid CODEBOT_DRIVE_SHARE_MODE"
-            elif (mode == "anyone" and public) or (mode in ("reviewers", "inherited") and known):
-                result.update(status="complete", access=True)
-            else:
-                result["error"] = "Reviewer access unconfirmed; configure authorized sharing mode and reviewer identities"
+            result.update(verify_inherited(service, created["id"], folder, permissions))
         except Exception:  # noqa: BLE001
-            log.exception("uploaded %s but could not share it by link; only the "
-                          "account owner can open %s", name, link)
-            result.update(status="retryable", error="Permission update or verification failed")
+            log.exception("uploaded %s but could not verify inherited access for %s", name, link)
+            result.update(status="retryable", error="Inherited permission verification failed")
         log.info("uploaded evidence %s (%d bytes) to Drive: %s",
                  name, path.stat().st_size, link)
         return result
@@ -141,3 +121,34 @@ def upload_evidence(path: Path, name: str) -> str | None:
     """Compatibility wrapper: only return links with verified reviewer access."""
     result = publish_evidence(path, name)
     return result.get("url") if result.get("access") else None
+
+
+def verify_inherited(service, file_id, folder, permissions=None):
+    """Verify parent and effective folder ACL without mutating any permissions."""
+    file = service.files().get(fileId=file_id, fields="id,parents,trashed", supportsAllDrives=True).execute(num_retries=3)
+    if file.get("trashed") or folder not in file.get("parents", []):
+        return {"status": "blocked", "access": False, "error": "Evidence is not in the authorized folder"}
+    if permissions is None:
+        permissions = service.permissions().list(fileId=file_id, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
+    parent = service.permissions().list(fileId=folder, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
+    def identities(entries):
+        return {(p.get("type"), p.get("emailAddress", "").lower(), p.get("domain", "").lower()) for p in entries
+                if p.get("role") in ("reader", "writer", "owner", "organizer", "fileOrganizer")}
+    inherited = identities(parent)
+    if not inherited or not inherited.issubset(identities(permissions)):
+        return {"status": "blocked", "access": False, "error": "Folder permissions could not be verified on evidence"}
+    return {"status": "complete", "access": True, "access_mode": "inherited", "folder_id": folder}
+
+
+def verify_existing(file_id, path, folder=None):
+    """Read-only remote validation for adoption of an already published MP4."""
+    service = _drive_service()
+    authorized_folder = _folder_id(service)
+    if folder and folder != authorized_folder:
+        raise ValueError("Receipt folder is not the configured evidence destination")
+    folder = authorized_folder
+    file = service.files().get(fileId=file_id, fields="id,webViewLink,parents,size,md5Checksum,mimeType,trashed", supportsAllDrives=True).execute(num_retries=3)
+    if file.get("trashed") or file.get("mimeType") != "video/mp4" or int(file.get("size", 0)) != Path(path).stat().st_size or file.get("md5Checksum") != hashlib.md5(Path(path).read_bytes()).hexdigest():
+        raise ValueError("Remote evidence differs from verified local MP4")
+    access = verify_inherited(service, file_id, folder)
+    return {**access, "id": file_id, "url": file["webViewLink"], "hash": hashlib.sha256(Path(path).read_bytes()).hexdigest(), "stage": "access"}

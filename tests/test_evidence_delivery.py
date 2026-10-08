@@ -10,6 +10,46 @@ from execution_store import ExecutionStore
 
 
 class EvidenceDeliveryTests(unittest.TestCase):
+    def test_delivery_during_proposal_wait_preserves_approval(self):
+        import main
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"item": "task", "slug": "task", "state": "WAIT_APPROVAL",
+                     "pr_url": "https://github.com/a/b/pull/1", "pending_decision": {"question": "Approve?"}}
+            row = feedback.receive(store, state, root, "message", "Upload existing demo")
+            with patch.object(main.agent_runner, "run", return_value=Mock(output='{"delivery_only":true}')), \
+                 patch.object(main.evidence_delivery, "deliver", return_value={"status": "complete"}), \
+                 patch.object(main, "save_state"), patch.object(main, "email"), \
+                 patch.object(main, "_handle_reply") as reply:
+                main._apply_received_feedback(state, store, row)
+            reply.assert_not_called()
+            self.assertEqual(state["state"], "WAIT_APPROVAL")
+            self.assertEqual(state["pending_decision"], {"question": "Approve?"})
+
+    def test_blocked_delivery_remains_pending_and_retries_without_changing_decision(self):
+        import main
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"item": "task", "slug": "task", "state": "WAIT_MERGE",
+                     "pr_url": "https://github.com/a/b/pull/1", "pending_decision": {"question": "Merge?"}}
+            row = feedback.receive(store, state, root, "request", "Publish video")
+            row = store.update("feedback", row, assessment={"action": "delivery", "answer": "Publish", "reason": "Delivery", "references": "request"})
+            with patch.object(main.evidence_delivery, "deliver", side_effect=[
+                    {"status": "blocked", "stage": "access", "error": "Cannot verify inherited ACL"}, {"status": "complete"}]), \
+                 patch.object(main, "email") as notify, patch.object(main, "save_state"):
+                main._apply_received_feedback(state, store, row)
+                pending = store.get("feedback", row["id"])
+                self.assertEqual(pending["status"], "pending")
+                self.assertIn("existing access", notify.call_args.args[2])
+                main._apply_received_feedback(state, store, pending)
+            self.assertEqual(store.get("feedback", row["id"])["status"], "complete")
+            self.assertEqual(state["state"], "WAIT_MERGE")
+            self.assertEqual(state["pending_decision"], {"question": "Merge?"})
+
+    def setUp(self):
+        p = patch("evidence_delivery.register_verified")
+        p.start()
+        self.addCleanup(p.stop)
     def test_mixed_delivery_waits_for_product_completion_and_review(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
@@ -73,7 +113,7 @@ class EvidenceDeliveryTests(unittest.TestCase):
                  patch("drive_client.publish_evidence", side_effect=[
                      {"status": "retryable", "stage": "upload"},
                       {"status": "complete", "id": "a", "url": "https://drive.google.com/file/d/a/view"},
-                      {"status": "complete", "id": "a", "access": True, "url": "https://drive.google.com/file/d/a/view"}]) as upload:
+                      {"status": "complete", "id": "a", "folder_id": "folder", "access": True, "url": "https://drive.google.com/file/d/a/view"}]) as upload:
                 first = evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=notify)
                 self.assertEqual(first["status"], "retryable")
                 second = evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=notify)
@@ -111,7 +151,7 @@ class EvidenceDeliveryTests(unittest.TestCase):
             with patch("evidence_delivery.snapshot", return_value="snapshot"), \
                  patch("evidence.valid_media", return_value=True), \
                  patch("evidence.record_evidence", return_value=[video]) as record, \
-                  patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "access": True,
+                  patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "folder_id": "folder", "access": True,
                      "url": "https://drive.google.com/file/d/a/view"}) as upload:
                 with self.assertRaisesRegex(RuntimeError, "PR unavailable"):
                     evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=Mock())
@@ -148,7 +188,7 @@ class EvidenceDeliveryTests(unittest.TestCase):
                  patch("evidence.valid_media", side_effect=lambda p: Path(p).is_file()), \
                  patch("evidence.record_evidence", return_value=[clip]) as record, \
                  patch("evidence.stitch_playwright_clips", side_effect=[None, mp4]) as convert, \
-                  patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "access": True, "url": "url"}):
+                  patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "folder_id": "folder", "access": True, "url": "url"}):
                 first = evidence_delivery.deliver(store, state, root, sync_pr=Mock(), notify=Mock())
                 self.assertEqual(first["stage"], "conversion")
                 self.assertTrue(clip.exists())
@@ -156,3 +196,43 @@ class EvidenceDeliveryTests(unittest.TestCase):
                 self.assertEqual(second["status"], "complete")
                 self.assertEqual(record.call_count, 1)
                 self.assertEqual(convert.call_count, 2)
+
+    def test_fresh_delivery_and_restart_use_each_checkpoint_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = ExecutionStore(root / "db")
+            video = root / "demo.mp4"
+            video.write_bytes(b"video")
+            state = {"item": "task", "pr_url": "https://github.com/a/b/pull/1", "thread_id": "thread"}
+            notify, sync = Mock(), Mock()
+            with patch("evidence_delivery.snapshot", return_value="snapshot"), \
+                 patch("evidence.valid_media", return_value=True), \
+                 patch("evidence.record_evidence", return_value=[video]) as record, \
+                 patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "folder_id": "folder", "access": True, "url": "url"}) as publish:
+                evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=notify)
+                restored = json.loads(json.dumps(state))
+                evidence_delivery.deliver(ExecutionStore(root / "db"), restored, root, sync_pr=sync, notify=notify)
+            record.assert_called_once()
+            self.assertEqual(publish.call_count, 2)  # Upload + inherited ACL check.
+            sync.assert_called_once()
+            notify.assert_called_once()
+
+    def test_notification_failure_retries_without_republishing(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = ExecutionStore(root / "db")
+            video = root / "demo.mp4"
+            video.write_bytes(b"video")
+            state = {"item": "task", "pr_url": "https://github.com/a/b/pull/1", "thread_id": "thread"}
+            notify, sync = Mock(side_effect=[ConnectionError("transport"), None]), Mock()
+            with patch("evidence_delivery.snapshot", return_value="snapshot"), \
+                 patch("evidence.valid_media", return_value=True), \
+                 patch("evidence.record_evidence", return_value=[video]) as record, \
+                 patch("drive_client.publish_evidence", return_value={"status": "complete", "id": "a", "folder_id": "folder", "access": True, "url": "url"}) as publish:
+                with self.assertRaises(ConnectionError):
+                    evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=notify)
+                evidence_delivery.deliver(store, state, root, sync_pr=sync, notify=notify)
+            record.assert_called_once()
+            self.assertEqual(publish.call_count, 2)
+            sync.assert_called_once()
+            self.assertEqual(notify.call_count, 2)

@@ -16,6 +16,54 @@ from execution_store import ExecutionStore
 
 
 class ParallelFlowTests(unittest.TestCase):
+    def test_merge_anyway_during_repairs_waits_for_safe_merge_decision(self):
+        self.state.update(state="ADDRESS_PR_THREADS", pr_url="https://github.com/org/repo/pull/1")
+        self.state.pop("pending_question", None)
+        main.handoffs.remember_decision(self.state, "PR ready for review")
+        row = self.classify("merge anyway", "answer")
+        self.assertEqual(row["data"]["route"], "flow")
+        with patch.object(main, "_dispatch_wait_reply") as handler, patch.object(main, "save_state"):
+            self.assertFalse(main._dispatch_conversation(self.state))
+            handler.assert_not_called()
+            generate = Mock()
+            self.assertFalse(lateral.process_one(self.store, self.repo, generate, Mock()))
+            self.state["state"] = "WAIT_MERGE"
+            self.assertTrue(main._dispatch_conversation(self.state))
+            handler.assert_called_once_with(self.state, row["identity"], "merge anyway")
+
+    def test_deferred_merge_never_applies_to_a_new_pr_decision(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        main.handoffs.remember_decision(self.state, "PR ready for review")
+        self.classify("merge anyway", "answer")
+        self.state.update(state="WAIT_MERGE", pr_url="https://github.com/org/repo/pull/2")
+        with patch.object(main, "_dispatch_wait_reply") as handler, patch.object(main, "email"):
+            self.assertTrue(main._dispatch_conversation(self.state))
+            handler.assert_not_called()
+
+    def test_numbered_merge_choice_is_retained_during_push(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        main.handoffs.remember_decision(self.state, "PR ready for review")
+        row = self.classify("2", "answer")
+        self.assertEqual(row["data"]["route"], "flow")
+        self.assertTrue(row["data"]["deferred_pr_decision"])
+
+    def test_explicit_btw_merge_during_repairs_remains_lateral(self):
+        self.state.update(state="ADDRESS_PR_THREADS", pr_url="https://github.com/org/repo/pull/1")
+        main.handoffs.remember_decision(self.state, "PR ready for review")
+        row = self.classify("/btw merge anyway", "answer")
+        self.assertEqual(row["data"]["route"], "lateral")
+        self.assertNotIn("deferred_pr_decision", row["data"])
+
+    def test_deferred_decision_does_not_starve_other_actionable_replies(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        main.handoffs.remember_decision(self.state, "PR ready for review")
+        self.classify("merge anyway", "answer")
+        self.state.update(state="WAIT_STUCK", pending_question="Retry?", stuck_return="PUSHING")
+        recovery = self.classify("retry", "answer")
+        with patch.object(main, "save_state"), patch.object(main, "_dispatch_wait_reply") as handler:
+            self.assertTrue(main._dispatch_conversation(self.state))
+            handler.assert_called_once_with(self.state, recovery["identity"], "retry")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

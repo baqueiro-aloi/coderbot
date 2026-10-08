@@ -6,7 +6,93 @@ import delivery_checkpoint
 import drive_client
 import evidence
 import config
+import json
+import subprocess
 from execution_identity import digest, snapshot
+
+
+def implementation_snapshot(repo):
+    """Archiving planning documents must not invalidate unchanged demo code/tests."""
+    names = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=repo, capture_output=True, check=True, timeout=30).stdout.decode().split("\0")
+    return snapshot(repo, inputs=[name for name in names if name and not name.startswith("openspec/")] or ["__no_implementation__"])
+
+
+def register_verified(state, repo, files):
+    """Capture artifacts only after the controller accepts the verification gate."""
+    videos = [Path(p).resolve() for p in files if Path(p).suffix.lower() == ".mp4"]
+    root = (config.DATA_DIR / "outbox").resolve()
+    videos = [p for p in videos if p.is_relative_to(root) and evidence.valid_media(p)]
+    if not videos:
+        return
+    content = implementation_snapshot(repo)
+    directory = root / "evidence" / digest([state.get("pr_url"), content])
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = directory / "verified-delivery.json"
+    artifact_manifest.write(manifest, run_id=digest([content, [str(p) for p in videos]]),
+        snapshot=content, status="pass", artifacts=[{"path": str(p)} for p in videos])
+    data = json.loads(manifest.read_text())
+    data["pr_url"] = state.get("pr_url")
+    manifest.write_text(json.dumps(data))
+
+
+def reusable_files(state, repo):
+    root = config.DATA_DIR / "outbox/evidence"
+    manifests = list(root.rglob("verified-delivery.json")) if root.exists() else []
+    if not manifests:
+        return []
+    content = implementation_snapshot(repo)
+    for manifest in manifests:
+        try:
+            metadata = json.loads(manifest.read_text())
+            if metadata.get("pr_url") != state.get("pr_url"):
+                continue
+            files = [Path(entry["path"]) for entry in artifact_manifest.load(manifest, snapshot=content)]
+            if evidence.valid_paths(files):
+                return files
+        except (ValueError, OSError, KeyError):
+            continue
+    return []
+
+
+def reconcile(state, repo, pr_body):
+    """Adopt only attested current videos whose remote file and PR link agree."""
+    root = config.DATA_DIR / "outbox/evidence"
+    candidates = list(root.rglob("verified-delivery.json")) if root.exists() else []
+    if not candidates:
+        return None
+    content = implementation_snapshot(repo)
+    for manifest in candidates:
+        try:
+            metadata = json.loads(manifest.read_text())
+            if metadata.get("pr_url") != state.get("pr_url"):
+                continue
+            entries = artifact_manifest.load(manifest, snapshot=content)
+            for entry in entries:
+                video = Path(entry["path"])
+                if not evidence.valid_media(video):
+                    continue
+                # External delivery receipts are inputs, not authority: recheck Drive.
+                receipt_path = video.with_suffix(".delivery.json")
+                if not receipt_path.is_file():
+                    receipt_path = video.parent / "drive-entrega.json"  # Legacy agent receipt.
+                if not receipt_path.is_file():
+                    continue
+                receipt = json.loads(receipt_path.read_text())
+                if receipt.get("sha256") != entry["hash"]:
+                    continue
+                file_id = receipt["file"]["id"]
+                url = receipt["file"]["webViewLink"]
+                if url not in pr_body:
+                    continue
+                result = drive_client.verify_existing(file_id, video, config.DRIVE_FOLDER_ID or receipt["folder_id"])
+                if result.get("status") == "complete" and result.get("url") == url:
+                    state["evidence_url"] = url
+                    state["evidence_delivery"] = result
+                    return result
+        except (ValueError, OSError, KeyError, TypeError):
+            continue
+    return None
 
 
 def publish(store, state, repo, video):
@@ -24,20 +110,58 @@ def publish(store, state, repo, video):
         validate=lambda r: r.get("status") == "complete" and bool(r.get("id")) and bool(r.get("url")))
     if uploaded.get("status") != "complete":
         return uploaded
-    access_identity = digest([identity, uploaded["id"], config.DRIVE_SHARE_MODE, config.DRIVE_REVIEWERS])
-    return delivery_checkpoint.step(store, task, access_identity, "ACCESS",
+    access_identity = digest([identity, uploaded["id"], "inherited-v2"])
+    result = delivery_checkpoint.step(store, task, access_identity, "ACCESS",
         lambda: drive_client.publish_evidence(video, name, uploaded=uploaded),
         validate=lambda r: r.get("status") == "complete" and r.get("access") and bool(r.get("url")))
+    if result.get("status") == "complete":
+        register_verified(state, repo, [video])
+        receipt = {"file": {"id": result["id"], "webViewLink": result["url"]},
+                   "folder_id": result["folder_id"], "sha256": artifact_manifest.file_hash(video)}
+        # Canonical receipt accompanies the artifact without changing media bytes.
+        video.with_suffix(".delivery.json").write_text(json.dumps(receipt))
+    return result
 
 
-def deliver(store, state, repo, *, sync_pr, notify, operations=None):
+def prepare(store, state, repo, *, identity=None):
+    """Shared recording/reuse checkpoint, independent of transport and PR state."""
+    content = snapshot(repo) if identity is None else identity
+    task = store.task_identity(state, repo)
+    identity = identity or digest([state.get("pr_url"), content, state.get("e2e_specs", []), "verified-evidence-v1"])
+    return delivery_checkpoint.step(store, task, identity, "RECORD",
+        lambda: [str(p) for p in (reusable_files(state, repo) or
+            evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind")))],
+        validate=evidence.valid_paths)
+
+
+def sync(store, state, repo, url, sync_pr):
+    return delivery_checkpoint.step(store, store.task_identity(state, repo),
+        digest([state["pr_url"], url]), "PR_SYNC", lambda: _sync(sync_pr, state, url), validate=bool)
+
+
+def notification(store, state, repo, identity, send):
+    """Persist only confirmed transport outcomes; provider receipts reconcile retries."""
+    def action():
+        send()
+        if state.get("last_delivery", {}).get("complete") is False:
+            raise RuntimeError("Evidence notification is not fully confirmed")
+        return True
+    return delivery_checkpoint.step(store, store.task_identity(state, repo), identity, "NOTIFY", action, validate=bool)
+
+
+def deliver(store, state, repo, *, sync_pr, notify, operations=None, read_pr=None):
     operations = operations or ["record", "convert", "upload", "pr_sync", "notify"]
+    if read_pr and state.get("pr_url"):
+        adopted = reconcile(state, repo, read_pr(state))
+        if adopted:
+            task = store.task_identity(state, repo)
+            delivery_checkpoint.step(store, task, digest([state["pr_url"], adopted["url"]]), "NOTIFY",
+                lambda: _notify(notify, state, adopted["url"]), validate=bool)
+            return {**adopted, "stage": "delivered"}
     content = snapshot(repo)
     task = store.task_identity(state, repo)
     identity = digest([state.get("pr_url"), content, state.get("e2e_specs", []), "verified-evidence-v1"])
-    paths = delivery_checkpoint.step(store, task, identity, "RECORD",
-        lambda: [str(p) for p in evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))],
-        validate=evidence.valid_paths)
+    paths = prepare(store, state, repo, identity=identity)
     if not evidence.valid_paths(paths):
         return {"status": "retryable", "stage": "capture/validation", "error": "No valid current evidence recorded"}
     if not any(op in operations for op in ("convert", "upload", "pr_sync")):
@@ -68,12 +192,10 @@ def deliver(store, state, repo, *, sync_pr, notify, operations=None):
     state["evidence_url"] = published["url"]
     upload_identity = digest([identity, artifact_manifest.file_hash(video), published["url"]])
     if "pr_sync" in operations:
-        synced = delivery_checkpoint.step(store, task, upload_identity, "PR_SYNC",
-            lambda: _sync(sync_pr, state, published["url"]), validate=bool)
+        synced = sync(store, state, repo, published["url"], sync_pr)
         if not synced:
             return {"status": "retryable", "stage": "pr_sync", "url": published["url"]}
-    delivery_checkpoint.step(store, task, upload_identity, "NOTIFY",
-        lambda: _notify(notify, state, published["url"]), validate=bool)
+    notification(store, state, repo, upload_identity, lambda: _notify(notify, state, published["url"]))
     return {**published, "stage": "delivered"}
 
 
