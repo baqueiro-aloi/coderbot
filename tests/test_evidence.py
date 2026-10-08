@@ -9,6 +9,55 @@ import evidence
 
 
 class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        p = patch("evidence.snapshot", return_value="fixture")
+        p.start()
+        self.addCleanup(p.stop)
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        p = patch.object(evidence.config, "DATA_DIR", Path(self.scratch.name))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_failed_validation_preserves_recorded_clips_and_exact_stage(self):
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            results = Path(root) / "test-results"
+            results.mkdir()
+            def run(cmd, **kwargs):
+                (results / "demo.webm").write_bytes(b"video")
+                return subprocess.CompletedProcess(cmd, 1, "4 passed", "E2E validation failed")
+            with patch.object(evidence, "E2E_DIR", Path(root)), patch("evidence.operations.run", side_effect=run):
+                self.assertEqual(evidence._record_playwright_video(["a.spec.ts"]), [])
+            self.assertTrue((results / "demo.webm").exists())
+            diagnostic = next(Path(self.scratch.name).rglob("diagnostic.json"))
+            self.assertEqual(json.loads(diagnostic.read_text())["stage"], "validation")
+
+    def test_media_probe_rejects_missing_duration_and_audio_only(self):
+        import json
+        video = Path(self.scratch.name) / "video.mp4"
+        video.write_bytes(b"bytes")
+        for value, expected in (({"format": {"duration": "2"}, "streams": [{"codec_type": "video"}]}, True),
+                                ({"format": {"duration": "0"}, "streams": [{"codec_type": "video"}]}, False),
+                                ({"format": {"duration": "2"}, "streams": [{"codec_type": "audio"}]}, False)):
+            with self.subTest(value=value), patch("evidence.shutil.which", return_value="ffprobe"), \
+                 patch("evidence.operations.run", return_value=subprocess.CompletedProcess([], 0, json.dumps(value), "")):
+                self.assertEqual(evidence.valid_media(video), expected)
+
+    def test_supplied_artifact_requires_current_snapshot_and_hash(self):
+        import artifact_manifest
+        outbox = Path(self.scratch.name) / "outbox"
+        outbox.mkdir()
+        video = outbox / "video.webm"
+        video.write_bytes(b"bytes")
+        artifact_manifest.write(outbox / "evidence-manifest.json", run_id="run", snapshot="fixture", status="pass",
+                                artifacts=[{"path": str(video)}])
+        with patch("evidence.valid_media", return_value=True):
+            self.assertEqual(evidence.supplied_artifacts([video], "fixture"), [video.resolve()])
+            self.assertEqual(evidence.supplied_artifacts([video], "different"), [])
+            video.write_bytes(b"modified")
+            self.assertEqual(evidence.supplied_artifacts([video], "fixture"), [])
+
     def test_timeout_bytes_and_ffmpeg_timeout_are_best_effort(self):
         with patch("evidence.operations.run", side_effect=subprocess.TimeoutExpired(["run"], 1,
                  output=b"partial", stderr=b"error")), patch("evidence._teardown_stack"):
@@ -67,11 +116,17 @@ class EvidenceTests(unittest.TestCase):
 
             def fake_run(cmd, **kwargs):
                 (results / "demo.webm").write_bytes(b"video")
+                import json
+                (e2e_dir / "results.json").write_text(json.dumps({"stats": {"expected": 1}, "errors": [],
+                    "suites": [{"specs": [{"title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
+                        "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [
+                            {"contentType": "video/webm", "path": str(results / "demo.webm")}]}]}]}]}]}))
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             with patch.object(evidence, "E2E_DIR", e2e_dir), \
-                 patch("evidence.operations.run", side_effect=fake_run) as run, \
-                 patch("evidence._stitch_to_mp4", return_value=None):
+                  patch("evidence.operations.run", side_effect=fake_run) as run, \
+                  patch("evidence.valid_media", return_value=True), \
+                  patch("evidence._stitch_to_mp4", return_value=None):
                 clips = evidence._record_playwright_video(["a.spec.ts"])
 
         self.assertEqual(run.call_count, 1)
@@ -119,11 +174,12 @@ class EvidenceTests(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             with patch.object(evidence.config, "DATA_DIR", data_dir), \
-                 patch("evidence.shutil.which", return_value="/usr/bin/ffmpeg"), \
-                 patch("evidence.operations.run", side_effect=fake_ffmpeg):
+                  patch("evidence.shutil.which", return_value="/usr/bin/ffmpeg"), \
+                  patch("evidence.valid_media", side_effect=lambda p: Path(p).is_file()), \
+                  patch("evidence.operations.run", side_effect=fake_ffmpeg):
                 out = evidence._stitch_to_mp4([clip])
 
-            self.assertEqual(out, data_dir / "evidence.mp4")
+            self.assertTrue(out.is_relative_to(data_dir / "outbox/evidence"))
             self.assertEqual(out.read_bytes(), b"mp4")
 
     def test_agent_playwright_clips_are_stitched(self):

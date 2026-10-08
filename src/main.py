@@ -38,8 +38,9 @@ import check_plan
 import checks
 import final_checks
 import check_repair
-from execution_identity import snapshot as content_snapshot
+from execution_identity import snapshot as content_snapshot, digest
 import delivery_checkpoint
+import evidence_delivery
 import message_templates
 import performance
 import architecture_report
@@ -587,6 +588,9 @@ def _collect_attachments(result, e2e_specs: list[str],
     Claude's own sandboxed tool calls didn't hit. Deduped by resolved path in case both
     sources happen to reference the same file."""
     agent_files = [Path(p) for p in result.attachments]
+    videos = [p for p in agent_files if p.suffix.lower() in (".webm", ".mp4")]
+    approved = evidence.supplied_artifacts(videos, content_snapshot(config.REPO_PATH)) if videos else []
+    agent_files = [p for p in agent_files if p not in videos or p in approved]
     evidence_files = evidence.record_evidence(e2e_specs, e2e_kind)
     agent_videos = [file for file in agent_files if file.suffix.lower() == ".webm"]
     if agent_videos:
@@ -612,19 +616,17 @@ def _offload_evidence_video(state: dict, attachments: list[Path]) -> tuple[list[
     returns (remaining attachments, link text or None). Only .mp4 files move — a
     Newman report or an agent screenshot stays attached — and an mp4 whose upload
     failed stays too, so gmail_client attaches it exactly as before (size cap and all).
-    Named by branch + timestamp: data/evidence.mp4 is overwritten every round, the
-    branch carries the instance name, and a re-finalize must not collide."""
+    Publication is content-addressed and access-verified by the common service."""
     if not config.EVIDENCE_UPLOAD:
         return attachments, None
     remaining, links = [], []
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    stem = state.get("branch") or state.get("slug") or "evidence"
     for path in attachments:
         if path.suffix.lower() != ".mp4":
             remaining.append(path)
             continue
-        suffix = f"-{len(links) + 1}" if links else ""
-        link = drive_client.upload_evidence(path, f"{stem}-{stamp}{suffix}.mp4")
+        published = evidence_delivery.publish(phase_checkpoint.store(), state, config.REPO_PATH, path)
+        state["evidence_delivery"] = published
+        link = published.get("url") if published.get("status") == "complete" else None
         if link:
             links.append(link)
         else:
@@ -649,6 +651,21 @@ def _sync_pr_video(state: dict, video_url: str) -> None:
     if updated != current:
         _run_checked(["gh", "pr", "edit", pr_url, "--body", updated])
     state["pr_summary"] = updated
+    verified = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    if section not in verified:
+        raise RuntimeError("PR evidence section could not be verified after update")
+
+
+def _notify_evidence(state, phase, body, files=()):
+    """Use durable provider receipts even for link-only evidence notifications."""
+    import message_delivery
+    database = phase_checkpoint.store()
+    result = message_delivery.deliver(database, state, config.REPO_PATH, config.DATA_DIR,
+        gmail_client._backend(), subject(state, phase), body, state.get("thread_id"), files)
+    state["thread_id"] = result["thread_id"] or state.get("thread_id")
+    state["last_delivery"] = result
+    if not result["complete"]:
+        raise RuntimeError("Evidence notification remains pending provider confirmation")
 
 
 # ---------------------------------------------------------------- capability detection
@@ -2327,20 +2344,24 @@ def finalize_pr(state: dict, note: str = "") -> None:
     task_id = database.task_identity(state, config.REPO_PATH)
     identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
     recorded = delivery_checkpoint.step(database, task_id, identity, "RECORD",
-        lambda: [str(p) for p in evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))])
+        lambda: [str(p) for p in evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))],
+        validate=evidence.valid_paths)
     evidence_files = [Path(p) for p in recorded]
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
     def upload():
         files, url = _offload_evidence_video(state, evidence_files)
         return {"files": [str(p) for p in files], "url": url}
-    uploaded = delivery_checkpoint.step(database, task_id, identity, "UPLOAD", upload)
+    upload_key = identity + ":" + digest([config.DRIVE_FOLDER_ID, config.DRIVE_SHARE_MODE, config.DRIVE_REVIEWERS])
+    uploaded = delivery_checkpoint.step(database, task_id, upload_key, "UPLOAD", upload,
+        validate=lambda result: bool(result.get("url")))
     evidence_files, video_url = [Path(p) for p in uploaded["files"]], uploaded["url"]
     if video_url:
         # UPLOAD may be replayed after restart, bypassing its state mutation.
         state["evidence_url"] = video_url.splitlines()[0]
         save_state(state)
         _publish_progress(state)
-        _sync_pr_video(state, video_url)
+        delivery_checkpoint.step(database, task_id, identity, "PR_SYNC",
+            lambda: (_sync_pr_video(state, video_url), True)[1], validate=bool)
     # Match Gmail's attachment cap before indexing evidence as available. The sender
     # can still explain an omitted file, but the cover must not claim it was attached.
     deliverable, omitted, size = [], [], 0
@@ -2372,9 +2393,13 @@ def finalize_pr(state: dict, note: str = "") -> None:
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
                             else "a Playwright video (mp4)")
         body += f"Evidence: {attachment_desc} queued for delivery.\n"
+        if state.get("evidence_delivery", {}).get("status") != "complete":
+            outcome = state.get("evidence_delivery", {})
+            if outcome:
+                body += f"Drive delivery pending at {outcome.get('stage')}: {outcome.get('error', outcome.get('status'))}.\n"
     elif not video_url and state.get("has_e2e_harness"):
-        body += ("Note: no e2e evidence could be captured for this PR (the spec/collection may "
-                 "have skipped itself when re-run bare, or none matched — see codebot logs).\n")
+        body += ("Note: no approved e2e evidence is available for delivery. Capture, validation "
+                 "or conversion may be pending; see evidence diagnostics and codebot logs.\n")
     # Surface unresolved threads early — inline comments can land after the review run
     # finishes, and the merge gate re-checks before merging.
     threads = unresolved_review_threads(state["pr_url"])
@@ -3126,7 +3151,10 @@ def do_push(state: dict) -> None:
         attachments, video_url = _offload_evidence_video(state, attachments)
         if video_url:
             _publish_progress(state)
-            _sync_pr_video(state, video_url)
+            store = phase_checkpoint.store()
+            delivery_checkpoint.step(store, store.task_identity(state, config.REPO_PATH),
+                digest([state["pr_url"], video_url]), "PR_SYNC",
+                lambda: (_sync_pr_video(state, video_url), True)[1], validate=bool)
         body = (f"PR updated: {state['pr_url']}\n\n"
                 f"Requested: {context.get('feedback') or '(see earlier message)'}\n\n"
                 f"Changed (implementation report): {context.get('output', '')}\n\n"
@@ -3612,7 +3640,9 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         # Explicit recovery commands/answers keep their existing continuation;
         # a newly asserted feature requirement must be investigated as feedback.
         intent = agent_runner.run("Classify this authorized message without tools. Return ONLY JSON "
-            'with kind "answer" or "product_feedback". A missing feature, new requirement or '
+            'with kind "answer", "delivery" or "product_feedback". Requests solely to capture, '
+            'convert or publish evidence, or add its Drive link to the PR, are delivery, '
+            'not product_feedback or an answer authorizing implementation/merge. A missing feature, new requirement or '
             "design objection is product_feedback even if phrased as a question. An answer "
             "to the pending question or retry/repair guidance is answer. Selecting, "
             "explaining or qualifying an offered alternative is an answer even if "
@@ -3622,11 +3652,15 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
             + prompts.fenced("pending question", state.get("pending_question") or state.get("stuck_error", ""))
             + prompts.fenced("message", text), contract=False)
         kind = parse_json_reply(intent.output).get("kind")
-        if kind not in ("answer", "product_feedback"):
+        if kind not in ("answer", "product_feedback", "delivery"):
             raise ValueError("Invalid waiting feedback intent")
-        if kind == "product_feedback":
+        if kind in ("product_feedback", "delivery"):
             state["state"] = state.get("stuck_return") or state.get("return_state") or "VERIFYING"
             interrupted_wait = original_phase
+        if kind == "delivery":
+            row = database.update("feedback", row, assessment={"action": "delivery",
+                "answer": "Deliver requested evidence", "reason": "Controller delivery operation",
+                "references": "Authorized user request: " + text})
     if row["data"].get("question_reply_to"):
         question = database.get("feedback", row["data"]["question_reply_to"])
         if question:
@@ -3640,7 +3674,8 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     if state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and any(
             token in text.casefold() for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
         verification_ledger.waiver(state, text, "e2e:general", content_snapshot(config.REPO_PATH))
-    if state["state"] in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"):
+    if state["state"] in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN") and not (
+            row["data"].get("assessment", {}).get("action") == "delivery"):
         if state.get("return_state") == "FEEDBACK_QUESTION":
             state.pop("pending_question", None)
             state.pop("return_state", None)
@@ -3661,6 +3696,36 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
         row = database.update("feedback", row, assessment=assessment)
         if row is None:
             raise RuntimeError("Feedback assessment could not be saved")
+    if assessment["action"] == "delivery":
+        # Delivery is controller work, never an application implementation phase.
+        # Preserve the pending decision and resume it after success or a retryable failure.
+        try:
+            outcome = evidence_delivery.deliver(database, state, config.REPO_PATH,
+                sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"))
+            if outcome["status"] != "complete":
+                raise RuntimeError(f"Evidence delivery pending at {outcome['stage']}: {outcome.get('error', outcome['status'])}")
+        except Exception as exc:
+            database.update("feedback", row, status="pending", delivery_error=str(exc), retry_after=time.time() + 60)
+            if not row["data"].get("delivery_error"):
+                detail = str(exc) + "\nNo product replanning or merge is authorized."
+                if "access" in str(exc):
+                    detail += ("\nWhich authorized reviewer emails should receive reader access, or should existing "
+                               "configured access be used? Configure CODEBOT_DRIVE_SHARE_MODE and "
+                               "CODEBOT_DRIVE_REVIEWERS; do not send credentials here.")
+                email(state, "evidence delivery pending", detail)
+        else:
+            database.update("feedback", row, status="complete", outcome="evidence delivered")
+        state["state"] = original_phase
+        save_state(state)
+        return True
+    if assessment.get("delivery_operations") and not row["data"].get("delivery_requirement_id"):
+        delivery_assessment = feedback.validate({"action": "delivery", "answer": "Complete requested evidence delivery",
+            "reason": "Delivery requirement retained separately from product feedback",
+            "references": assessment["references"], "operations": assessment["delivery_operations"]})
+        retained = feedback.receive(database, state, config.REPO_PATH, "delivery:" + row["id"], text)
+        database.update("feedback", retained, status="pending", assessment=delivery_assessment,
+                        after_product_feedback=row["id"], requires_product_completion=True)
+        row = database.update("feedback", row, delivery_requirement_id=retained["id"])
     if not row["data"].get("assessment_delivered"):
         try:
             if lateral_change and assessment["action"] == "question":
@@ -3673,8 +3738,11 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
                     row["data"]["conversation_input_id"], state.get("thread_id"),
                     identity="request-clarification:" + row["id"])
             else:
-                email(state, "feedback investigated", assessment["answer"] + "\n" + assessment["reason"],
+                answer, files = feedback.attachments(assessment)
+                email(state, "feedback investigated", answer + "\n" + assessment["reason"], files,
                       visible_question=assessment["answer"] if assessment["action"] == "question" else None)
+                if files and state.get("last_delivery", {}).get("complete") is False:
+                    raise RuntimeError("Feedback evidence attachment delivery remains incomplete")
         except Exception:
             state["state"] = original_phase
             raise

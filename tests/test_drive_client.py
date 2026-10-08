@@ -30,10 +30,13 @@ class DriveClientTests(unittest.TestCase):
         self.files = self.service.files.return_value
         self.files.create.return_value.execute.return_value = {"id": "f1", "webViewLink": LINK}
         self.files.list.return_value.execute.return_value = {"files": []}
+        self.service.permissions.return_value.list.return_value.execute.return_value = {
+            "permissions": [{"type": "anyone", "role": "reader"}]}
         patches = [
             patch.object(drive_client, "_drive_service", return_value=self.service),
             patch.object(config, "DRIVE_FOLDER_ID", ""),
             patch.object(config, "DRIVE_FOLDER_NAME", "Codebot evidence"),
+            patch.object(config, "DRIVE_SHARE_MODE", "anyone"),
             patch.dict(sys.modules, {"googleapiclient": MagicMock(),
                                      "googleapiclient.errors": MagicMock(),
                                      "googleapiclient.http": MagicMock()}),
@@ -59,9 +62,7 @@ class DriveClientTests(unittest.TestCase):
         self.assertEqual(body["parents"], ["folder-42"])
         self.assertIn("codebotEvidence", body["appProperties"])
         perm = self.service.permissions.return_value.create
-        perm.assert_called_once()
-        self.assertEqual(perm.call_args.kwargs["fileId"], "f1")
-        self.assertEqual(perm.call_args.kwargs["body"], {"type": "anyone", "role": "reader"})
+        perm.assert_not_called()  # Existing authorized permission is verified, not duplicated.
 
     def test_auto_folder_is_created_once_and_cached(self):
         self.files.create.return_value.execute.side_effect = [
@@ -103,11 +104,29 @@ class DriveClientTests(unittest.TestCase):
         self.assertIsNone(drive_client._folder_cache)
         self.service.permissions.return_value.create.assert_not_called()
 
-    def test_sharing_failure_still_returns_link(self):
+    def test_sharing_failure_preserves_upload_but_does_not_claim_access(self):
+        self.service.permissions.return_value.list.return_value.execute.return_value = {"permissions": []}
         self.service.permissions.return_value.create.return_value.execute.side_effect = \
             RuntimeError("policy forbids link sharing")
         with patch.object(config, "DRIVE_FOLDER_ID", "folder-42"):
+            result = drive_client.publish_evidence(self.video, "a.mp4")
+            self.assertEqual(result["url"], LINK)
+            self.assertFalse(result["access"])
+            self.assertEqual(result["status"], "retryable")
+
+    def test_inherited_access_requires_known_reviewers_and_does_not_make_public(self):
+        with patch.object(config, "DRIVE_SHARE_MODE", "inherited"), patch.object(config, "DRIVE_REVIEWERS", []):
+            result = drive_client.publish_evidence(self.video, "a.mp4")
+        self.assertEqual(result["status"], "blocked")
+        self.assertFalse(result["access"])
+        self.service.permissions.return_value.create.assert_not_called()
+
+    def test_existing_upload_is_reused_and_access_verified(self):
+        with patch.object(config, "DRIVE_FOLDER_ID", "folder-42"):
+            self.files.list.return_value.execute.return_value = {"files": [{"id": "f1", "webViewLink": LINK}]}
             self.assertEqual(drive_client.upload_evidence(self.video, "a.mp4"), LINK)
+        self.files.create.assert_not_called()
+        self.service.permissions.return_value.list.assert_called()
 
     def test_missing_or_empty_file_makes_no_api_call(self):
         self.video.write_bytes(b"")

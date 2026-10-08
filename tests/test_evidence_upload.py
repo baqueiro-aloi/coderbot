@@ -25,7 +25,7 @@ class OffloadHelperTests(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_uploads_only_mp4_and_drops_it_from_attachments(self):
-        with patch.object(main.drive_client, "upload_evidence", return_value=LINK) as upload:
+        with patch.object(main.evidence_delivery, "publish", return_value={"status": "complete", "url": LINK}) as upload:
             remaining, text = main._offload_evidence_video(
                 self.state, [Path("/tmp/report.html"), MP4, Path("/tmp/shot.png")])
 
@@ -33,12 +33,10 @@ class OffloadHelperTests(unittest.TestCase):
         self.assertEqual(text, LINK)
         self.assertEqual(self.state["evidence_url"], LINK)
         upload.assert_called_once()
-        path, name = upload.call_args.args
-        self.assertEqual(path, MP4)
-        self.assertRegex(name, r"^codebot-api-version-\d{8}-\d{6}\.mp4$")
+        self.assertEqual(upload.call_args.args[-1], MP4)
 
     def test_failed_upload_keeps_mp4_attached(self):
-        with patch.object(main.drive_client, "upload_evidence", return_value=None):
+        with patch.object(main.evidence_delivery, "publish", return_value={"status": "retryable"}):
             remaining, text = main._offload_evidence_video(self.state, [MP4])
         self.assertEqual(remaining, [MP4])
         self.assertIsNone(text)
@@ -51,15 +49,14 @@ class OffloadHelperTests(unittest.TestCase):
         upload.assert_not_called()
 
     def test_two_videos_get_distinct_names(self):
-        with patch.object(main.drive_client, "upload_evidence",
-                          side_effect=[LINK, LINK + "2"]) as upload:
+        with patch.object(main.evidence_delivery, "publish",
+                          side_effect=[{"status": "complete", "url": LINK}, {"status": "complete", "url": LINK + "2"}]) as upload:
             remaining, text = main._offload_evidence_video(
                 self.state, [MP4, Path("/tmp/outbox/demo.mp4")])
         self.assertEqual(remaining, [])
         self.assertEqual(text, f"{LINK}\n{LINK}2")
-        names = [c.args[1] for c in upload.call_args_list]
-        self.assertNotEqual(names[0], names[1])
-        self.assertTrue(names[1].endswith("-2.mp4"))
+        paths = [c.args[-1] for c in upload.call_args_list]
+        self.assertNotEqual(paths[0], paths[1])
 
 
 class FinalizePrTests(unittest.TestCase):
@@ -86,7 +83,7 @@ class FinalizePrTests(unittest.TestCase):
 
     def _finalize(self, evidence_files, link):
         with patch.object(main.evidence, "record_evidence", return_value=evidence_files), \
-             patch.object(main.drive_client, "upload_evidence", return_value=link) as upload, \
+             patch.object(main.evidence_delivery, "publish", return_value={"status": "complete" if link else "retryable", "url": link}) as upload, \
              patch.object(main, "email", return_value=None) as email:
             main.finalize_pr(self.state)
         return email.call_args.args, upload
@@ -104,7 +101,7 @@ class FinalizePrTests(unittest.TestCase):
         self.state["thread_id"] = "C123:100.000001"
         with patch.object(main.config, "COMM_CHANNEL", "slack"), \
              patch.object(main.evidence, "record_evidence", return_value=[MP4]), \
-             patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
+             patch.object(main.evidence_delivery, "publish", return_value={"status": "complete", "url": LINK}), \
              patch.object(main.gmail_client, "send", return_value="C123:100.000001") as banner, \
              patch.object(main.gmail_client, "deliver", return_value={"thread_id": "C123:100.000001", "complete": True}) as send, \
              patch.object(main, "trail"):
@@ -134,7 +131,7 @@ class FinalizePrTests(unittest.TestCase):
         self.assertIn("evidence_url", main.RESET_KEYS)
 
     def test_replayed_upload_restores_video_link_and_updates_pr_metadata(self):
-        def replay(database, task_id, identity, step, action):
+        def replay(database, task_id, identity, step, action, **kwargs):
             if step == "RECORD":
                 return []
             if step == "UPLOAD":
@@ -156,7 +153,9 @@ class FeedbackPushTests(unittest.TestCase):
         with patch.object(main.config, "EVIDENCE_UPLOAD", True), \
              patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
              patch.object(main, "git"), \
-             patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
+             patch.object(main.evidence_delivery, "publish", return_value={"status": "complete", "url": LINK}), \
+             tempfile.TemporaryDirectory() as root, \
+             patch.object(main.config, "DATA_DIR", Path(root)), \
              patch.object(main, "_sync_pr_video") as sync, \
              patch.object(main, "_publish_progress"), \
              patch.object(main, "email") as email:

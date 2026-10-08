@@ -111,6 +111,8 @@ SETTINGS = (
     field("CODEBOT_MAX_ATTACH_BYTES", "Evidence", "Maximum email attachment bytes.", "23068672", "positive", advanced=True),
     field("CODEBOT_EVIDENCE_UPLOAD", "Evidence", "Upload stitched videos to Drive.", "on", "switch"),
     field("CODEBOT_DRIVE_FOLDER_ID", "Evidence", "Destination Drive folder ID; blank uses default.", advanced=True),
+    field("CODEBOT_DRIVE_SHARE_MODE", "Evidence", "Authorized sharing: inherited, reviewers, or anyone.", "inherited", advanced=True),
+    field("CODEBOT_DRIVE_REVIEWERS", "Evidence", "Comma-separated authorized reviewer email addresses.", advanced=True),
     field("CODEBOT_E2E_COMPOSE_FILE", "Evidence", "Compose file to tear down after E2E timeouts.", "docker-compose.e2e.yaml", advanced=True),
     field("CODEBOT_HEARTBEAT_MAX_TICK", "Health", "Maximum plausible tick duration.", kind="positive", advanced=True),
     field("CODEBOT_HEARTBEAT_STALE", "Health", "Seconds until unhealthy heartbeat.", "360", "positive", advanced=True),
