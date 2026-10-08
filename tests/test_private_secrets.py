@@ -103,3 +103,20 @@ class PrivateSecretTests(unittest.TestCase):
         self.assertIn('[REDACTED]', Path(result['report']).read_text())
         with db.connection() as connection:
             self.assertNotIn('synthetic-private-value', connection.execute('SELECT data FROM check_run').fetchone()[0])
+
+    def test_new_private_credential_invalidates_only_its_check_cache(self):
+        from checks import execute
+        from execution_store import ExecutionStore
+        repo = self.root / 'repo'
+        repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        db = ExecutionStore(self.root / 'data' / 'execution.sqlite')
+        private = PrivateSecrets(db.path.parent / 'private-secrets')
+        check = Check('private', [sys.executable, '-c', 'pass'], env_keys=['SERVICE_KEY'])
+        first = private.provision('first-private-value', task_id='task', check=check, env_key='SERVICE_KEY')
+        initial = execute(check, repo, db, 'task', secret_handles=[first])
+        self.assertFalse(initial['reused'])
+        second = private.provision('second-private-value', task_id='task', check=check, env_key='SERVICE_KEY')
+        changed = execute(check, repo, db, 'task', secret_handles=[second])
+        self.assertFalse(changed['reused'])
+        self.assertNotEqual(initial['identity'], changed['identity'])
