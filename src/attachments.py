@@ -15,12 +15,10 @@ def assert_safe_text(path):
     """
     path = Path(path)
     raw = path.read_bytes()
-    try:
-        text = raw.decode('utf-8')
-    except UnicodeDecodeError:
-        return
-    if secret_safety.redact(text) != text:
-        raise ValueError('Attachment contains sensitive text; prepare a sanitized copy before publication')
+    # Scan every byte representation: valid image/video MIME is not evidence it
+    # lacks an embedded text credential.
+    if secret_safety.contains(raw):
+        raise ValueError('Attachment contains sensitive content; prepare a sanitized copy before publication')
 
 
 def describe(path, *, role="supporting"):

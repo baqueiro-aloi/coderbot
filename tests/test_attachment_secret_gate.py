@@ -15,7 +15,7 @@ class AttachmentSecretTests(unittest.TestCase):
             for suffix in ('.log', '.txt', '.json', '.html', '.unknown'):
                 path = root / ('file' + suffix)
                 path.write_text('synthetic-attachment-credential')
-                with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, 'sensitive text'):
+                with self.subTest(suffix=suffix), self.assertRaisesRegex(ValueError, 'sensitive'):
                     attachments.prepare(attachments.describe(path), 10000, root / 'transport')
             self.assertFalse((root / 'transport').exists())
 
@@ -30,3 +30,12 @@ class AttachmentSecretTests(unittest.TestCase):
             # Redaction must be idempotent for safely prepared diagnostics.
             self.assertEqual(secret_safety.redact(cleaned.read_text()), cleaned.read_text())
             attachments.assert_safe_text(cleaned)
+
+    def test_binary_media_with_embedded_secret_is_not_safe_by_extension_or_mime(self):
+        secret_safety.register('synthetic-media-credential')
+        self.addCleanup(secret_safety.clear)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'recording.mp4'
+            path.write_bytes(b'\x00\x00ftypmp42\x00synthetic-media-credential\xff')
+            with self.assertRaisesRegex(ValueError, 'sensitive'):
+                attachments.prepare(attachments.describe(path), 10000, Path(root) / 'transport')

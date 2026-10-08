@@ -39,6 +39,14 @@ def redact(text, environ=None):
     return re.sub(r'(https?://)[^/\s:@]+:[^@\s/]+@', r'\1[REDACTED]@', text)
 
 
+def contains(value, environ=None):
+    """Detect registered/env credentials in text or arbitrary bytes without logging it."""
+    if isinstance(value, bytes):
+        value = value.decode('latin1')
+    text = str(value)
+    return redact(text, environ=environ) != text
+
+
 def safe(value, environ=None):
     if isinstance(value, str):
         return redact(value, environ)
