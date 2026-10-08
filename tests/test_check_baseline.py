@@ -63,7 +63,8 @@ class BaselineTests(unittest.TestCase):
                  patch("checks.tool_versions", return_value={"python": "fixture"}), \
                  patch('effective_environment.installed', return_value={'verified': True, 'packages': []}), \
                  patch("check_baseline.dependency_snapshot", return_value="same"), \
-                 patch("check_baseline.execute", return_value={"status": "pass", "failures": {}}) as run:
+                 patch("check_baseline.execute", return_value={"status": "pass", "failures": {},
+                    "identity": "run", "content": "content", "environment": "environment", "check": "unit"}) as run:
                 work.return_value.__enter__.return_value = Path(root) / "baseline"
                 baseline_result(check, root, "a" * 40, store)
                 baseline_result(check, root, "a" * 40, store)

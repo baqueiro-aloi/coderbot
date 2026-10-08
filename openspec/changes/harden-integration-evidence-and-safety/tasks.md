@@ -47,7 +47,7 @@
 - [x] 5.2 Añadir vigencia de evidencia remota y revalidación antes de promoción; probar upstream mutable con código intacto.
 - [x] 5.3 Invalidar resultados/bloqueos dependientes al provisionar key, corregir permiso o cambiar endpoint/SDK; preservar resultados no afectados.
 - [x] 5.4 Extender identidad/replay de checkpoints y handoffs con revisiones externas, incertidumbres y excepciones; probar recuperación sin repetir bloqueo resuelto.
-- [ ] 5.5 Migrar receipts históricos sin procedencia a evidencia no verificada preservando historial y tareas, con tests de compatibilidad.
+- [x] 5.5 Migrar receipts históricos sin procedencia a evidencia no verificada preservando historial y tareas, con tests de compatibilidad.
 
 ## 6. Clientes API y ownership remoto
 

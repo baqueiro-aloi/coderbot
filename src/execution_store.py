@@ -18,11 +18,14 @@ ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
 class ExecutionStore:
     def reusable_check(self, task_id, identity):
         rows = self.list("check_run", task_id, identity=identity, status="complete")
-        return rows[0] if rows else None
+        return next((row for row in rows if row['data'].get('result', {}).get('provenance') == 'verified_v2'), None)
 
     def record_check(self, task_id, identity, *, result, status="complete", tdd=None):
         if tdd not in (None, "RED", "GREEN"):
             raise ValueError("TDD evidence must be RED or GREEN")
+        if status == 'complete' and all(isinstance(result.get(name), str) and result[name]
+                                        for name in ('identity', 'content', 'environment', 'check')):
+            result = {**result, 'provenance': 'verified_v2'}
         return self.put("check_run", task_id=task_id, identity=identity, status=status,
                         data={"result": result, "tdd": tdd})
 
@@ -81,6 +84,24 @@ class ExecutionStore:
                 db.execute(f"CREATE INDEX IF NOT EXISTS {entity}_task_identity "
                            f"ON {entity}(task_id,identity,status)")
             db.execute("PRAGMA user_version=1")
+            self._migrate_unverified_receipts(db)
+
+    @staticmethod
+    def _migrate_unverified_receipts(db):
+        """Keep legacy history but prevent it from silently becoming reusable proof."""
+        for row in db.execute("SELECT id,data FROM check_run WHERE status='complete'").fetchall():
+            try:
+                data = json.loads(row['data'])
+                result = data.get('result', {})
+            except (TypeError, ValueError):
+                data, result = {}, {}
+            if not isinstance(result, dict) or result.get('provenance'):
+                continue
+            proven = all(isinstance(result.get(name), str) and result[name]
+                         for name in ('identity', 'content', 'environment', 'check'))
+            data['result'] = {**result, 'provenance': 'verified_v2' if proven else 'legacy_unverified'}
+            db.execute("UPDATE check_run SET data=?,updated=? WHERE id=?",
+                       (json.dumps(secret_safety.safe(data), ensure_ascii=False, sort_keys=True), time.time(), row['id']))
 
     @contextmanager
     def connection(self):

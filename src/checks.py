@@ -119,7 +119,8 @@ def _execute(check, repo, store, task_id, *, reuse=True, environ=None):
                   report=str(report), started=started, finished=time.time(), reused=False,
                   repetition_reason=reason, run_id=run_id, kind=check.kind,
                   contract_version=check.contract_version, requirements=check.requirements,
-                  scenarios=check.scenarios, external_dependencies=check.external_dependencies)
+                   scenarios=check.scenarios, external_dependencies=check.external_dependencies)
+    result['provenance'] = 'verified_v2'
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, status="complete",
               data={"check": check.to_dict(), "result": result})
     log.info("check finished: %s status=%s exit=%s duration=%.1fs report=%s", check.id,
