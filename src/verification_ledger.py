@@ -37,13 +37,16 @@ def validate_coverage(inventory, report, snapshot):
 
 
 def waiver(state, text, scope, snapshot):
-    value = {"instruction": text, "reason": text, "scope": scope, "snapshot": snapshot}
-    if value not in state.setdefault("check_waivers", []):
-        state["check_waivers"].append(value)
+    """Compatibility intake for historic callers; it never authorizes a skip."""
+    value = {"instruction": text, "reason": text, "scope": scope, "snapshot": snapshot,
+             "status": "legacy_unverified"}
+    history = state.setdefault("legacy_validation_waivers", [])
+    if value not in history:
+        history.append(value)
     return value
 
 
 def report_details(state):
     return json.dumps({key: state.get(key) for key in ("quality_report",
-        "internal_review_report", "final_check_report", "check_waivers", "validation_overrides",
+        "internal_review_report", "final_check_report", "legacy_validation_waivers", "validation_overrides",
         "integration_inventory", "reviewed_remote_sha")}, ensure_ascii=False, indent=2)

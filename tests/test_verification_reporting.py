@@ -25,3 +25,6 @@ class VerificationReportingTests(unittest.TestCase):
     def test_malformed_markers_do_not_overwrite_human_work(self):
         with self.assertRaises(ValueError):
             reporting.update_body('human text ' + reporting.START, {})
+
+    def test_empty_execution_is_explicitly_not_validation(self):
+        self.assertIn('No controller check results recorded', reporting.summary({}))

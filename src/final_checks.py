@@ -20,12 +20,8 @@ def run(state, repo, store):
     runnable = []
     for check in plan:
         exception = validation_overrides.applicable(state, check)
-        legacy = next((w for w in state.get('check_waivers', [])
-                       if w.get('scope') == check.id == 'e2e:general'
-                       and w.get('message_id') and w.get('author') and w.get('instruction')
-                       and w.get('check_scope') == validation_overrides.scope(check)), None)
-        if exception or legacy:
-            omitted.append({'check': check.id, 'status': 'not_run', 'exception': exception or legacy,
+        if exception:
+            omitted.append({'check': check.id, 'status': 'not_run', 'exception': exception,
                 'gate': {'status': 'accepted_exception', 'preexisting': [], 'regressions': []}})
         else:
             runnable.append(check)

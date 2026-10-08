@@ -4,6 +4,7 @@ import unittest
 
 from execution_store import ExecutionStore
 import task_records
+import final_checks
 
 
 class LegacyWaiverMigrationTests(unittest.TestCase):
@@ -17,3 +18,6 @@ class LegacyWaiverMigrationTests(unittest.TestCase):
             restored = dict(state)
             task_records.migrate(restored, ExecutionStore(Path(root) / 'execution.sqlite'), root)
             self.assertEqual(len(restored['legacy_validation_waivers']), 1)
+
+    def test_legacy_waiver_cannot_omit_checks(self):
+        self.assertNotIn('check_waivers', final_checks.run.__code__.co_names)

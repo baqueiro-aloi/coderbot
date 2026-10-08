@@ -1637,8 +1637,7 @@ def do_e2e(state: dict) -> None:
         state.pop("final_check_round", None)
         state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
             check.get('status') != 'pass' for check in report['checks']
-            if check.get('check', '').startswith('e2e')) and not any(
-            w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+            if check.get('check', '').startswith('e2e'))
         if state.get("quality_report", {}).get("deferred"):
             _commit_final_check_tasks(state)
         if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
@@ -1658,17 +1657,6 @@ def do_e2e(state: dict) -> None:
         announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
         return
     log.info("running e2e suite (e2e/run.sh)")
-    if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
-        # Old free-text waivers have no authorized scope receipt. Route through
-        # the deterministic exact-check policy rather than silently skip E2E.
-        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
-        state['final_check_report'] = report
-        if report['status'] != 'pass':
-            _begin_check_repair(state, report, resume='E2E')
-            return
-        state["e2e_passed"] = False
-        state["state"] = "ARCHIVING"
-        return
     passed, output = evidence.run_suite()
     if not passed:
         state["e2e_round"] = state.get("e2e_round", 0) + 1
@@ -2446,11 +2434,10 @@ def finalize_pr(state: dict, note: str = "") -> None:
     body += '\n' + verification_reporting.summary(state) + '\n'
     # Preserve human prose and update only the explicitly bot-owned section.
     try:
-        if state.get('investigation_required') or state.get('validation_overrides'):
-            current_body = json.loads(_run_checked(['gh', 'pr', 'view', state['pr_url'], '--json', 'body']))['body']
-            updated_body = verification_reporting.update_body(current_body, state)
-            if updated_body != current_body:
-                _run_checked(['gh', 'pr', 'edit', state['pr_url'], '--body', updated_body])
+        current_body = json.loads(_run_checked(['gh', 'pr', 'view', state['pr_url'], '--json', 'body']))['body']
+        updated_body = verification_reporting.update_body(current_body, state)
+        if updated_body != current_body:
+            _run_checked(['gh', 'pr', 'edit', state['pr_url'], '--body', updated_body])
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
         email(state, 'validation disclosure pending', 'PR validation disclosure could not be updated safely; human text preserved. Retry before review handoff.')
         return
@@ -4226,7 +4213,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
-              "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
+              "technical_retry", "stuck_diagnostic", "feedback_origin",
               "legacy_validation_waivers",
               "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
               "feedback_question_origin", "remote_branch", "feedback_delivery_pending", "recovery_resume",
