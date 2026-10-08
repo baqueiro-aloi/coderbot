@@ -73,5 +73,6 @@ def snapshot(state: dict, *, active: bool = False, situation: str | None = None)
     with _lock:
         lines = list(_tails.get(task_key(state), ()))
     return {"task_id": task_key(state), "phase": phase, "situation": situation,
-            "log_lines": lines, "language": state.get("task_language", "English"),
-            "waiting_for": state.get("state")}
+             "log_lines": lines, "language": state.get("task_language", "English"),
+             "waiting_for": state.get("state"), "pr_url": state.get("pr_url"),
+             "video_url": state.get("evidence_url")}

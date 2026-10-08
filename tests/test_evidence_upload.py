@@ -77,6 +77,9 @@ class FinalizePrTests(unittest.TestCase):
         for p in (patch.object(main.config, "EVIDENCE_UPLOAD", True),
                   patch.object(main.config, "DATA_DIR", Path(self.scratch.name) / "data"),
                   patch.object(main, "content_snapshot", return_value="fixture"),
+                  patch.object(main, "save_state"),
+                  patch.object(main, "_publish_progress"),
+                  patch.object(main, "_sync_pr_video"),
                   patch.object(main, "unresolved_review_threads", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
@@ -130,6 +133,19 @@ class FinalizePrTests(unittest.TestCase):
     def test_reset_keys_forget_the_link_between_tasks(self):
         self.assertIn("evidence_url", main.RESET_KEYS)
 
+    def test_replayed_upload_restores_video_link_and_updates_pr_metadata(self):
+        def replay(database, task_id, identity, step, action):
+            if step == "RECORD":
+                return []
+            if step == "UPLOAD":
+                return {"files": [], "url": LINK}
+            return action()
+        with patch.object(main.delivery_checkpoint, "step", side_effect=replay), \
+             patch.object(main, "_sync_pr_video") as sync, patch.object(main, "email"):
+            main.finalize_pr(self.state)
+        self.assertEqual(self.state["evidence_url"], LINK)
+        sync.assert_called_once_with(self.state, LINK)
+
 
 class FeedbackPushTests(unittest.TestCase):
     def test_feedback_push_links_video_and_attaches_the_rest(self):
@@ -141,6 +157,8 @@ class FeedbackPushTests(unittest.TestCase):
              patch.object(main.final_checks, "run", return_value={"status": "pass"}), \
              patch.object(main, "git"), \
              patch.object(main.drive_client, "upload_evidence", return_value=LINK), \
+             patch.object(main, "_sync_pr_video") as sync, \
+             patch.object(main, "_publish_progress"), \
              patch.object(main, "email") as email:
             main.do_push(state)
 
@@ -152,6 +170,7 @@ class FeedbackPushTests(unittest.TestCase):
         self.assertEqual(args[3][-1].suffix, ".md")
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("push_context", state)
+        sync.assert_called_once_with(state, LINK)
 
 
 if __name__ == "__main__":

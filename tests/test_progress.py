@@ -123,6 +123,28 @@ class SlackProgress(unittest.TestCase):
         self.assertEqual(sent["text"].count("```"), 2)
         self.api.chat_postMessage.assert_called_once()
 
+    def test_resource_links_appear_above_status_and_survive_later_updates(self):
+        self.state.update(pr_url="https://github.com/org/repo/pull/1",
+                          evidence_url="https://drive.google.com/file/d/video/view")
+        with patch.object(slack.time, "time", return_value=100):
+            slack.update_progress(self.thread, progress.snapshot(self.state))
+        text = self.api.chat_update.call_args.kwargs["text"]
+        self.assertTrue(text.startswith(self.original))
+        self.assertLess(text.index("PR: <"), text.index("Estado:"))
+        self.assertLess(text.index("Video: <"), text.index("Estado:"))
+        with patch.object(slack.time, "time", return_value=131):
+            slack.update_progress(self.thread, progress.snapshot(self.state, situation="completed"))
+        text = self.api.chat_update.call_args.kwargs["text"]
+        self.assertEqual(text.count("PR: <"), 1)
+        self.assertEqual(text.count("Video: <"), 1)
+
+    def test_resources_are_independent_and_unsafe_links_are_not_rendered(self):
+        text = slack._render_progress("Task", {"pr_url": "https://github.com/org/repo/pull/1"})
+        self.assertIn("PR: <", text)
+        self.assertNotIn("Video:", text)
+        text = slack._render_progress("Task", {"video_url": "javascript:alert(1)"})
+        self.assertNotIn("javascript", text)
+
     def test_throttles_then_replaces_status_and_finishes_without_spinner(self):
         with patch.object(slack.time, "time", return_value=100):
             slack.update_progress(self.thread, progress.snapshot(self.state, active=True))

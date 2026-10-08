@@ -635,6 +635,22 @@ def _offload_evidence_video(state: dict, attachments: list[Path]) -> tuple[list[
     return remaining, "\n".join(links)
 
 
+def _sync_pr_video(state: dict, video_url: str) -> None:
+    """Replace only the bot-owned evidence section, preserving human PR edits."""
+    pr_url = _https_url(state["pr_url"])
+    urls = [_https_url(url) for url in video_url.splitlines() if url.strip()]
+    section = ("<!-- coderbot:video:start -->\n## Demo video\n\n"
+               + "\n".join(f"- [Video]({url})" for url in urls)
+               + "\n<!-- coderbot:video:end -->")
+    current = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    pattern = r"<!-- coderbot:video:start -->.*?<!-- coderbot:video:end -->"
+    updated = (re.sub(pattern, lambda _: section, current, flags=re.DOTALL)
+               if re.search(pattern, current, re.DOTALL) else current.rstrip() + "\n\n" + section)
+    if updated != current:
+        _run_checked(["gh", "pr", "edit", pr_url, "--body", updated])
+    state["pr_summary"] = updated
+
+
 # ---------------------------------------------------------------- capability detection
 
 def _has_e2e_harness() -> bool:
@@ -2131,6 +2147,9 @@ def do_open_pr(state: dict) -> None:
             state["pr_url"] = _https_url(output)
     _verify_pr_publication(state)
     state["pr_summary"] = body
+    if state.get("evidence_url"):
+        _sync_pr_video(state, state["evidence_url"])
+    _publish_progress(state)
     log.info("PR opened: %s", state["pr_url"])
     trail(state, f"PR opened: {state['pr_url']}", body)
     try:
@@ -2316,6 +2335,12 @@ def finalize_pr(state: dict, note: str = "") -> None:
         return {"files": [str(p) for p in files], "url": url}
     uploaded = delivery_checkpoint.step(database, task_id, identity, "UPLOAD", upload)
     evidence_files, video_url = [Path(p) for p in uploaded["files"]], uploaded["url"]
+    if video_url:
+        # UPLOAD may be replayed after restart, bypassing its state mutation.
+        state["evidence_url"] = video_url.splitlines()[0]
+        save_state(state)
+        _publish_progress(state)
+        _sync_pr_video(state, video_url)
     # Match Gmail's attachment cap before indexing evidence as available. The sender
     # can still explain an omitted file, but the cover must not claim it was attached.
     deliverable, omitted, size = [], [], 0
@@ -3099,6 +3124,9 @@ def do_push(state: dict) -> None:
         attachments = [Path(path) for path in context.get("attachments", [])]
         attachments.extend(path for path in recorded if path not in attachments)
         attachments, video_url = _offload_evidence_video(state, attachments)
+        if video_url:
+            _publish_progress(state)
+            _sync_pr_video(state, video_url)
         body = (f"PR updated: {state['pr_url']}\n\n"
                 f"Requested: {context.get('feedback') or '(see earlier message)'}\n\n"
                 f"Changed (implementation report): {context.get('output', '')}\n\n"

@@ -4,6 +4,7 @@ The socket callback only commits incoming messages; the existing FSM executes
 them between agent turns. SQLite is also the persistent owned-thread registry.
 """
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -255,7 +256,13 @@ def _render_progress(original: str, snapshot: dict) -> str:
     # Metadata is plain text; escape Slack mentions and keep log fences intact.
     tail = "\n```\n" + "\n".join(_escape_slack(line.replace("```", "'''"))[:700]
                                   for line in lines) + "\n```" if lines else ""
-    return original + f"\n\n{'Estado' if spanish else 'Status'}: {_escape_slack(phase)}{emoji}" + tail
+    links = []
+    for key, label in (("pr_url", "PR"), ("video_url", "Video")):
+        url = snapshot.get(key)
+        if isinstance(url, str) and re.fullmatch(r"https://[^\s<>|]+", url):
+            links.append(f"{label}: <{_escape_slack(url)}|{label}>")
+    resources = "\n\n" + "\n".join(links) if links else ""
+    return original + resources + f"\n\n{'Estado' if spanish else 'Status'}: {_escape_slack(phase)}{emoji}" + tail
 
 
 def update_progress(thread_id: str, snapshot: dict) -> None:
