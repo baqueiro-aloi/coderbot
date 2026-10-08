@@ -76,6 +76,8 @@ def send(subject: str, body: str, thread_id: str | None = None,
          attachments: list[Path] | None = None, *, progress: Path | None = None,
          delivery_id: str | None = None) -> str:
     """Send an email to the user; returns the Gmail thread id."""
+    import secret_safety
+    subject, body = secret_safety.redact(subject), secret_safety.redact(body)
     service = _gmail()
     msg = EmailMessage()
     # First address of the (possibly comma-separated) list; the rest are only

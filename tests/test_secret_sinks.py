@@ -75,3 +75,20 @@ class SecretSinkTests(unittest.TestCase):
                 'user': 'U1', 'ts': '2', 'thread_ts': '1', 'text': 'synthetic-sink-secret'}})
             with slack_client._database() as db:
                 self.assertNotIn('synthetic-sink-secret', db.execute('SELECT text FROM messages').fetchone()[0])
+
+    def test_channel_transports_redact_before_sending(self):
+        import base64
+        from email.parser import BytesParser
+        from email.policy import default
+        import gmail_client
+        import slack_client
+        service, web = Mock(), Mock()
+        service.users.return_value.messages.return_value.send.return_value.execute.return_value = {'id': 'sent', 'threadId': 't'}
+        with patch.object(gmail_client, '_gmail', return_value=service), patch.object(slack_client, 'web', return_value=web):
+            gmail_client.send('synthetic-sink-secret', 'body synthetic-sink-secret')
+            slack_client.send('subject', 'body synthetic-sink-secret', 'C:1')
+        raw = service.users.return_value.messages.return_value.send.call_args.kwargs['body']['raw']
+        mail = BytesParser(policy=default).parsebytes(base64.urlsafe_b64decode(raw))
+        self.assertNotIn('synthetic-sink-secret', str(mail))
+        self.assertNotIn('synthetic-sink-secret', ''.join(
+            call.kwargs['text'] for call in web.chat_postMessage.call_args_list))

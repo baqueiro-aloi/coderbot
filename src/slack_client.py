@@ -464,6 +464,8 @@ def send(subject: str, body: str, thread_id: str | None = None,
          attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
     if not thread_id:
         raise RuntimeError("Slack task messages require an owned task thread")
+    import secret_safety
+    subject, body = secret_safety.redact(subject), secret_safety.redact(body)
     channel, root_ts = _split_thread(thread_id)
     # Upload evidence first so the message's index describes only files Slack accepted.
     failed = []

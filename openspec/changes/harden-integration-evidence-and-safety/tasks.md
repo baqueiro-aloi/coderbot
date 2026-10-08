@@ -2,7 +2,7 @@
 
 - [x] 1.1 Añadir regresiones de token enviado a hostname ajeno, redirects cross-host, destinos privados y descargas excesivas; implementar helper de descarga segura y conectar clientes GitHub/Jira/Google.
 - [x] 1.2 Implementar registro dinámico y sanitización compartida de secretos/enlaces; probar texto de output, excepciones y valores adquiridos durante tarea.
-- [ ] 1.3 Conectar sanitización antes de logs, check outputs, checkpoints, feedback, conversation, inbox y reportes; comprobar todos sinks con secretos sintéticos.
+- [x] 1.3 Conectar sanitización antes de logs, check outputs, checkpoints, feedback, conversation, inbox y reportes; comprobar todos sinks con secretos sintéticos.
 - [x] 1.4 Proteger preparación/publicación de attachments textuales y media; impedir que contenido sensible se declare seguro únicamente por archivo válido.
 - [x] 1.5 Retirar transcript crudo de commit de archivado y generar solo resumen permitido si corresponde; preservar historial previo sin reescribir Git.
 - [x] 1.6 Desactivar tracing sensible AWS/Azure y reemplazar clone con token en URL por autenticación privada; probar scripts con credenciales sintéticas sin filtración.
