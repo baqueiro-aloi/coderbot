@@ -77,6 +77,7 @@ class OverrideTests(unittest.TestCase):
         verdict = {'action': 'omit', 'check_ids': ['mantle:inference'], 'reason': 'user declined key',
                    'other_instructions': ''}
         with patch.object(main.check_plan, 'discover', return_value=self.plan()), \
+             patch.object(main.gmail_client, 'message_author', return_value='user@example.test'), \
              patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output=json.dumps(verdict))), \
              patch.object(main, 'save_state'), patch.object(main, 'email'):
             self.assertTrue(main._accept_validation_override(state, 'message1', 'No puedo dar key; continúa'))
@@ -92,3 +93,54 @@ class OverrideTests(unittest.TestCase):
              patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output='{"action":"none"}')):
             self.assertFalse(main._accept_validation_override(state, 'message1', 'NO omitir e2e'))
         self.assertFalse(state.get('validation_overrides'))
+
+    def test_missing_author_cannot_create_exception(self):
+        import main
+        from types import SimpleNamespace
+        state = {'state': 'WAIT_REPLY', 'return_state': 'E2E',
+                 'pending_validation_checks': ['mantle:inference']}
+        with patch.object(main.check_plan, 'discover', return_value=self.plan()), \
+             patch.object(main.gmail_client, 'message_author', return_value=None), \
+             patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output=json.dumps({
+                 'action': 'omit', 'check_ids': ['mantle:inference'], 'reason': 'explicit', 'other_instructions': ''}))):
+            self.assertFalse(main._accept_validation_override(state, 'm', 'continue without key'))
+        self.assertFalse(state.get('validation_overrides'))
+
+    def test_slack_author_is_retained_after_restart(self):
+        import slack_client
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(slack_client.config, 'DATA_DIR', Path(root)), \
+             patch.object(slack_client.config, 'SLACK_CHANNEL_ID', 'C1'):
+            with slack_client._database() as db:
+                db.execute('INSERT INTO roots VALUES(?,?,?)', ('C1', '1', 'nonce'))
+            slack_client._accept_event({'event': {'type': 'message', 'channel': 'C1',
+                'ts': '2', 'thread_ts': '1', 'user': 'Uauthorized', 'text': 'continue without key'}})
+            self.assertEqual(slack_client.message_author('C1:2'), 'Uauthorized')
+            self.assertIsNone(slack_client.message_author('C1:missing'))
+
+    def test_legacy_slack_message_migration_does_not_invent_author(self):
+        import sqlite3
+        import slack_client
+        with tempfile.TemporaryDirectory() as root, patch.object(slack_client.config, 'DATA_DIR', Path(root)):
+            with sqlite3.connect(Path(root) / 'slack_inbox.sqlite') as db:
+                db.execute('CREATE TABLE messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, '
+                    'root_ts TEXT NOT NULL, ts TEXT NOT NULL, text TEXT NOT NULL, '
+                    'handled INTEGER NOT NULL DEFAULT 0)')
+                db.execute('INSERT INTO messages VALUES(?,?,?,?,?,?)', ('C1:old', 'C1', '1', 'old', 'continue', 0))
+            self.assertIsNone(slack_client.message_author('C1:old'))
+            with slack_client._database() as db:
+                self.assertEqual(db.execute('SELECT text FROM messages WHERE id=?', ('C1:old',)).fetchone()[0], 'continue')
+
+    def test_email_author_must_match_configured_sender(self):
+        import gmail_client
+        from unittest.mock import Mock
+        service = Mock()
+        get = service.users.return_value.messages.return_value.get
+        with patch.object(gmail_client, '_gmail', return_value=service), \
+             patch.object(gmail_client.config, 'USER_EMAIL', 'owner@example.test'):
+            get.return_value.execute.return_value = {'payload': {'headers': [
+                {'name': 'From', 'value': 'Owner <owner@example.test>'}]}}
+            self.assertEqual(gmail_client.message_author('m'), 'owner@example.test')
+            get.return_value.execute.return_value = {'payload': {'headers': [
+                {'name': 'From', 'value': 'stranger@example.test'}]}}
+            self.assertIsNone(gmail_client.message_author('m'))

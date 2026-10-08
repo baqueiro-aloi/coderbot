@@ -25,7 +25,7 @@
 - [x] 3.1 Implementar inventario versionado de integraciones, contratos, fuentes consultadas, versiones efectivas e incertidumbres materiales.
 - [ ] 3.2 Conectar investigación a exploración/propuesta/aprobación: comprobar referencias y resolver información indispensable antes de acreditar compatibilidad.
 - [ ] 3.3 Actualizar prompts/skill/resumes para documentación por versión, contratos internos reales y contradicciones; eliminar equivalencia entre permisos locales, IAM y gasto.
-- [ ] 3.4 Detectar requisitos de credenciales/budget temprano y generar opciones completas de compartir, continuar sin key o pausar.
+- [x] 3.4 Detectar requisitos de credenciales/budget temprano y generar opciones completas de compartir, continuar sin key o pausar.
 - [ ] 3.5 Implementar almacén privado de handles con permisos, TTL, inyección a proceso autorizado, limpieza y recuperación; mantener plaintext fuera de contexto del modelo.
 - [ ] 3.6 Investigar documentación oficial actual y protocolo de PrivateBin, seleccionar cliente/dependencia mantenida compatible, fijar versión y añadir vectores de descifrado; rechazar protocolos/instancias no soportadas explícitamente.
 - [ ] 3.7 Conectar recepción de enlace seguro/referencia provisionada antes de persistencia de canales; validar host/DNS/redirect/tamaño/timeout y evitar unfurls automáticos.

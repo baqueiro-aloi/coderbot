@@ -25,6 +25,8 @@ class FeedbackRecoveryTests(unittest.TestCase):
                  "slug": "task", "session_id": "session", "execution_task_id": "durable",
                  "pending_question": "¿Qué política? 1. Durable 2. Cola 3. Registro nativo"}
         main.handoffs.remember_decision(state, "question during EXPLORING", state["pending_question"])
+        # This fixture tests reply routing, not the LiteLLM contract itself.
+        state['integration_inventory'] = {'version': 1, 'integrations': []}
         result = SimpleNamespace(output="", session_id="session", attachments=[], question=None)
         with patch.object(main.agent_runner, "run", return_value=SimpleNamespace(output='{"action":"answer"}')) as run, \
              patch.object(main.agent_runner, "resume", return_value=result) as resume, \

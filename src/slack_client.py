@@ -40,6 +40,8 @@ def _database():
                "nonce TEXT UNIQUE NOT NULL, PRIMARY KEY(channel, root_ts))")
     db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, "
                "root_ts TEXT NOT NULL, ts TEXT NOT NULL, text TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
+    if 'author' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
+        db.execute("ALTER TABLE messages ADD COLUMN author TEXT NOT NULL DEFAULT ''")
     db.execute("CREATE TABLE IF NOT EXISTS status_requests (id TEXT PRIMARY KEY, "
                "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS kick_requests (id TEXT PRIMARY KEY, "
@@ -131,9 +133,9 @@ def _accept_event(payload: dict) -> bool:
             log.warning("ignoring Slack reply in unregistered thread %s", _thread_id(channel, root))
             return False
         inserted = db.execute(
-            "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text) VALUES(?,?,?,?,?)",
+            "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text,author) VALUES(?,?,?,?,?,?)",
             (_thread_id(channel, event["ts"]), channel, root, event["ts"],
-              secret_safety.redact(event.get("text") or ""))).rowcount
+              secret_safety.redact(event.get("text") or ""), event['user'])).rowcount
     if inserted:
         log.info("Slack reply received in thread %s", _thread_id(channel, root))
         _wake.set()
@@ -703,6 +705,12 @@ def mark_processed(message_id: str) -> None:
         db.execute("UPDATE messages SET handled=1 WHERE id=?", (message_id,))
         db.execute("UPDATE status_requests SET handled=1 WHERE id=?", (message_id,))
         db.execute("UPDATE kick_requests SET handled=1 WHERE id=?", (message_id,))
+
+
+def message_author(message_id):
+    with _database() as db:
+        row = db.execute('SELECT author FROM messages WHERE id=?', (message_id,)).fetchone()
+    return row[0] if row and row[0] else None
 
 
 def drain_thread(thread_id: str) -> int:

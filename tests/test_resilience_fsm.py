@@ -190,7 +190,9 @@ class QuestionReply(unittest.TestCase):
 
     def base(self, phase):
         return {"state": "WAIT_REPLY", "return_state": phase, "pending_question": "q?",
-                "item": "task", "slug": "s", "branch": "b", "session_id": "sid"}
+                "item": "task", "slug": "s", "branch": "b", "session_id": "sid",
+                # These routing fixtures have no integration-dependent scope.
+                "integration_inventory": {"version": 1, "integrations": []}}
 
     def test_answer_resumes_with_rules_and_continues(self):
         state = self.base("EXPLORING")

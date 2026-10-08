@@ -426,3 +426,11 @@ def reply_candidates(messages: list[dict], processed: list[str], user_email: str
                         message["id"], headers.get("from", ""), user_email)
             continue
         yield message["id"], _strip_quoted(_extract_body(message.get("payload", {})))
+
+
+def message_author(message_id):
+    message = _gmail().users().messages().get(userId='me', id=message_id, format='metadata',
+                                            metadataHeaders=['From']).execute()
+    headers = {h['name'].lower(): h.get('value', '') for h in message.get('payload', {}).get('headers', [])}
+    author = headers.get('from', '')
+    return parseaddr(author)[1].lower() if _from_matches(author, config.USER_EMAIL) else None

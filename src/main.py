@@ -388,11 +388,55 @@ def handle_result(state: dict, result, phase: str) -> bool:
     keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
     """
     state["session_id"] = result.session_id
+    if phase == 'EXPLORING':
+        import integration_investigation
+        try:
+            inventory = integration_investigation.reported(result.output)
+            if inventory is not None:
+                state['integration_inventory'] = integration_investigation.validate(inventory, config.REPO_PATH)
+        except (ValueError, TypeError, KeyError):
+            # Use the same bounded correction path as phase completion; an
+            # invalid report must not become an unbounded technical retry.
+            _investigation_preflight(state, result.output)
+            return True
     requested = check_plan.reported(result.output)
+    import credential_requests
+    request = credential_requests.reported(result.output)
+    if request is None and requested and state.get('pending_credential_request'):
+        pending = state['pending_credential_request']
+        if set(pending['check_ids']).intersection(check.id for check in requested):
+            # Omitting the request marker on a later turn cannot bypass the
+            # already inventoried credential or spending prerequisite.
+            request = pending
+    if request is not None:
+        retained = {entry['id']: check_plan.Check(**entry) for entry in state.get('reported_check_plan', [])}
+        retained.update({check.id: check for check in requested or []})
+        plan = list(retained.values())
+        credential_requests.validate(request, plan)
+        state['reported_check_plan'] = [c.to_dict() for c in plan]
+        if credential_requests.missing(request, plan, state):
+            question = credential_requests.question(request)
+            state.update(state='WAIT_REPLY', return_state=phase, pending_question=question,
+                         pending_validation_checks=request['check_ids'], pending_credential_request=request)
+            save_state(state)
+            email(state, f'question during {phase}', question, visible_question=question)
+            return True
+    if requested:
+        # Planning can define future validation but must not execute it before
+        # implementation approval. Otherwise a CHECK_PLAN can cause paid effects
+        # merely by appearing next to an exploration summary.
+        if phase in ('EXPLORING', 'PROPOSING', 'REPLANNING'):
+            state['reported_check_plan'] = [check.to_dict() for check in requested]
+            requested = []
     if requested:
         database = phase_checkpoint.store()
         task_id = database.task_identity(state, config.REPO_PATH)
-        outcomes = checks.execute_plan(requested, config.REPO_PATH, database, task_id)
+        import validation_overrides
+        runnable = [check for check in requested if not validation_overrides.applicable(state, check)]
+        outcomes = checks.execute_plan(runnable, config.REPO_PATH, database, task_id)
+        outcomes.extend({'check': check.id, 'status': 'not_run',
+            'exception': validation_overrides.applicable(state, check),
+            'gate': {'status': 'accepted_exception'}} for check in requested if check not in runnable)
         state["focused_check_results"] = outcomes
         state["reported_check_plan"] = [check.to_dict() for check in requested]
     state.pop("kick_pending", None)
@@ -957,15 +1001,50 @@ def do_explore(state: dict) -> None:
     # Picking persists EXPLORING before sending the notice. Recover a missing
     # notice on restart/retry, and record delivery before beginning agent work.
     announce_milestone(state, "exploring", "I'm exploring the codebase.")
+    state['investigation_required'] = True
     result = agent_runner.run(prompts.render(
         prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"],
         detail=state.get("item_detail", ""),
-        images=render_images(state.get("item_images", []))))
+        images=render_images(state.get("item_images", []))) + '\n'
+        + state.get('exploration_feedback', ''))
     if handle_result(state, result, "EXPLORING"):
         return
-    _undo_premature_work(state, "EXPLORING")
-    state["state"] = "PROPOSING"
-    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
+    _continue_exploring(state, result)
+
+
+def _investigation_preflight(state, output=None):
+    """All planning entry points share the same conservative investigation gate."""
+    import integration_investigation
+    if output is not None:
+        state['investigation_required'] = True
+    try:
+        reported = integration_investigation.reported(output) if output is not None else None
+        inventory = reported if reported is not None else state.get('integration_inventory')
+        if inventory is None:
+            if not state.get('investigation_required'):
+                return True  # Legacy tasks are not silently assigned fake evidence.
+            raise ValueError('Integration inventory missing; explicitly report contracts or no affected integrations')
+        inventory = integration_investigation.validate(inventory, config.REPO_PATH)
+        state['integration_inventory'] = inventory
+    except (ValueError, TypeError, KeyError) as error:
+        state['exploration_feedback'] = str(error) + '. Investigate actual sources and correct inventory; do not guess.'
+        state['investigation_round'] = state.get('investigation_round', 0) + 1
+        if state['investigation_round'] > config.QUALITY_GATE_MAX_ROUNDS:
+            _enter_stuck(state, 'EXPLORING', state['exploration_feedback'])
+        elif state.get('state') != 'WAIT_APPROVAL':
+            state['state'] = 'EXPLORING'
+        save_state(state)
+        return False
+    pending = integration_investigation.blockers(inventory)
+    if pending:
+        question = 'Resolve these material integration assumptions with specific evidence or a scope decision:\n' + '\n'.join(pending)
+        state.update(state='WAIT_REPLY', return_state='EXPLORING', pending_question=question)
+        save_state(state)
+        email(state, 'question during EXPLORING', question, visible_question=question)
+        return False
+    state.pop('exploration_feedback', None)
+    state.pop('investigation_round', None)
+    return True
 
 
 def _undo_premature_work(state: dict, phase: str) -> str:
@@ -992,6 +1071,8 @@ def _undo_premature_work(state: dict, phase: str) -> str:
 
 
 def do_propose(state: dict) -> None:
+    if not _investigation_preflight(state):
+        return
     result = agent_runner.resume(state["session_id"], prompts.render(
         prompts.PROPOSE, slug=state["slug"], e2e_note=_e2e_note(state)))
     if handle_result(state, result, "PROPOSING"):
@@ -1003,6 +1084,8 @@ def do_propose(state: dict) -> None:
 def _send_proposal_review(state: dict, output: str, note: str = "", *,
                           revised: bool = False, feedback: str = "") -> None:
     """One review handoff for normal, revised, and question-continuation paths."""
+    if not _investigation_preflight(state):
+        return
     try:
         bundle, files = proposal_package.prepare(
             config.DATA_DIR, config.REPO_PATH, _validated_slug(state["slug"]),
@@ -1072,13 +1155,8 @@ def do_approval_reply(state: dict, reply: str) -> None:
                      reset_repo=True)
         return
     if action == "approve":
-        if state.get('integration_inventory') is not None:
-            import integration_investigation
-            inventory = integration_investigation.validate(state['integration_inventory'], config.REPO_PATH)
-            pending = integration_investigation.blockers(inventory)
-            if pending:
-                email(state, 'integration assumptions unresolved', '\n'.join(pending))
-                return
+        if not _investigation_preflight(state):
+            return
         if state.get("proposal_delivery_pending"):
             gmail_client.retry_deliveries(state)
             if state.get("proposal_delivery_pending"):
@@ -1367,7 +1445,8 @@ def _verify_requested_checks(state: dict, result) -> bool:
     """The agent's pass claim cannot override a controller-run unknown/failure."""
     if not check_plan.reported(result.output):
         return False
-    failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+    failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"
+              and check.get('gate', {}).get('status') != 'accepted_exception']
     if not failed:
         return False
     report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
@@ -1482,7 +1561,8 @@ def _complete_internal_review(state: dict, result) -> None:
     if handle_result(state, result, "INTERNAL_REVIEW"):
         return
     if check_plan.reported(result.output):
-        failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+        failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"
+                  and check.get('gate', {}).get('status') != 'accepted_exception']
         if failed:
             report = {"status": "fail", "checks": [dict(check, gate={"status": "fail",
                       "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
@@ -3442,8 +3522,13 @@ def _accept_validation_override(state, message_id, reply):
         return False
     verdict = parse_json_reply(agent_runner.run(validation_overrides.prompt(reply, plan,
         state.get('pending_question', '')), contract=False).output)
+    if verdict.get('action') != 'omit' or verdict.get('other_instructions'):
+        return False
+    author = gmail_client.message_author(message_id)
+    if not isinstance(author, str) or not author:
+        return False  # Never invent an author for legacy/missing channel receipts.
     if not validation_overrides.accept(state, plan, verdict, message_id=message_id,
-        author='authorized-channel-user', instruction=reply):
+        author=author, instruction=reply):
         return False
     state['state'] = phase
     for key in ('pending_question', 'pending_decision', 'pending_validation_checks', 'return_state'):
@@ -3668,7 +3753,7 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     if state["state"] in USER_SIDE_WAITS and row["data"].get("phase") not in USER_SIDE_WAITS:
         interrupted_wait = state["state"]
         state["state"] = row["data"].get("phase", "VERIFYING")
-    if _accept_validation_override(state, row['id'], text):
+    if _accept_validation_override(state, row['identity'], text):
         database.update('feedback', row, status='complete', outcome='scoped validation exception')
         return True
     if state["state"] in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN") and not (
@@ -4091,7 +4176,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
               "approved_task_inventory", "verified_task_inventory", "validation_overrides", "pending_validation_checks",
-              "integration_inventory", "exploration_feedback", "planning_work_preserved")
+              "integration_inventory", "exploration_feedback", "planning_work_preserved",
+              "investigation_required", "investigation_round", "pending_credential_request", "external_authorizations")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4808,6 +4894,8 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
 # up in exactly the same place as one completed directly.
 def _continue_exploring(state: dict, result) -> None:
     _undo_premature_work(state, "EXPLORING")
+    if not _investigation_preflight(state, result.output):
+        return
     state["state"] = "PROPOSING"
     announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
 

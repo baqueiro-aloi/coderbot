@@ -193,6 +193,13 @@ and checks (exact validation ids). Internal entries also require implementation 
 consumers repository paths. If no integration is affected, explicitly use an empty
 integrations array; missing inventory is not evidence of no integrations. This
 inventory is investigation evidence, not proof that live tests passed.
+For missing credentials or paid-call authorization emit one CREDENTIAL_REQUEST:
+JSON line with version=1, service, environment, env_keys, permissions, check_ids,
+effects, paid (boolean), max_cost (nonnegative number), currency. Also report its
+exact check definitions using CHECK_PLAN version=2; remote checks require kind
+upstream/postdeployment, external_dependencies, env_keys and max_age_seconds.
+The controller asks the user before executing dependent checks. Do not include
+secret values or assume a proposed budget is authorized.
 Split the investigation across several
 subagents running in parallel (e.g. one per affected area: data model, API, UI, tests,
 existing conventions) and consolidate their findings. For any material decision affecting scope,

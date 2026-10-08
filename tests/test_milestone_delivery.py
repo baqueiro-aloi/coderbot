@@ -242,7 +242,7 @@ class MilestoneDelivery(unittest.TestCase):
     def test_regular_and_question_continuation_announce_proposal_once(self):
         state = {"state": "EXPLORING", "slug": "task", "branch": "bot-task", "item": "task",
                  "session_id": "sid"}
-        result = SimpleNamespace(session_id="sid", output="done", question=None)
+        result = SimpleNamespace(session_id="sid", output='INTEGRATION_INVENTORY: {"version":1,"integrations":[]}', question=None)
         with patch.object(main.agent_runner, "run", return_value=result), \
              patch.object(main, "handle_result", return_value=False), \
              patch.object(main, "_undo_premature_work", return_value=""), \
