@@ -79,7 +79,7 @@ def load_state() -> dict:
 
 def save_state(state: dict) -> None:
     tmp = config.STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2))
+    tmp.write_text(json.dumps(diagnostics.redact_value(state), indent=2))
     tmp.replace(config.STATE_PATH)
     global _conversation_state
     with _status_command_lock:
@@ -360,7 +360,7 @@ def _transcript_append(state: dict, text: str) -> None:
             f"- Branch: {state.get('branch', '?')}\n"
             f"- Started: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n")
         with path.open("a") as handle:
-            handle.write(header + text)
+            handle.write(diagnostics.redact(header + text))
     except OSError:
         log.exception("could not append to the agent log")
 
@@ -371,23 +371,8 @@ def _transcript_note(state: dict, note: str) -> None:
 
 
 def _archive_transcript(state: dict, target: Path) -> None:
-    """Copy the working log into the archived change. Best-effort: an otherwise-good
-    archive must not fail over the log."""
-    source = _transcript_path(state)
-    try:
-        destination = target / TRANSCRIPT_NAME
-        if destination.exists():
-            log.info("preserving existing archived agent log for %s", state.get("slug"))
-            return
-        if not source.is_file():
-            log.info("no agent log to archive for %s", state.get("slug"))
-            return
-        with destination.open("x") as output:
-            output.write(source.read_text())
-        log.info("archived agent log (%d bytes) to %s/%s",
-                 source.stat().st_size, target.name, TRANSCRIPT_NAME)
-    except OSError:
-        log.exception("could not archive the agent log")
+    """Transcripts stay outside Git; never rewrite previously archived history."""
+    log.info("agent transcript retained outside repository for %s", state.get("slug"))
 
 
 # Where a phase resumes after a WAIT_STUCK escalation when re-running the phase itself
@@ -984,82 +969,26 @@ def do_explore(state: dict) -> None:
 
 
 def _undo_premature_work(state: dict, phase: str) -> str:
-    """Revert work that goes beyond a planning phase (EXPLORING/PROPOSING must not
-    implement, commit, or switch branches). Openspec change artifacts are the phases'
-    legitimate output and are left alone. Returns a note for the user ('' when clean).
-
-    Best-effort by design: a cleanup error must never fail the phase, so problems are
-    reported in the note instead of raised."""
-    notes = []
-    base_branch = config.BASE_BRANCH
+    """Detect planning drift without treating unknown edits as disposable."""
     try:
         current = git("rev-parse", "--abbrev-ref", "HEAD")
-        base = state.get("base_sha") or git("merge-base", "HEAD", base_branch)
-        branch = state.get("branch")
-        if branch and current != branch:
-            # The session wandered off the task branch (worst case: committed on the local
-            # base branch). -B recreates/resets the task branch at its base even if the
-            # session deleted it; -f discards conflicting tracked changes — premature by
-            # definition in a planning phase.
-            notes.append(f"the session left the checkout on '{current}'; "
-                         f"reset '{branch}' to its base and returned to it")
-            git("checkout", "-f", "-B", branch, base)
-            if current == base_branch:
-                try:
-                    upstream = git("rev-parse", f"origin/{base_branch}")
-                    if git("rev-parse", base_branch) != upstream:
-                        git("branch", "-f", base_branch, upstream)
-                        notes.append(f"local {base_branch} had premature commits; reset it "
-                                     f"to origin/{base_branch}")
-                except Exception:  # noqa: BLE001 — e.g. no origin/<base> ref cached
-                    notes.append(f"could not verify local {base_branch} against "
-                                 f"origin/{base_branch} — please check it manually")
-        else:
-            ahead = git("rev-list", "--count", f"{base}..HEAD") or "0"
-            if ahead != "0":
-                notes.append(f"undid {ahead} premature commit(s)")
-                git("reset", "--soft", base)
-        # -z: NUL-separated and never C-quoted, so paths with spaces/UTF-8 parse exactly
-        # (the quoted form broke both the openspec/ prefix check and the git commands).
-        entries = git("status", "--porcelain", "-z", "--untracked-files=no").split("\0")
-        offending = []
-        i = 0
-        while i < len(entries):
-            entry = entries[i]
-            i += 1
-            if not entry:
-                continue
-            code, path = entry[:2], entry[3:]
-            paths = [path]  # rename/copy: [destination, source] — source follows as its
-            if "R" in code or "C" in code:  # own NUL-separated record
-                paths.append(entries[i])
-                i += 1
-            if all(p.startswith("openspec/") for p in paths):
-                continue
-            offending.append((code, paths))
-        for code, paths in offending:
-            if len(paths) == 2:
-                dest, src = paths
-                if not src.startswith("openspec/"):
-                    git("checkout", "HEAD", "--", src)  # undo the deletion side
-                if not dest.startswith("openspec/"):  # never delete an openspec artifact
-                    git("rm", "-f", "--ignore-unmatch", "--", dest)
-            elif "A" in code:  # staged addition: no base version to restore
-                git("rm", "-f", "--", paths[0])
-            else:
-                git("checkout", "HEAD", "--", paths[0])
-        if offending:
-            notes.append("discarded premature changes outside openspec/: "
-                         + ", ".join(p for _c, ps in offending for p in ps))
-    except Exception as err:  # noqa: BLE001 — hygiene must not break the phase
-        log.exception("premature-work cleanup failed")
-        notes.append(f"tried to revert premature work but hit an error: {err}")
-    if not notes:
-        return ""
-    note = (f"Note: I detected work beyond the {phase} phase and cleaned it up "
-            f"({'; '.join(notes)}). Implementation starts only after your approval.")
-    log.warning("%s", note)
-    return note
+        base = state.get('base_sha') or git('merge-base', 'HEAD', config.BASE_BRANCH)
+        status = repo_provenance.inspect(config.REPO_PATH)
+        paths = [p for p in status['files'] if not p.startswith('openspec/')]
+        ahead = git('rev-list', '--count', f'{base}..HEAD') or '0'
+        if not paths and ahead == '0' and current == state.get('branch', current):
+            return ''
+        # Recovery needs explicit provenance before any repair; never reset a
+        # human branch or erase application edits merely because phase is plan.
+        state['planning_work_preserved'] = {'phase': phase, 'branch': current,
+            'head': status['head'], 'paths': paths, 'fingerprint': status['fingerprint']}
+        note = ('Planning drift preserved without reset or deletion. Protected paths: '
+                + ', '.join(paths) + '. Branch/commits require attribution before repair.')
+        log.warning('%s', note)
+        return note
+    except Exception:
+        log.exception('planning drift inspection failed; work preserved')
+        return 'Planning inspection unavailable; all work preserved without cleanup.'
 
 
 def do_propose(state: dict) -> None:
@@ -1143,6 +1072,13 @@ def do_approval_reply(state: dict, reply: str) -> None:
                      reset_repo=True)
         return
     if action == "approve":
+        if state.get('integration_inventory') is not None:
+            import integration_investigation
+            inventory = integration_investigation.validate(state['integration_inventory'], config.REPO_PATH)
+            pending = integration_investigation.blockers(inventory)
+            if pending:
+                email(state, 'integration assumptions unresolved', '\n'.join(pending))
+                return
         if state.get("proposal_delivery_pending"):
             gmail_client.retry_deliveries(state)
             if state.get("proposal_delivery_pending"):
@@ -3468,9 +3404,6 @@ def handle_wait(state: dict) -> None:
     _note_contact(state)
     if _queue_conversation(state, msg_id, reply):
         return
-    if state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(token in reply.casefold()
-            for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
-        verification_ledger.waiver(state, reply, "e2e:general", content_snapshot(config.REPO_PATH))
     reply_phase = state["state"]
     try:
         _dispatch_wait_reply(state, msg_id, reply)
@@ -3487,7 +3420,46 @@ def handle_wait(state: dict) -> None:
     gmail_client.mark_processed(msg_id)
 
 
+def _accept_validation_override(state, message_id, reply):
+    """Handle exceptions only while an inventoried validation decision is pending."""
+    import validation_overrides
+    if state.get('state') not in ('WAIT_REPLY', 'WAIT_STUCK'):
+        return False
+    phase = state.get('return_state') or state.get('stuck_return')
+    if phase not in ('EXPLORING', 'PROPOSING', 'IMPLEMENTING', 'VERIFYING', 'INTERNAL_REVIEW',
+                     'E2E', 'REPAIR_CHECKS', 'PUSHING'):
+        return False
+    requested_ids = state.get('pending_validation_checks') or [
+        item.get('check') for item in state.get('check_repair', {}).get('checks', [])]
+    if not requested_ids:
+        return False
+    known = {c.id: c for c in check_plan.discover(config.REPO_PATH)}
+    for entry in state.get('reported_check_plan', []):
+        check = check_plan.Check(**entry)
+        known.setdefault(check.id, check)
+    plan = [known[i] for i in requested_ids if i in known]
+    if not plan:
+        return False
+    verdict = parse_json_reply(agent_runner.run(validation_overrides.prompt(reply, plan,
+        state.get('pending_question', '')), contract=False).output)
+    if not validation_overrides.accept(state, plan, verdict, message_id=message_id,
+        author='authorized-channel-user', instruction=reply):
+        return False
+    state['state'] = phase
+    for key in ('pending_question', 'pending_decision', 'pending_validation_checks', 'return_state'):
+        state.pop(key, None)
+    if phase == 'REPAIR_CHECKS':
+        state['state'] = state.get('check_repair', {}).get('resume', 'E2E')
+    save_state(state)
+    email(state, 'validation exception accepted',
+        'The explicitly selected checks will not run. Available alternatives and all other gates '
+        'remain required. This does not establish upstream validation or authorize merge/deployment.')
+    return True
+
+
 def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
+    if _accept_validation_override(state, msg_id, reply):
+        return
     selection = handoffs.selected_reply(state, reply)
     if selection is not None:
         if selection.get("error") or selection.get("wait"):
@@ -3696,9 +3668,9 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
     if state["state"] in USER_SIDE_WAITS and row["data"].get("phase") not in USER_SIDE_WAITS:
         interrupted_wait = state["state"]
         state["state"] = row["data"].get("phase", "VERIFYING")
-    if state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and any(
-            token in text.casefold() for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
-        verification_ledger.waiver(state, text, "e2e:general", content_snapshot(config.REPO_PATH))
+    if _accept_validation_override(state, row['id'], text):
+        database.update('feedback', row, status='complete', outcome='scoped validation exception')
+        return True
     if state["state"] in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN") and not (
             row["data"].get("assessment", {}).get("action") == "delivery"):
         if state.get("return_state") == "FEEDBACK_QUESTION":
@@ -4118,7 +4090,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
-              "approved_task_inventory", "verified_task_inventory")
+              "approved_task_inventory", "verified_task_inventory", "validation_overrides", "pending_validation_checks",
+              "integration_inventory", "exploration_feedback", "planning_work_preserved")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4355,26 +4328,26 @@ def _save_holds(holds: list[dict]) -> None:
 
 
 def _commit_pending_work(state: dict) -> list[str]:
-    """Leave nothing dangling before parking a task: abort any half-finished git
-    operation, then commit every tracked change and every untracked file that is not
-    evidence on the task branch. Returns notes about anything that could not be saved."""
+    """Commit only proven task paths, without touching ambiguous edits/index."""
     notes = []
     branch = state.get("branch")
     if not branch:
         return notes
-    _abort_in_progress_ops()
     if git("rev-parse", "--abbrev-ref", "HEAD") != branch:
-        if not _git_quiet("checkout", branch):
-            notes.append(f"could not switch back to {branch} to save pending work")
-            return notes
-    _git_quiet("add", "-u")  # every tracked change
-    untracked = [p for p in git("ls-files", "--others", "--exclude-standard").splitlines()
-                 if p.strip()]
-    kept = [p for p in untracked if not _looks_like_evidence(p)]
+        return ['foreign branch protected; no checkout or commit performed']
+    current = repo_provenance.inspect(config.REPO_PATH)
+    if current['operations']:
+        return ['incomplete Git operation protected; no abort or commit performed']
+    owned, protected = recovery.ownership(phase_checkpoint.store(), state, config.REPO_PATH, current)
+    kept = [p for p in owned if not _looks_like_evidence(p) and not Path(p).name.startswith('.env')]
+    protected.extend(p for p in owned if p not in kept)
+    if protected:
+        notes.append('protected unattributed/evidence paths remain in working tree: ' + ', '.join(protected))
     if kept:
-        _git_quiet("add", "--", *kept)
-    if git("status", "--porcelain", "--untracked-files=no"):
-        if _git_quiet("commit", "-q", "-m", "wip: task put on hold by the user"):
+        # An unrelated staged entry must not get swept into this commit.
+        if not _git_quiet('add', '--', *kept):
+            return notes + ['could not stage task-owned work; preserved locally']
+        if _git_quiet("commit", "-q", "-m", "wip: task put on hold by the user", '--', *kept):
             notes.append("committed pending work as 'wip: task put on hold by the user'")
         else:
             notes.append("could not commit the pending work — it stays in the working tree")
@@ -4403,15 +4376,22 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
                   "slug": state.get("slug"), "branch": state.get("branch"),
                   "held_at": time.time(), "requested": False, "note": "", "saved": saved})
     _save_holds(holds)
-    body = (f"Task on hold: {item}\nBranch: {state.get('branch', '-')} (all work "
-            f"committed there)\nIt was in state {resume_state}.\n\n"
+    body = (f"Task on hold: {item}\nBranch: {state.get('branch', '-')} (work preserved; "
+            f"commit outcome below)\nIt was in state {resume_state}.\n\n"
             "I'm moving on to the next backlog item. Reply 'continue' on THIS thread "
             "(optionally followed by instructions) and I'll pick this task back up "
             "first thing after my current work.")
     if notes:
         body += "\n\nNotes:\n- " + "\n- ".join(notes)
     email(state, "on hold", body)
-    problems = _reset_to_base_branch()
+    try:
+        remaining = repo_provenance.inspect(config.REPO_PATH)
+    except (OSError, subprocess.SubprocessError):
+        remaining = {'files': {'unknown': {}}, 'operations': []}
+    if remaining['files'] or remaining['operations']:
+        problems = ['protected work remains; checkout preserved instead of reset']
+    else:
+        problems = _reset_to_base_branch()
     if problems:
         log.warning("reset after hold left issues: %s", problems)
     with _status_command_lock:

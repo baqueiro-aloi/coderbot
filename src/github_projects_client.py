@@ -27,6 +27,7 @@ import urllib.request
 
 import config
 import ownership
+import safe_download
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -411,14 +412,12 @@ def _download_images(task: dict) -> list[str]:
         dest = IMAGES_DIR / f"issue{task['number']}-{index}{ext}"
         try:
             IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-            request = urllib.request.Request(url, headers={"User-Agent": "codebot"})
-            if token and "github" in url:
-                request.add_header("Authorization", f"Bearer {token}")
-            with urllib.request.urlopen(request, timeout=60) as resp:  # noqa: S310
-                dest.write_bytes(resp.read())
+            dest.write_bytes(safe_download.download(url,
+                authorization=f"Bearer {token}" if token else None,
+                auth_hosts={"github.com", "api.github.com"}))
             paths.append(str(dest))
         except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
-            log.exception("could not download image %s for issue #%s", url, task["number"])
+            log.warning("image %d unavailable for issue #%s", index, task["number"])
     log.info("downloaded %d/%d image(s) for issue #%s", len(paths), len(urls), task["number"])
     return paths
 

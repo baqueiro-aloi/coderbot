@@ -49,35 +49,44 @@ class UndoPrematureWork(unittest.TestCase):
     def test_clean_tree_returns_no_note(self):
         self.assertEqual(main._undo_premature_work(self.state(), "EXPLORING"), "")
 
-    def test_premature_commits_are_undone_but_openspec_kept(self):
+    def test_unattributed_commits_are_preserved_with_openspec(self):
         (self.repo / "app.py").write_text("print(2)\n")
         (self.repo / "openspec" / "change.md").write_text("new\n")
         self.sh("add", "-A")
         self.sh("commit", "-q", "-m", "premature")
+        head = self.sh('rev-parse', 'HEAD')
         note = main._undo_premature_work(self.state(), "PROPOSING")
-        self.assertIn("undid 1 premature commit", note)
-        self.assertEqual(self.sh("rev-parse", "HEAD"), self.base)
-        self.assertEqual((self.repo / "app.py").read_text(), "print(1)\n")
+        self.assertIn("preserved", note)
+        self.assertEqual(self.sh("rev-parse", "HEAD"), head)
+        self.assertEqual((self.repo / "app.py").read_text(), "print(2)\n")
         self.assertTrue((self.repo / "openspec" / "change.md").exists())
 
-    def test_paths_with_spaces_are_discarded(self):
+    def test_paths_with_spaces_are_protected(self):
         (self.repo / "my file.txt").write_text("x\n")
         self.sh("add", "my file.txt")
         note = main._undo_premature_work(self.state(), "EXPLORING")
         self.assertIn("my file.txt", note)
-        self.assertFalse((self.repo / "my file.txt").exists())
-        self.assertEqual(self.sh("status", "--porcelain"), "")
+        self.assertTrue((self.repo / "my file.txt").exists())
+        self.assertTrue(self.sh("status", "--porcelain"))
 
-    def test_wandering_onto_main_is_reverted(self):
+    def test_wandering_onto_main_preserves_foreign_branch(self):
         self.sh("checkout", "-q", "main")
         (self.repo / "app.py").write_text("print(3)\n")
         self.sh("commit", "-q", "-am", "on main")
         # simulate origin/main at the base
         self.sh("update-ref", "refs/remotes/origin/main", self.base)
         note = main._undo_premature_work(self.state(), "EXPLORING")
-        self.assertEqual(self.sh("rev-parse", "--abbrev-ref", "HEAD"), "codebot-task")
-        self.assertEqual(self.sh("rev-parse", "main"), self.base)
-        self.assertIn("reset it to origin/main", note)
+        self.assertEqual(self.sh("rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.assertNotEqual(self.sh("rev-parse", "main"), self.base)
+        self.assertIn("preserved", note)
+
+    def test_human_edit_keeps_exact_bytes_and_index(self):
+        (self.repo / 'app.py').write_text('human edit\n')
+        self.sh('add', 'app.py')
+        before = self.sh('diff', '--cached')
+        main._undo_premature_work(self.state(), 'EXPLORING')
+        self.assertEqual((self.repo / 'app.py').read_text(), 'human edit\n')
+        self.assertEqual(self.sh('diff', '--cached'), before)
 
 
 class AbortInProgressOps(UndoPrematureWork):

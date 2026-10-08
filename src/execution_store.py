@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import time
 import uuid
+import secret_safety
 
 
 ENTITIES = ("task", "phase_attempt", "operation", "check_run", "finding",
@@ -103,7 +104,7 @@ class ExecutionStore:
         entity = self._entity(entity)
         id = id or uuid.uuid4().hex
         now = time.time()
-        encoded = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        encoded = json.dumps(secret_safety.safe(data), ensure_ascii=False, sort_keys=True)
         with self.connection() as db:
             db.execute(f"INSERT INTO {entity} VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET status=excluded.status, "
@@ -142,7 +143,7 @@ class ExecutionStore:
         with self.connection() as db:
             db.execute(f"INSERT OR IGNORE INTO {entity} VALUES(?,?,?,?,?,?,?,?)",
                 (id, task_id, None, status, identity, now, now,
-                 json.dumps({"version": 1, **data}, ensure_ascii=False, sort_keys=True)))
+                  json.dumps(secret_safety.safe({"version": 1, **data}), ensure_ascii=False, sort_keys=True)))
         return self.get(entity, id)
 
     def update(self, entity, row, *, status=None, **data):

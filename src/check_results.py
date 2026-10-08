@@ -9,12 +9,25 @@ def parse_output(output, exit_code, reporter="text"):
         return {"status": "infrastructure", "failures": {}, "exit_code": exit_code}
     failures = {}
     recognized = exit_code == 0
+    tests, skipped, failed_count = None, 0, 0
+    successful_summary = True
     if reporter == "unittest":
-        recognized = bool(re.search(r"Ran \d+ tests? in", output))
+        count = re.search(r"Ran (\d+) tests? in", output)
+        recognized = bool(count)
+        tests = int(count[1]) if count else None
+        skip = re.search(r"skipped=(\d+)", output)
+        skipped = int(skip[1]) if skip else 0
+        failed_count = sum(int(m[1]) for m in re.finditer(r"(?:failures|errors|unexpected successes)=(\d+)", output))
+        successful_summary = bool(re.search(r"^OK(?:\s*\([^\n]*\))?\s*$", output, re.M))
         for match in re.finditer(r"(?:FAIL|ERROR): (.+?)\n[-]+\n(.*?)(?=\n[=]{5,}|\n[-]{5,}\nRan |\Z)", output, re.S):
             failures[match[1].strip()] = match[2].strip()
     elif reporter == "node":
-        recognized = bool(re.search(r"# (?:tests|pass) \d+", output))
+        counts = {m[1]: int(m[2]) for m in re.finditer(r"^# (tests|pass|fail|skipped|todo) (\d+)\s*$", output, re.M)}
+        tests = counts.get('tests')
+        skipped = counts.get('skipped', 0) + counts.get('todo', 0)
+        failed_count = counts.get('fail', 0)
+        recognized = tests is not None and all(key in counts for key in ('pass', 'fail', 'skipped'))
+        successful_summary = recognized and counts['pass'] + failed_count + skipped == tests
         for match in re.finditer(r"not ok \d+ - (.+?)\n(.*?)(?=\n(?:ok |not ok |#)|\Z)", output, re.S):
             failures[match[1].strip()] = match[2].strip()
     elif reporter == "eslint":
@@ -34,29 +47,58 @@ def parse_output(output, exit_code, reporter="text"):
     elif reporter == "junit":
         try:
             root = ET.fromstring(output)
-            recognized = True
-            for case in root.iter("testcase"):
+            cases = list(root.iter('testcase'))
+            tests = len(cases)
+            skipped = sum(case.find('skipped') is not None for case in cases)
+            recognized = root.tag in ('testsuite', 'testsuites')
+            if 'tests' in root.attrib and int(root.attrib['tests']) != tests:
+                recognized = False
+            for case in cases:
                 for error in list(case):
                     if error.tag in ("failure", "error"):
                         failures[case.get("classname", "") + ":" + case.get("name", "")] = (
                             error.get("message", "") + "\n" + (error.text or "")).strip()
-        except ET.ParseError:
+        except (ET.ParseError, ValueError):
             recognized = False
     elif reporter == "json":
         try:
             value = json.loads(output)
             failures = value["failures"]
             recognized = isinstance(failures, dict) and all(isinstance(v, str) for v in failures.values())
+            tests, skipped = value.get('tests'), value.get('skipped', 0)
+            if type(tests) is not int or type(skipped) is not int or tests < 0 or skipped < 0:
+                # Legacy JSON failure identities remain useful for attribution,
+                # but absent counts cannot attest successful test execution.
+                if exit_code == 0:
+                    recognized = False
+                tests, skipped = None, 0
         except (ValueError, KeyError, TypeError):
             recognized = False
     elif reporter == "playwright":
-        recognized = bool(re.search(r"\d+ (?:failed|passed)\b", output))
+        counts = {name: sum(int(m[1]) for m in re.finditer(r"^\s*(\d+) " + name + r"\b", output, re.M))
+                  for name in ('passed', 'failed', 'skipped', 'did not run', 'flaky')}
+        recognized = bool(re.search(r"^\s*\d+ (?:failed|passed|skipped|did not run)\b", output, re.M))
+        tests = sum(counts.values()) if recognized else None
+        skipped = counts['skipped'] + counts['did not run']
+        failed_count = counts['failed'] + counts['flaky']
         for match in re.finditer(r"^\s*\d+\) (\[.+?\].+?)\n(.*?)(?=^\s*\d+\) \[|^\s*\d+ (?:failed|passed)|\Z)", output, re.M | re.S):
             test = re.sub(r":\d+:\d+", ":<line>", match[1].strip())
             # Retain assertion/error context, exclude artifact paths and timing.
             detail = match[2].split("attachment #", 1)[0].strip()
             failures[test] = detail
-    # Playwright list output is not a stable identity contract. Use JSON/JUnit via
-    # an explicit plan for baseline attribution; zero exit is still a real pass.
-    status = "pass" if exit_code == 0 else "fail" if recognized and failures else "unknown"
-    return {"status": status, "failures": failures, "exit_code": exit_code}
+    if tests is not None and (skipped > tests or len(failures) + skipped > tests):
+        recognized = False
+    if not recognized:
+        status = 'unknown'
+    elif failures or failed_count:
+        status = 'fail'
+    elif exit_code != 0 or not successful_summary:
+        status = 'unknown'
+    elif tests == 0:
+        status = 'not_run'
+    elif skipped:
+        status = 'skipped'
+    else:
+        status = 'pass'
+    return {"status": status, "failures": failures, "exit_code": exit_code,
+            "tests": tests, "skipped": skipped, "executed": tests - skipped if tests is not None else None}

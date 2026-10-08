@@ -68,14 +68,22 @@ class AgentLogTests(unittest.TestCase):
         with patch.object(main, "_transcript_path", side_effect=OSError("no space")):
             self.assertFalse(main.handle_result(self.state, result("body"), "EXPLORING"))
 
-    def test_archive_copies_the_log_into_the_change(self):
+    def test_archive_never_copies_the_log_into_the_change(self):
         main.handle_result(self.state, result("did the work"), "IMPLEMENTING")
         target = self.dir / "2026-09-08-add-widget"
         target.mkdir()
 
         main._archive_transcript(self.state, target)
 
-        self.assertIn("did the work", (target / "agent-log.md").read_text())
+        self.assertFalse((target / "agent-log.md").exists())
+        self.assertIn("did the work", self.log_text())
+
+    def test_transcript_redacts_dynamic_secrets_before_write(self):
+        import secret_safety
+        secret_safety.register('synthetic-transcript-secret')
+        self.addCleanup(secret_safety.clear)
+        main._transcript_append(self.state, 'error synthetic-transcript-secret')
+        self.assertNotIn('synthetic-transcript-secret', self.log_text())
 
     def test_archive_without_a_log_is_a_no_op(self):
         target = self.dir / "2026-09-08-add-widget"

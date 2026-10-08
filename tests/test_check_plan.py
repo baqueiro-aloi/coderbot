@@ -48,7 +48,7 @@ class CheckPlanTests(unittest.TestCase):
         self.assertEqual(checks[0].cwd, "/scratch/worktree")
 
     def test_invalid_or_duplicate_plan_is_rejected(self):
-        for value in ({"version": 2, "checks": []},
+        for value in ({"version": 3, "checks": []},
                       {"version": 1, "checks": [{"id": "x", "argv": []}]},
                       {"version": 1, "checks": [{"id": "x", "argv": ["a"]}] * 2}):
             with self.assertRaises(ValueError):

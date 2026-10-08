@@ -18,15 +18,31 @@ class Check:
     scope: str = "full"
     preparation: dict | None = None
     dependency_inputs: list[str] | None = None
+    kind: str = "local"
+    requirements: list[str] = field(default_factory=list)
+    scenarios: list[str] = field(default_factory=list)
+    external_dependencies: list[str] = field(default_factory=list)
+    max_age_seconds: float | None = None
+    contract_version: int = 1
 
     def __post_init__(self):
         if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
             raise ValueError("Check requires id and nonempty argv strings")
         if self.timeout <= 0 or self.scope not in ("full", "focused"):
             raise ValueError("Invalid check timeout or scope")
-        for values in (self.inputs, self.env_keys, self.resources):
+        for values in (self.inputs, self.env_keys, self.resources, self.requirements,
+                       self.scenarios, self.external_dependencies):
             if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
                 raise ValueError("Check list fields must contain strings")
+        if self.kind not in ("unit", "contract", "local", "upstream", "postdeployment", "build", "lint"):
+            raise ValueError("Invalid check evidence kind")
+        if self.contract_version not in (1, 2):
+            raise ValueError("Unsupported check contract version")
+        if self.max_age_seconds is not None and (type(self.max_age_seconds) not in (int, float)
+                                                  or not 0 < self.max_age_seconds < float('inf')):
+            raise ValueError("Invalid evidence maximum age")
+        if self.contract_version == 2 and self.kind in ("upstream", "postdeployment") and self.max_age_seconds is None:
+            raise ValueError("Remote evidence requires explicit maximum age")
         if self.dependency_inputs is not None and (not isinstance(self.dependency_inputs, list) or
                 not all(isinstance(p, str) and p for p in self.dependency_inputs)):
             raise ValueError("Check dependency inputs must be nonempty strings")
@@ -36,9 +52,13 @@ class Check:
 
 
 def parse(value):
-    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("checks"), list):
-        raise ValueError("Check plan must have version 1 and checks array")
-    checks = [Check(**entry) for entry in value["checks"]]
+    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] not in (1, 2) or not isinstance(value.get("checks"), list):
+        raise ValueError("Check plan must have supported version and checks array")
+    checks = []
+    for entry in value["checks"]:
+        if not isinstance(entry, dict) or entry.get('contract_version', value['version']) != value['version']:
+            raise ValueError("Check version conflicts with plan")
+        checks.append(Check(**{**entry, 'contract_version': value['version']}))
     if len({c.id for c in checks}) != len(checks):
         raise ValueError("Duplicate check ids")
     return checks

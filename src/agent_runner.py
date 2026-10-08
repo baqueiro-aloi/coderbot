@@ -21,6 +21,7 @@ import handoff_context
 import package_registry
 import performance
 import progress
+import secret_safety
 
 log = logging.getLogger(__name__)
 # Live account of what the agent is doing (tool calls as they complete, text as it is
@@ -66,6 +67,7 @@ def _persist(action, *args, **kwargs) -> None:
 
 
 def _begin_turn(session_id: str = "") -> None:
+    secret_safety.install_log_filters()
     with _turn_lock:
         _turn.clear()
         _turn.update(active=True, started_at=time.time(), last_activity=None,
@@ -557,6 +559,7 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
 
 def converse(prompt: str, session_id: str | None = None, *, on_session=None):
     """Text-only independent harness session; never starts/ends the work turn."""
+    prompt = secret_safety.redact(prompt)
     tokens = [(turn_control.role, turn_control.role.set("conversation")),
               (_lateral, _lateral.set(True)), (_utility, _utility.set(True)),
               (_task_context, _task_context.set(None)), (_invocation, _invocation.set(None)),
@@ -589,6 +592,7 @@ def converse(prompt: str, session_id: str | None = None, *, on_session=None):
 def run(prompt: str, contract: bool = True):
     """Start a fresh session. contract=False for one-shot utility calls (PICK, reply
     classifiers) whose only output instruction must be their own JSON contract."""
+    prompt = secret_safety.redact(prompt)
     _begin_turn()
     utility_token = _utility.set(not contract)
     context = None
@@ -609,6 +613,7 @@ def run(prompt: str, contract: bool = True):
             except (OSError, subprocess.SubprocessError):
                 pass
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
+        prompt = secret_safety.redact(prompt)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             if input_rows:
@@ -649,6 +654,7 @@ def run(prompt: str, contract: bool = True):
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def resume(session_id: str, prompt: str):
+    prompt = secret_safety.redact(prompt)
     _begin_turn(session_id)
     context = None
     before = None
@@ -668,6 +674,7 @@ def resume(session_id: str, prompt: str):
             except (OSError, subprocess.SubprocessError):
                 pass
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
+        prompt = secret_safety.redact(prompt)
         original_prompt = prompt
         if context and (saved := phase_checkpoint.replay(context, prompt)):
             if input_rows:

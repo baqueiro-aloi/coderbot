@@ -24,8 +24,10 @@ def render(template: str, **kwargs) -> str:
 ENVIRONMENT = """Execution environment (facts — do not re-derive or guess):
 - You run headless in a Linux container with no interactive user. Docker and
   `docker compose` ARE available via the host daemon socket.
-- This is a fully trusted execution environment. All operational permissions are
-  granted to you and your subagents. Resolve environment problems autonomously;
+- This is a trusted local execution environment. Local tool operations are
+  authorized for you and your subagents within the approved task. This does NOT
+  prove external IAM permissions, authorize paid API calls, increase privileges,
+  change retention/security controls or deploy changes. Resolve local environment problems autonomously;
   never ask the bot user to SSH, edit runtime files, or approve a tool operation.
   Product decisions and proposal/merge approval remain part of the task workflow.
 - NEVER state that a verification step is impossible without having actually run the
@@ -67,6 +69,32 @@ Work in parallel whenever possible — this is a standing instruction for every 
 """
 
 ENVIRONMENT += PARALLELISM + handoffs.DECISION_INSTRUCTIONS + """
+Integration evidence policy:
+- Before a dependent design, identify declared, installed and deployment SDK/library
+  versions. Read official documentation for that version and specific endpoint;
+  record source URL, consultation date and relevant contract evidence. Latest docs
+  are not evidence for an older installed version. Manufacturer/name compatibility
+  is not endpoint/capability compatibility.
+- Inspect actual internal API handlers, schemas and consumers. Verify method, route,
+  authentication, isolation, request/response, errors and supported parameters.
+  Never invent a response shape from a function or endpoint name.
+- Distinguish confirmed facts, material pending assumptions and contradictions.
+  Resolve conflicts between documentation, code and execution; ask for indispensable
+  information (documentation or sanitized payload can suffice, not necessarily keys).
+  Revalidate affected contracts after a version, endpoint or material scope change.
+- Detect missing credentials early. Explain environment, least privilege, checks,
+  effects and paid-call budget. Offer secure provisioning, continuing WITHOUT the
+  credential by explicitly omitting dependent live checks and running alternatives,
+  or pausing. A user's explicit refusal plus request to continue is an override,
+  not task completion or merge/deployment approval. Respect controller exceptions
+  across resumes; never re-request the same key for unchanged scope.
+- Strict mocks must reject invalid auth/routes/params and check actual outbound
+  requests. Mock/local SDK success is not live upstream validation; listing/auth
+  is not proof of inference, streaming, tools or resumption permissions.
+- Report implemented, locally tested, upstream validated, deployed and postdeploy
+  validated separately. Omitted checks never become pass; do not relax security or
+  retention to repair an integration. Stop before paid/destructive remote actions
+  absent specific authorization, even when local tools allow execution.
 Failure policy for every phase: IMPLEMENT A FIX. Diagnose actual logs and repair
 code/tests/runner or execution prerequisites autonomously before asking a human.
 Do not substitute blind retries, ignoring errors or a pass claim for repair.
@@ -156,7 +184,16 @@ for this item: treat them as part of the requirement and cover every one of them
 This phase is exploration only. Do not implement the change or modify project code.
 Invoke `coderbot-openspec-workflow`, `openspec-explore`, and `brainstorming`.
 Investigate the codebase, clarify the requirements, identify integration points and
-risks, and find the simplest solid design. Split the investigation across several
+risks, and find the simplest solid design.
+Report a standalone INTEGRATION_INVENTORY: JSON line (version=1, integrations array)
+with id, kind (internal/external), versions (declared/installed/deployment), sources
+(url/consulted_at/version/evidence), contract (method/route/auth/isolation/request/
+response/errors/capabilities), assumptions (claim/status/material/impact/next_action),
+and checks (exact validation ids). Internal entries also require implementation and
+consumers repository paths. If no integration is affected, explicitly use an empty
+integrations array; missing inventory is not evidence of no integrations. This
+inventory is investigation evidence, not proof that live tests passed.
+Split the investigation across several
 subagents running in parallel (e.g. one per affected area: data model, API, UI, tests,
 existing conventions) and consolidate their findings. For any material decision affecting scope,
 observable behavior, compatibility, or acceptance criteria, return `NEED_USER_INPUT`;

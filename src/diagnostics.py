@@ -6,21 +6,7 @@ import os
 from pathlib import Path
 import re
 import traceback
-
-
-def redact(text, environ=None):
-    text = str(text)
-    env = os.environ if environ is None else environ
-    secrets = {value for key, value in env.items()
-               if re.search(r"TOKEN|PASSWORD|SECRET|API_KEY|CREDENTIAL", key, re.I)
-               and len(value) >= 4}
-    for value in sorted(secrets, key=len, reverse=True):
-        text = text.replace(value, "[REDACTED]")
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[REDACTED]", text)
-    text = re.sub(r"\b(?:xox[baprs]-[\w-]+|gh[pousr]_[\w]+)\b", "[REDACTED]", text)
-    text = re.sub(r"(?i)([?&](?:token|api_key|password|secret)=)[^&\s]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(https?://)[^/\s:@]+:[^@\s/]+@", r"\1[REDACTED]@", text)
-    return text
+from secret_safety import redact, safe as redact_value
 
 
 def report(store, state, repo, directory, phase, *, error=None, detail="", identity=None):

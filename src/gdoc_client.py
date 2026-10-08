@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 
 import config
 import ownership
+import safe_download
 from google_auth import load_credentials
 from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
@@ -201,14 +202,20 @@ def _download_images(document: dict, object_ids: list[str]) -> list[str]:
         try:
             if session is None:
                 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-                session = AuthorizedSession(load_credentials())
-            resp = session.get(uri, timeout=60)
-            resp.raise_for_status()
-            dest.write_bytes(resp.content)
+                session = load_credentials()
+            if not safe_download.google_image_host(uri):
+                raise safe_download.DownloadError('Unsupported Google image destination')
+            if not session.valid:
+                from google.auth.transport.requests import Request
+                session.refresh(Request())
+            from urllib.parse import urlsplit
+            content = safe_download.download(uri, authorization=f"Bearer {session.token}",
+                auth_hosts={urlsplit(uri).hostname})
+            dest.write_bytes(content)
             paths.append(str(dest))
-            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(resp.content))
+            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(content))
         except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
-            log.exception("could not download doc image %s", oid)
+            log.warning("doc image %s unavailable", oid)
     if object_ids:
         log.info("downloaded %d/%d inline image(s) for a backlog item", len(paths), len(object_ids))
     return paths

@@ -481,42 +481,52 @@ def stitch_playwright_clips(files: list[Path]) -> Path | None:
 
 
 def _record_newman_report(spec_files: list[str]) -> list[Path]:
-    """Re-run the given Postman collections; return the newest generated report file.
-
-    Newman has no UI to record, so the evidence analog is whatever report file
-    e2e/run.sh's Newman invocation writes (e.g. an HTML report) — same
-    before/after-diff pattern as the Playwright video path, without stitching.
-    """
+    """Accept paired current-run HTML/JSON only after nonempty assertions pass."""
+    import secret_safety
     results_dir = E2E_DIR / "test-results"
-    before = set(results_dir.rglob("*.html")) if results_dir.exists() else set()
+    def reports():
+        return {p: (p.stat().st_mtime_ns, artifact_manifest.file_hash(p))
+                for p in results_dir.rglob('*') if p.is_file() and not p.is_symlink()
+                and p.suffix in ('.html', '.json')} if results_dir.exists() else {}
+    before = reports()
+    content = snapshot(config.REPO_PATH)
     collections = [Path(s).name for s in spec_files]
     log.info("recording Newman evidence: re-running collection(s) %s", collections)
+    passed = False
     try:
-        proc = subprocess.run(
-            ["./run.sh", *collections], cwd=E2E_DIR, capture_output=True, text=True,
-            timeout=config.E2E_TIMEOUT_SECONDS,
-        )
-        tail = (proc.stdout + proc.stderr)[-1500:]
-        if proc.returncode != 0:
-            log.warning("Newman evidence run exit=%d; stderr tail:\n%s",
-                        proc.returncode, proc.stderr[-1500:])
-    except subprocess.TimeoutExpired:
-        log.error("Newman evidence run timed out after %ss; tearing down leaked stack",
-                  config.E2E_TIMEOUT_SECONDS)
+        proc = operations.run(["./run.sh", *collections], cwd=E2E_DIR,
+            timeout=config.E2E_TIMEOUT_SECONDS, exclusive=[str(E2E_DIR)])
+        tail = secret_safety.redact(proc.stdout + proc.stderr)
+        passed = proc.returncode == 0
+    except (subprocess.TimeoutExpired, TimeoutError):
         _teardown_stack()
         tail = "TIMED OUT"
-    after = set(results_dir.rglob("*.html")) if results_dir.exists() else set()
-    new = sorted(after - before)
-    if not new:
-        log.warning("no NEW report file after Newman evidence run (before=%d, after=%d); "
-                    "check the reporter wiring and test-results mount, and whether the "
-                    "collection skipped itself (bare `./run.sh <collection>` invocation, no "
-                    "extra flags/env). Run output tail:\n%s",
-                    len(before), len(after), tail)
+    after = reports()
+    changed = {p for p, identity in after.items() if before.get(p) != identity}
+    selected = []
+    for html in sorted(p for p in changed if p.suffix == '.html' and p.stat().st_size):
+        structured = html.with_suffix('.json')
+        if structured not in changed:
+            continue
+        try:
+            run = json.loads(structured.read_text())['run']
+            counts = run['stats']['assertions']
+            if (type(counts['total']) is not int or counts['total'] <= 0 or
+                    counts['failed'] != 0 or counts.get('pending', 0) != 0 or run['failures'] != []):
+                passed = False
+                continue
+        except (ValueError, KeyError, TypeError):
+            passed = False
+            continue
+        selected.append(html)
+    directory = config.DATA_DIR / 'outbox/evidence' / digest([content, collections, tail])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'recording.log').write_text(tail)
+    if not passed or not selected or snapshot(config.REPO_PATH) != content:
+        (directory / 'diagnostic.json').write_text(json.dumps({'status': 'not_verified',
+            'kind': 'newman', 'reports': [str(p) for p in changed]}))
         return []
-    newest = max(new, key=lambda p: p.stat().st_mtime)
-    if newest.stat().st_size == 0:
-        log.warning("newest Newman report %s is zero bytes; dropping it", newest)
-        return []
-    log.info("evidence report: %s (%d bytes)", newest, newest.stat().st_size)
-    return [newest]
+    artifact_manifest.write(directory / 'evidence-manifest.json', run_id=directory.name,
+        snapshot=content, status='pass', artifacts=[{'path': str(p)} for p in selected])
+    _manifest_specs(directory / 'evidence-manifest.json', spec_files)
+    return selected

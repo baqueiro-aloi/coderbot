@@ -287,5 +287,9 @@ def concise_verification(state):
         "not applicable" if not state.get("has_e2e_harness") else
         "passed" if state.get("e2e_passed") else "outcome unavailable")
     return (f"Verification: {accepted}/{len(checks)} final checks accepted; "
-            f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
-            "Detailed outcomes and exceptions are in the verification report.")
+             f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
+             + ("Checks omitted by explicit user decision: " + ', '.join(
+                 str(c.get('check')) for c in checks if c.get('gate', {}).get('status') == 'accepted_exception')
+                + ". No upstream validation is established by omissions. "
+                if any(c.get('gate', {}).get('status') == 'accepted_exception' for c in checks) else "") +
+             "Detailed outcomes and exceptions are in the verification report.")

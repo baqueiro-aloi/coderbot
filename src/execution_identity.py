@@ -16,7 +16,7 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def environment_identity(argv, cwd, *, env_keys=(), environ=None, tools=None, key_path):
+def environment_identity(argv, cwd, *, env_keys=(), environ=None, tools=None, key_path, config_files=()):
     """Use a private local HMAC key: secret values never become stored metadata."""
     key_path = Path(key_path)
     key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,8 +29,14 @@ def environment_identity(argv, cwd, *, env_keys=(), environ=None, tools=None, ke
             output.write(os.urandom(32))
     key = key_path.read_bytes()
     env = os.environ if environ is None else environ
-    private = hmac.new(key, json.dumps({name: env.get(name) for name in sorted(env_keys)},
-                       sort_keys=True).encode(), hashlib.sha256).hexdigest()
+    material = {name: env.get(name) for name in sorted(env_keys)}
+    for file in config_files:
+        path = Path(file)
+        # Never follow a target-controlled symlink to secrets outside the repo.
+        material['file:' + str(path)] = (path.read_bytes().hex() if path.is_file() and not path.is_symlink()
+                                        else 'symlink:' + str(path.readlink()) if path.is_symlink() else None)
+    private = hmac.new(key, json.dumps(material,
+                        sort_keys=True).encode(), hashlib.sha256).hexdigest()
     return digest({"argv": list(argv), "cwd": str(Path(cwd).resolve()),
                    "environment": private, "tools": tools or {}})
 

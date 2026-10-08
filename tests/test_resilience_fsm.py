@@ -12,6 +12,14 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gma
 
 import prompts
 
+
+def setUpModule():
+    # Import-time sys.modules stubs do not isolate main after another test has
+    # imported it. Explicitly prevent optional tracker I/O for this module.
+    patcher = patch.object(main.config, 'ACTIVITY_TRAIL', False)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
@@ -389,6 +397,7 @@ class ActivityTrail(unittest.TestCase):
     def test_trail_posts_and_stores_a_string_ref(self):
         state = {"item": "task", "item_id": "PVTI_1"}
         with patch.object(main.config, "INSTANCE_ID", "bot"), \
+             patch.object(main.config, "ACTIVITY_TRAIL", True), \
              patch.object(main.task_source, "note_activity", return_value="C1") as note:
             main.trail(state, "Picked", "why")
             main.trail(state, "Next")

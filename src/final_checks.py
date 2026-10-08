@@ -3,23 +3,31 @@ from pathlib import Path
 
 import check_plan
 import checks
+import validation_overrides
 from check_baseline import baseline_result, compare
 from execution_identity import snapshot
 
 
 def run(state, repo, store):
     plan = [c for c in check_plan.discover(repo) if c.scope == "full"]
-    waived = any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
-    if waived:
-        plan = [c for c in plan if not c.id.startswith("e2e")]
     # A reported full check supplements discovery; focused checks never replace it.
     known = {c.id for c in plan}
     for entry in state.get("reported_check_plan", []):
         check = check_plan.Check(**entry)
         if check.scope == "full" and check.id not in known:
-            if waived and check.id.startswith("e2e"):
-                continue
             plan.append(check)
+    omitted = []
+    runnable = []
+    for check in plan:
+        exception = validation_overrides.applicable(state, check)
+        legacy = next((w for w in state.get('check_waivers', [])
+                       if w.get('scope') == check.id == 'e2e:general'), None)
+        if exception or legacy:
+            omitted.append({'check': check.id, 'status': 'not_run', 'exception': exception or legacy,
+                'gate': {'status': 'accepted_exception', 'preexisting': [], 'regressions': []}})
+        else:
+            runnable.append(check)
+    plan = runnable
     task_id = store.task_identity(state, repo)
     results = checks.execute_plan(plan, repo, store, task_id)
     outcomes = []
@@ -36,6 +44,8 @@ def run(state, repo, store):
         else:
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})
-    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
+    outcomes.extend(omitted)
+    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(
+        r['gate']['status'] == 'accepted_exception' or r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)
             else "fail", "checks": outcomes}

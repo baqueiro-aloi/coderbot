@@ -9,9 +9,9 @@ def load(repo):
     if not path.exists():
         return None
     value = json.loads(path.read_text())
-    if value.get("version") != 1:
+    if value.get("version") not in (1, 2):
         raise ValueError("Unsupported harness contract version")
-    checks = parse({"version": 1, "checks": value.get("checks", [])})
+    checks = parse({"version": value['version'], "checks": value.get("checks", [])})
     for check in checks:
         check.preparation = value.get("preparation")
     return checks
