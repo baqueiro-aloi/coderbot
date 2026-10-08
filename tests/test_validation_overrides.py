@@ -42,7 +42,9 @@ class OverrideTests(unittest.TestCase):
         self.assertIsNotNone(overrides.applicable(state, plan[1]))
 
     def test_classifier_contract_preserves_negations_and_rejects_unknown_or_mixed(self):
-        self.assertIn('negations', overrides.prompt('NO omitir e2e', self.plan(), 'question'))
+        self.assertEqual(overrides.classify('NO continuar sin key', self.plan())['action'], 'none')
+        self.assertEqual(overrides.classify('¿continuar sin key?', self.plan())['action'], 'none')
+        self.assertEqual(overrides.classify('continuar sin key si falla', self.plan())['action'], 'none')
         for verdict in ({'action': 'none'}, {'action': 'ambiguous'},
                         {'action': 'omit', 'check_ids': ['unknown'], 'reason': 'x'},
                         {'action': 'omit', 'check_ids': ['mantle:inference'], 'reason': 'x',
@@ -87,39 +89,30 @@ class OverrideTests(unittest.TestCase):
 
     def test_controller_resumes_final_gate_without_key_or_extra_approval(self):
         import main
-        from types import SimpleNamespace
         state = {'state': 'WAIT_REPLY', 'return_state': 'REPAIR_CHECKS',
             'check_repair': {'resume': 'E2E', 'checks': [{'check': 'mantle:inference'}]},
             'pending_question': 'Provide key or continue without inference'}
-        verdict = {'action': 'omit', 'check_ids': ['mantle:inference'], 'reason': 'user declined key',
-                   'other_instructions': ''}
         with patch.object(main.check_plan, 'discover', return_value=self.plan()), \
-             patch.object(main.gmail_client, 'message_author', return_value='user@example.test'), \
-             patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output=json.dumps(verdict))), \
-             patch.object(main, 'save_state'), patch.object(main, 'email'):
-            self.assertTrue(main._accept_validation_override(state, 'message1', 'No puedo dar key; continúa'))
+              patch.object(main.gmail_client, 'message_author', return_value='user@example.test'), \
+              patch.object(main, 'save_state'), patch.object(main, 'email'):
+            self.assertTrue(main._accept_validation_override(state, 'message1', 'continue without key'))
         self.assertEqual(state['state'], 'E2E')
         self.assertIsNotNone(overrides.applicable(state, self.plan()[1]))
 
     def test_controller_negation_records_nothing(self):
         import main
-        from types import SimpleNamespace
         state = {'state': 'WAIT_REPLY', 'return_state': 'E2E',
                  'pending_validation_checks': ['mantle:inference']}
-        with patch.object(main.check_plan, 'discover', return_value=self.plan()), \
-             patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output='{"action":"none"}')):
+        with patch.object(main.check_plan, 'discover', return_value=self.plan()):
             self.assertFalse(main._accept_validation_override(state, 'message1', 'NO omitir e2e'))
         self.assertFalse(state.get('validation_overrides'))
 
     def test_missing_author_cannot_create_exception(self):
         import main
-        from types import SimpleNamespace
         state = {'state': 'WAIT_REPLY', 'return_state': 'E2E',
                  'pending_validation_checks': ['mantle:inference']}
         with patch.object(main.check_plan, 'discover', return_value=self.plan()), \
-             patch.object(main.gmail_client, 'message_author', return_value=None), \
-             patch.object(main.agent_runner, 'run', return_value=SimpleNamespace(output=json.dumps({
-                 'action': 'omit', 'check_ids': ['mantle:inference'], 'reason': 'explicit', 'other_instructions': ''}))):
+              patch.object(main.gmail_client, 'message_author', return_value=None):
             self.assertFalse(main._accept_validation_override(state, 'm', 'continue without key'))
         self.assertFalse(state.get('validation_overrides'))
 

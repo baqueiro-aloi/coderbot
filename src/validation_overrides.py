@@ -1,6 +1,7 @@
 """Explicit human exceptions, bound to exact semantic check contracts."""
 import hashlib
 import json
+import re
 
 
 def scope(check):
@@ -55,6 +56,28 @@ def prompt(text, plan, question):
         + fenced('pending question', question) + '\n'
         + fenced('available check contracts', json.dumps([c.to_dict() for c in plan])) + '\n'
         + fenced('human message', text))
+
+
+def classify(text, plan):
+    """Conservative channel-independent exception parser.
+
+    A model must never turn conversational prose into a waiver.  The whole
+    message must be an affirmative, unconditional `CONTINUE WITHOUT KEY` line;
+    identifiers are exact, or the sole pending check is selected.
+    """
+    if not isinstance(text, str):
+        return {'action': 'none'}
+    message = ' '.join(text.strip().split())
+    if not message or '?' in message or re.search(r'\b(no|not|nunca|never|don\'t|do not)\s+(?:omitir|skip|run|continue)', message, re.I):
+        return {'action': 'none'}
+    match = re.fullmatch(r'(?:continue|continuar)\s+(?:without|sin)\s+(?:the\s+)?(?:key|clave)\s*(?::\s*(.*))?', message, re.I)
+    if not match:
+        return {'action': 'none'}
+    raw = match.group(1)
+    ids = [item.strip() for item in raw.split(',')] if raw else ([plan[0].id] if len(plan) == 1 else [])
+    if not ids or any(not item for item in ids):
+        return {'action': 'ambiguous'}
+    return {'action': 'omit', 'check_ids': ids, 'reason': 'credential declined', 'other_instructions': ''}
 
 
 def accept(state, plan, verdict, *, message_id, author, instruction):

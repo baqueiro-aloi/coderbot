@@ -3582,8 +3582,7 @@ def _accept_validation_override(state, message_id, reply):
     plan = [known[i] for i in requested_ids if i in known]
     if not plan:
         return False
-    verdict = parse_json_reply(agent_runner.run(validation_overrides.prompt(reply, plan,
-        state.get('pending_question', '')), contract=False).output)
+    verdict = validation_overrides.classify(reply, plan)
     if verdict.get('action') != 'omit' or verdict.get('other_instructions'):
         return False
     author = gmail_client.message_author(message_id)

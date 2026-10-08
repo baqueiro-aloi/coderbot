@@ -14,7 +14,7 @@
 - [x] 2.1 Versionar contrato Check y resultados con tipo, requisitos/scenarios, dependencias externas, configuración y vigencia; añadir lectura conservadora de v1.
 - [x] 2.2 Corregir adapters unittest/Node/JUnit/Playwright/JSON para detectar cero tests, skips y payloads contradictorios; distinguir build/lint de ejecución de tests.
 - [x] 2.3 Añadir modelo de excepción con mensaje/autor original, alcance semántico, ids exactos, razón y estado de aplicabilidad.
-- [ ] 2.4 Eliminar waiver por substring y clasificar mensaje completo en canales normal/lateral/legacy; probar negaciones, preguntas y decisiones condicionadas.
+- [x] 2.4 Eliminar waiver por substring y clasificar mensaje completo en canales normal/lateral/legacy; probar negaciones, preguntas y decisiones condicionadas.
 - [x] 2.5 Conectar opción «continuar sin key» al controlador: omitir solo checks dependientes, ejecutar alternativas y avanzar sin ampliar consentimiento.
 - [x] 2.6 Persistir excepción durante reinicios, HOLD/CONTINUE y cambio de sesión; revisar solo cambios materiales sin repetir solicitud de key para mismo alcance.
 - [x] 2.7 Aplicar excepciones exactas en gates/reportes y migrar waivers antiguos sin prefijos amplios o consentimiento inventado.
