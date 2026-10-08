@@ -39,7 +39,19 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
         return [future.result() for future in futures]
 
 
-def execute(check, repo, store, task_id, *, reuse=True):
+def execute(check, repo, store, task_id, *, reuse=True, secret_handles=()):
+    if not secret_handles:
+        import secret_intake
+        secret_handles = secret_intake.bindings(task_id, check)
+    if secret_handles:
+        from private_secrets import PrivateSecrets
+        private = PrivateSecrets(store.path.parent / 'private-secrets')
+        with private.environment(secret_handles, task_id=task_id, check=check) as env:
+            return _execute(check, repo, store, task_id, reuse=reuse, environ=env)
+    return _execute(check, repo, store, task_id, reuse=reuse)
+
+
+def _execute(check, repo, store, task_id, *, reuse=True, environ=None):
     repo = Path(repo).resolve()
     preparation_error = None
     if check.preparation:
@@ -48,9 +60,13 @@ def execute(check, repo, store, task_id, *, reuse=True):
         except (RuntimeError, OSError, TimeoutError, subprocess.TimeoutExpired) as error:
             preparation_error = error
     cwd = (repo / check.cwd).resolve()
+    import effective_environment
+    installed = effective_environment.installed(check.argv, cwd)
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
-        tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id)},
+        environ=environ,
+        tools={**tool_versions(check.argv, cwd), 'installed': installed,
+               "repair_revision": environment_revision(store, repo, check.id)},
         key_path=store.path.parent / "identity.key",
         config_files=sorted(set([repo / '.env', cwd / '.env',
             *repo.glob('.env.*'), *cwd.glob('.env.*')])))
@@ -58,7 +74,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
     dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(),
                         "dependencies": dependencies, "version": 3})
-    previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
+    previous = store.reusable_check(task_id, identity) if reuse and not preparation_error and installed['verified'] else None
     previous_result = previous['data']['result'] if previous else {}
     age = time.time() - previous_result.get('finished', 0)
     fresh = (check.max_age_seconds is None or 0 <= age <= check.max_age_seconds)
@@ -87,7 +103,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
         if preparation_error:
             raise OSError("Check preparation failed: " + str(preparation_error))
         process = operations.run(check.argv, cwd=cwd, timeout=check.timeout,
-                                 exclusive=check.resources)
+                                  exclusive=check.resources, **({'env': environ} if environ is not None else {}))
         output = secret_safety.redact(process.stdout + "\n" + process.stderr)
         result = parse_output(output, process.returncode, check.reporter)
     except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:

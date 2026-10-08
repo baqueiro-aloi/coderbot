@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import time
+import remote_review
 from unittest.mock import Mock, patch
 
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
@@ -178,13 +179,14 @@ class ThreadHelpers(unittest.TestCase):
 class MergeGate(unittest.TestCase):
     def state(self):
         return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
-                "session_id": "sid", "pr_url": PR}
+                "session_id": "sid", "pr_url": PR, "reviewed_remote_sha": "a" * 40}
 
     def run_merge(self, state, threads, force=None, mergeable="MERGEABLE"):
         v = {"action": "merge"}
         if force is not None:
             v["force"] = force
         with patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
+             patch.object(remote_review, 'head', return_value={'state': 'OPEN', 'headRefOid': 'a' * 40}), \
              patch.object(main, "trail"), \
              patch.object(main, "_pr_merge_state", return_value=("OPEN", mergeable)), \
              patch.object(main, "unresolved_review_threads", return_value=threads), \
@@ -221,6 +223,7 @@ class MergeGate(unittest.TestCase):
         email, finish, merge = self.run_merge(self.state(), threads=[])
         merge.assert_called_once()
         self.assertIn("--squash", merge.call_args.args[0])
+        self.assertEqual(merge.call_args.args[0][-2:], ['--match-head-commit', 'a' * 40])
         finish.assert_called_once()
 
     def test_conflicting_pr_enters_resolution(self):

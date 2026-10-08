@@ -41,7 +41,23 @@ def missing(request, plan, state, environ=None):
     if not active:
         return False
     active_keys = {key for check in active for key in check.env_keys}
-    keys_missing = any(not env.get(key, '').strip() for key in request['env_keys'] if key in active_keys)
+    private_keys = set()
+    if environ is None:
+        import config
+        from execution_store import ExecutionStore
+        import secret_intake
+        from private_secrets import PrivateSecrets, SecretUnavailable
+        task_id = ExecutionStore(config.DATA_DIR / 'execution.sqlite').task_identity(state, config.REPO_PATH)
+        private = PrivateSecrets(config.DATA_DIR / 'private-secrets')
+        for check in active:
+            for handle in secret_intake.bindings(task_id, check):
+                try:
+                    key, _ = private.resolve(handle, task_id=task_id, check=check)
+                    private_keys.add(key)
+                except SecretUnavailable:
+                    pass
+    keys_missing = any(not env.get(key, '').strip() and key not in private_keys
+                       for key in request['env_keys'] if key in active_keys)
     # Spending consent must be scoped to these checks and ceiling, never global
     # tool permission or merely the availability of credentials.
     return keys_missing or request['paid'] and not authorized(request, state)
@@ -55,6 +71,11 @@ def authorized(request, state):
 
 
 def question(request):
+    configured = os.environ.get('CODEBOT_PRIVATEBIN_INSTANCES', '[]') not in ('', '[]')
+    intake_notice = ('Use only configured PrivateBin v2 plaintext burn-after-reading links; one credential per message.\n'
+                     if configured else
+                     'Private link intake is not enabled yet: do not send a one-time link until a supported private receiver '
+                     'is configured. Use already provisioned runtime credentials in the meantime.\n')
     return (f"Validation prerequisite: {request['service']} in {request['environment']}.\n"
         f"Credential names: {', '.join(request['env_keys'])}; least permissions: {', '.join(request['permissions'])}.\n"
         f"Checks: {', '.join(request['check_ids'])}. Effects: {request['effects']}.\n"
@@ -62,8 +83,7 @@ def question(request):
         "This budget is not yet authorized.\n"
         "1. Provide a provisioned secret reference or HTTPS one-time link from a supported trusted instance; "
         "explicitly authorize any proposed paid budget. Do not paste plaintext keys.\n"
-        "Private link intake is not enabled yet: do not send a one-time link until a supported private receiver "
-        "is configured. Use already provisioned runtime credentials in the meantime.\n"
+        + intake_notice +
         "2. Continue without credentials: omit only the listed dependent checks and run available alternatives.\n"
         "3. Keep paused; preserve work without omitting checks.")
 

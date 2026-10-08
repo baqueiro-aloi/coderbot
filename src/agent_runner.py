@@ -167,6 +167,10 @@ def _language_prompt(prompt: str) -> str:
                    "Coderbot sends your questions, explanations and attachments there; "
                    "do not describe this conversation as Slack.")
     language = _task_language.get()
+    channel += ('\nInvestigate real version-specific documentation and internal handlers before assuming contracts. '
+                'Controller-recorded omissions survive recovery but never authorize merge, IAM or spending. '
+                'Never kill unknown processes; isolate ports/workspaces. Report skipped, local, upstream and '
+                'postdeployment evidence separately; do not infer live capability from mocked success.')
     if not language:
         return channel + "\n\n" + prompt
     return (channel + "\n\n" +

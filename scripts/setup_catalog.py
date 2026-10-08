@@ -61,6 +61,7 @@ SETTINGS = (
     field("CODEBOT_JIRA_DONE_STATUS", "Jira", "Workflow status after merge or DONE.", "Done"),
     field("CODEBOT_JIRA_ISSUE_TYPE", "Jira", "Type for self-healing issues.", "Task", advanced=True),
     field("CODEBOT_COMM_CHANNEL", "Conversation", "Select email or Slack independently of backlog.", "email", "choice", choices=("email", "slack")),
+    field("CODEBOT_PRIVATEBIN_INSTANCES", "Conversation", "JSON array of trusted HTTPS PrivateBin instance URLs, including exact path/trailing slash. Empty disables private links; protocol v2 plaintext burn-after-reading only.", "[]", advanced=True),
     field("CODEBOT_USER_EMAIL", "Email", "First address receives email; comma-separated addresses may reply.", kind="email_list"),
     field("CODEBOT_SLACK_BOT_TOKEN", "Slack", f"Create a dedicated Slack app at {SLACK_APP_SETTINGS_URL}; in OAuth & Permissions add chat:write, channels:read, channels:history and files:write, install/reinstall it, then copy Bot User OAuth Token (xoxb-...).", secret=True),
     field("CODEBOT_SLACK_APP_TOKEN", "Slack", f"In the same app at {SLACK_APP_SETTINGS_URL}, enable Socket Mode and Event Subscriptions > Subscribe to bot events > message.channels; then Basic Information > App-Level Tokens > Generate Token and Scopes (connections:write); copy its xapp-... token.", secret=True),
@@ -155,6 +156,21 @@ def normalize_value(setting: Setting, value: str) -> str:
 
 
 def validate_value(setting: Setting, value: str) -> str | None:
+    if setting.key == 'CODEBOT_PRIVATEBIN_INSTANCES':
+        import json
+        from urllib.parse import urlsplit
+        try:
+            instances = json.loads(value)
+            if not isinstance(instances, list):
+                raise ValueError()
+            for instance in instances:
+                parsed = urlsplit(instance)
+                if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                        or parsed.port not in (None, 443) or parsed.query or parsed.fragment
+                        or not instance.endswith('/')):
+                    raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            return 'enter a JSON array of exact trusted HTTPS instance URLs ending with /'
     if "\n" in value or "\r" in value or "\0" in value:
         return "must be a single-line value"
     # Every single-line value except exact 'true' is a valid disabled setting.

@@ -302,8 +302,13 @@ def _cas_update(service, doc: dict, requests: list[dict]) -> bool:
         ).execute()
     except HttpError as err:
         if err.resp.status == 400:
-            log.info("doc changed since it was read; write rejected, will re-read")
-            return False
+            # Docs v1 also uses 400 for invalid ranges/fields. Establish a
+            # stale revision by a fresh read, not by status code alone.
+            fresh = service.documents().get(documentId=config.DOC_ID).execute()
+            revision = fresh.get('revisionId') if isinstance(fresh, dict) else None
+            if isinstance(revision, str) and revision and revision != doc['revisionId']:
+                log.info("doc revision changed; rejected write will be replanned from fresh read")
+                return False
         raise
     return True
 

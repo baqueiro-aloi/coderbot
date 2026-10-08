@@ -1,5 +1,6 @@
 """Replay completed agent outcomes until the surrounding FSM phase commits."""
 import hashlib
+import json
 
 import config
 from execution_identity import snapshot
@@ -13,7 +14,12 @@ def store():
 def key(state, prompt):
     # Same phase invocation can be replayed after notification failure. A different
     # prompt (including feedback) is a new invocation even within the same phase.
-    return hashlib.sha256((state["state"] + "\0" + prompt).encode()).hexdigest()
+    policy = {name: state.get(name) for name in (
+        'integration_inventory', 'validation_overrides', 'external_authorizations',
+        'pending_credential_request', 'approved_task_inventory', 'verified_task_inventory',
+        'reviewed_remote_sha', 'verification_guidance', 'coverage_report')}
+    return hashlib.sha256((state["state"] + "\0" + prompt + '\0'
+        + json.dumps(policy, sort_keys=True)).encode()).hexdigest()
 
 
 def replay(state, prompt):

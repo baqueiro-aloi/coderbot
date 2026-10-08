@@ -420,6 +420,9 @@ def handle_result(state: dict, result, phase: str) -> bool:
                          pending_validation_checks=request['check_ids'], pending_credential_request=request)
             save_state(state)
             email(state, f'question during {phase}', question, visible_question=question)
+            import secret_intake
+            database = phase_checkpoint.store()
+            secret_intake.bind(state.get('thread_id'), database.task_identity(state, config.REPO_PATH), request, plan)
             return True
     if requested:
         # Planning can define future validation but must not execute it before
@@ -1577,6 +1580,17 @@ def _complete_internal_review(state: dict, result) -> None:
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
     state["internal_review_report"] = parsed
+    if state.get('investigation_required'):
+        import independent_review
+        database = phase_checkpoint.store()
+        if not independent_review.valid(state, config.REPO_PATH, database):
+            receipt = independent_review.run(state, config.REPO_PATH, database, agent_runner.run)
+            state['independent_review_receipt'] = receipt
+            if receipt['status'] != 'pass':
+                state['review_gate_round_feedback'] = json.dumps(receipt['findings'])
+                state['state'] = 'INTERNAL_REVIEW'
+                save_state(state)
+                return
     state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
     evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
     state["state"] = "E2E"  # Final unit/lint/build checks also apply without a UI harness.
@@ -1622,6 +1636,8 @@ def do_e2e(state: dict) -> None:
         state.pop("final_repair_round", None)
         state.pop("final_check_round", None)
         state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
+            check.get('status') != 'pass' for check in report['checks']
+            if check.get('check', '').startswith('e2e')) and not any(
             w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
         if state.get("quality_report", {}).get("deferred"):
             _commit_final_check_tasks(state)
@@ -1643,6 +1659,13 @@ def do_e2e(state: dict) -> None:
         return
     log.info("running e2e suite (e2e/run.sh)")
     if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
+        # Old free-text waivers have no authorized scope receipt. Route through
+        # the deterministic exact-check policy rather than silently skip E2E.
+        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+        state['final_check_report'] = report
+        if report['status'] != 'pass':
+            _begin_check_repair(state, report, resume='E2E')
+            return
         state["e2e_passed"] = False
         state["state"] = "ARCHIVING"
         return
@@ -2358,6 +2381,14 @@ def _render_review_threads(state: dict, key: str = "review_threads") -> str:
 
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
+    import remote_review
+    try:
+        presented = remote_review.head(state['pr_url'], config.REPO_PATH, config.SUBPROCESS_TIMEOUT_SECONDS)
+        if presented['state'] != 'OPEN':
+            raise ValueError('PR is not open for review')
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        email(state, 'review head unavailable', 'Cannot present a verified remote PR head; work preserved. Retry review delivery.')
+        return
     database = phase_checkpoint.store()
     task_id = database.task_identity(state, config.REPO_PATH)
     identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
@@ -2411,6 +2442,18 @@ def finalize_pr(state: dict, note: str = "") -> None:
             + f"{handoffs.concise_verification(state)}\n"
             + (f"Video: {video_url}\n" if video_url else "")
             + "Files: " + ", ".join(path.name for path in evidence_files) + "\n")
+    import verification_reporting
+    body += '\n' + verification_reporting.summary(state) + '\n'
+    # Preserve human prose and update only the explicitly bot-owned section.
+    try:
+        if state.get('investigation_required') or state.get('validation_overrides'):
+            current_body = json.loads(_run_checked(['gh', 'pr', 'view', state['pr_url'], '--json', 'body']))['body']
+            updated_body = verification_reporting.update_body(current_body, state)
+            if updated_body != current_body:
+                _run_checked(['gh', 'pr', 'edit', state['pr_url'], '--body', updated_body])
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
+        email(state, 'validation disclosure pending', 'PR validation disclosure could not be updated safely; human text preserved. Retry before review handoff.')
+        return
     if omitted:
         body += "Evidence unavailable (missing or over attachment limit): " + ", ".join(
             path.name for path in omitted) + "\n\n"
@@ -2473,7 +2516,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
                      f"{config.BASE_BRANCH}, so {drained} earlier repl(y/ies) on this thread "
                      "were set aside — please re-send your instruction against the updated "
                      "PR.\n\n")
-    body += "Reply with change requests, or tell me to merge."
+    body += f"Remote head presented: {presented['headRefOid']}\nReply with change requests, or tell me to merge."
     notification_identity = identity + ":" + digest([video_url, [str(p) for p in evidence_files]])
     evidence_delivery.notification(database, state, config.REPO_PATH, notification_identity,
         lambda: email(state, "PR ready for review", body, evidence_files, milestone="pr_review"))
@@ -2484,6 +2527,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
         state.pop(key, None)
     state["state"] = "WAIT_MERGE"
     state["reviewed_pr_snapshot"] = content_snapshot(config.REPO_PATH)
+    state['reviewed_remote_sha'] = presented['headRefOid']
     for row in database.list("feedback", task_id, status="verifying"):
         if state.get("last_delivery", {}).get("complete") is not False:
             database.update("feedback", row, status="complete", outcome="verified delivery")
@@ -2757,10 +2801,11 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line
-              comments(first: 100) { nodes { author { login __typename } body databaseId createdAt } } } } } } }"""
+              comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { author { login __typename } body databaseId createdAt } } } } } } }"""
     threads: list[dict] = []
-    cursor = None
-    while True:
+    cursor, seen = None, set()
+    import api_contracts
+    for _ in range(1000):
         # -f passes raw strings; only $number (an Int in the query) uses -F's type
         # coercion. An all-digit cursor or owner under -F would coerce to Int and make
         # the GraphQL call fail its String! variable types.
@@ -2784,16 +2829,29 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             log.warning("unexpected review-threads payload (%s): %s", err, proc.stdout[:300])
             return None
         bot_login = ((data.get("viewer") or {}).get("login") or "").strip()
-        for node in conn.get("nodes") or []:
+        try:
+            nodes = api_contracts.collection(conn, 'nodes')
+            next_page = api_contracts.next_cursor(conn.get('pageInfo'), seen)
+        except ValueError:
+            log.warning('review thread collection or pagination incomplete')
+            return None
+        for node in nodes:
             if node.get("isResolved"):
                 continue
+            try:
+                import github_review_comments
+                comment_nodes = github_review_comments.complete(node['id'], node.get('comments'),
+                    config.REPO_PATH, config.SUBPROCESS_TIMEOUT_SECONDS)
+            except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
+                log.warning('review comments could not be read completely')
+                return None
             comments = [{
                 "author": (c.get("author") or {}).get("login", "?"),
                 "author_type": (c.get("author") or {}).get("__typename", ""),
                 "body": c.get("body", ""),
                 "comment_id": c.get("databaseId"),
                 "created_at": c.get("createdAt"),
-            } for c in ((node.get("comments") or {}).get("nodes") or []) if c]
+            } for c in comment_nodes]
             first = comments[0] if comments else {}
             threads.append({
                 "id": node.get("id"),
@@ -2809,10 +2867,12 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                 "comments": comments,
                 "bot_login": bot_login,
             })
-        page = conn.get("pageInfo") or {}
-        if not page.get("hasNextPage"):
+        if next_page is None:
             break
-        cursor = page.get("endCursor")
+        cursor = next_page
+    else:
+        log.warning('review thread pagination budget exhausted')
+        return None
     log.info("PR has %d unresolved review thread(s)", len(threads))
     return threads
 
@@ -3035,6 +3095,20 @@ def do_merge_reply(state: dict, reply: str) -> None:
               f"{state['pr_url']}\n\nReply 'merge' to retry.")
         return  # stay in WAIT_MERGE
     if pr_state != "MERGED":
+        import remote_review
+        try:
+            current_head = remote_review.head(state['pr_url'], config.REPO_PATH, config.SUBPROCESS_TIMEOUT_SECONDS)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            email(state, 'merge blocked', 'Remote head is unknown; no merge attempted. Retry when head can be verified.')
+            return
+        if not remote_review.reviewed(state, current_head):
+            state.pop('reviewed_remote_sha', None)
+            state['state'] = 'WAIT_REVIEW'
+            state['review_since'] = time.time()
+            save_state(state)
+            email(state, 'merge blocked — updated remote content',
+                  'Remote PR content was not the head presented for review. Review will run again; send a new merge instruction after the updated handoff.')
+            return
         if mergeable == "CONFLICTING":
             # The base branch moved ahead and the branch no longer merges cleanly.
             # Resolve the conflicts in the working session; genuinely ambiguous
@@ -3080,7 +3154,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                 state["pr_thread_notified"] = True  # don't re-address them every tick
                 return  # stay in WAIT_MERGE
         log.info("merging PR %s (squash)", state["pr_url"])
-        merge = subprocess.run(["gh", "pr", "merge", state["pr_url"], "--squash"],
+        merge = subprocess.run(remote_review.merge_argv(state['pr_url'], state['reviewed_remote_sha']),
                                cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
         if merge.returncode != 0:
             # A late-breaking conflict or other GitHub rejection (e.g. branch behind the
@@ -3918,7 +3992,10 @@ def do_recover(state: dict) -> None:
         result = agent_runner.run(recovery.attribution_prompt(state, current))
         value = parse_json_reply(result.output)
         attributed = recovery.validate_attribution(value, current)
-        owned = sorted(set(owned) | set(attributed))
+        # Model prose is advisory, never ownership proof. Only controller turn
+        # receipts may authorize transfer/commit; ambiguous paths stay isolated.
+        attributed = [path for path in attributed if path in owned]
+        owned = sorted(set(owned))
         protected = [path for path in protected if path not in attributed]
         row = database.update("recovery", row, attribution_checked=True, owned=owned,
                               protected=protected, attribution_evidence=value["evidence"])
@@ -4117,17 +4194,20 @@ def _git_quiet(*args: str) -> bool:
 
 
 def _reset_to_base_branch() -> list[str]:
-    """Best-effort LOCAL reset: abort any half-finished git op, discard changes, land on a
-    clean, up-to-date base branch. Never touches remote branches or PRs. Returns notes about
-    any step that left the tree unclean (empty list when fully clean)."""
-    _abort_in_progress_ops()  # a half-finished merge/rebase would block the checkout
-    _git_quiet("reset", "--hard")                            # drop staged/unstaged tracked changes
-    _git_quiet("checkout", "-f", config.BASE_BRANCH)         # leave whatever codebot branch we were on
-    _git_quiet("clean", "-fd")             # drop untracked files; .gitignore (data/, .env) is kept
+    """Return to base without discarding unknown work, commits or operations."""
+    try:
+        current = repo_provenance.inspect(config.REPO_PATH)
+    except (OSError, subprocess.SubprocessError):
+        return ['repository inspection unavailable; checkout preserved']
+    if current['files'] or current['operations']:
+        return ['pending work or Git operation preserved; no reset/clean/forced checkout']
+    if not _git_quiet('checkout', config.BASE_BRANCH):
+        return ['base checkout unavailable; current branch preserved']
     # Branches may have merged/moved while we were away: fast-forward the local base branch to
     # the remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
     if _git_quiet("fetch", "origin", config.BASE_BRANCH):
-        _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
+        if not _git_quiet('merge', '--ff-only', f'origin/{config.BASE_BRANCH}'):
+            return ['base cannot fast-forward; local commits preserved']
     problems = []
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
@@ -4177,7 +4257,8 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
               "approved_task_inventory", "verified_task_inventory", "validation_overrides", "pending_validation_checks",
               "integration_inventory", "exploration_feedback", "planning_work_preserved",
-              "investigation_required", "investigation_round", "pending_credential_request", "external_authorizations")
+              "investigation_required", "investigation_round", "pending_credential_request", "external_authorizations",
+              "reviewed_remote_sha", "independent_review_receipt", "recovery_backup")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4430,6 +4511,14 @@ def _commit_pending_work(state: dict) -> list[str]:
     if protected:
         notes.append('protected unattributed/evidence paths remain in working tree: ' + ', '.join(protected))
     if kept:
+        import attachments
+        try:
+            for name in kept:
+                candidate = config.REPO_PATH / name
+                if candidate.is_file():
+                    attachments.assert_safe_text(candidate)
+        except (ValueError, OSError):
+            return notes + ['sensitive or unreadable task file protected; no staging performed']
         # An unrelated staged entry must not get swept into this commit.
         if not _git_quiet('add', '--', *kept):
             return notes + ['could not stage task-owned work; preserved locally']

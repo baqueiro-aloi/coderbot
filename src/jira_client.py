@@ -59,8 +59,8 @@ def _jql_quote(value: str) -> str:
 
 def _search(jql: str, fields: list[str] | None = None) -> list[dict]:
     """Enhanced paginated JQL search; /search is being removed by Atlassian."""
-    results, cursor = [], None
-    while True:
+    results, cursor, seen = [], None, set()
+    for _ in range(1000):
         body = {"jql": jql, "fields": fields or ["summary", "description", "status",
                                                "labels", "attachment"], "maxResults": 100}
         if cursor:
@@ -68,13 +68,21 @@ def _search(jql: str, fields: list[str] | None = None) -> list[dict]:
         page = _request("POST", "/search/jql", body)
         if not isinstance(page, dict):
             raise RuntimeError("Jira /search/jql returned a non-object response")
-        results.extend(page.get("issues", []))
+        issues = page.get('issues')
+        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+            raise RuntimeError('Jira /search/jql missing or malformed issues collection')
+        results.extend(issues)
         next_cursor = page.get("nextPageToken")
-        if page.get("isLast", not next_cursor) or not next_cursor:
+        last = page.get('isLast', not next_cursor)
+        if type(last) is not bool:
+            raise RuntimeError('Jira /search/jql invalid completion flag')
+        if last:
             return results
-        if cursor == next_cursor:
-            raise RuntimeError("Jira /search/jql repeated its pagination token")
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
+            raise RuntimeError("Jira /search/jql missing or repeated pagination token")
+        seen.add(next_cursor)
         cursor = next_cursor
+    raise RuntimeError('Jira /search/jql pagination budget exhausted; results incomplete')
 
 
 def adf_text(node: dict | str | None) -> str:

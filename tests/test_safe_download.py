@@ -105,6 +105,15 @@ class SafeDownloadTests(unittest.TestCase):
                     'https://evilgoogleusercontent.com/a', 'http://lh3.googleusercontent.com/a'):
             self.assertFalse(safe_download.google_image_host(url))
 
+    def test_restricted_receiver_host_and_headers_fail_before_connection(self):
+        for kwargs in ({'allowed_hosts': ['trusted.example']},
+                       {'headers': {'Authorization': 'Bearer secret'}},
+                       {'headers': {'Accept': 'json\r\nCookie: secret'}}):
+            with self.subTest(kwargs=kwargs), patch('safe_download._open') as connect:
+                with self.assertRaises(safe_download.DownloadError):
+                    safe_download.download('https://other.example/paste', **kwargs)
+                connect.assert_not_called()
+
     def test_github_client_routes_download_through_scoped_policy(self):
         import tempfile
         from pathlib import Path

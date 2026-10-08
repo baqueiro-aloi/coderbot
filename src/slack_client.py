@@ -16,6 +16,7 @@ import markdown
 
 import config
 import secret_safety
+import secret_intake
 from command_text import parse_command
 
 log = logging.getLogger(__name__)
@@ -135,7 +136,8 @@ def _accept_event(payload: dict) -> bool:
         inserted = db.execute(
             "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text,author) VALUES(?,?,?,?,?,?)",
             (_thread_id(channel, event["ts"]), channel, root, event["ts"],
-              secret_safety.redact(event.get("text") or ""), event['user'])).rowcount
+              secret_intake.sanitize(event.get("text") or "", _thread_id(channel, root),
+                  _thread_id(channel, event['ts'])), event['user'])).rowcount
     if inserted:
         log.info("Slack reply received in thread %s", _thread_id(channel, root))
         _wake.set()

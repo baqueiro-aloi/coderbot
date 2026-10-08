@@ -283,7 +283,8 @@ def concise_verification(state):
     accepted = sum(check.get("gate", {}).get("status") == "pass" for check in checks)
     preexisting = sum(len(check.get("gate", {}).get("preexisting", [])) for check in checks)
     waived = state.get("check_waivers", [])
-    e2e = "waived" if any(w.get("scope") == "e2e:general" for w in waived) else (
+    legacy = any(w.get('scope') == 'e2e:general' for w in waived)
+    e2e = "legacy waiver unverified" if legacy else (
         "not applicable" if not state.get("has_e2e_harness") else
         "passed" if state.get("e2e_passed") else "outcome unavailable")
     return (f"Verification: {accepted}/{len(checks)} final checks accepted; "

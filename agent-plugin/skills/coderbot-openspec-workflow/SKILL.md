@@ -29,6 +29,12 @@ The agent must never push, create a PR, merge, choose archive timing, finish the
 
 Stop after reporting phase output and evidence; coderbot performs lifecycle side effects.
 
+Never kill unknown/human processes to repair a port collision. Prove ownership or
+choose isolated ports/workspaces. Local repair does not authorize IAM changes,
+privilege expansion, paid provider calls, remote data mutations or deployment.
+Ask for specific authorization when those effects are indispensable; preserve
+work and offer local alternatives rather than fabricating remote validation.
+
 ## Headless Input
 
 For a truly material unresolved decision, return `NEED_USER_INPUT` with the decision, options, and impact. Do not ask an interactive question. Otherwise continue autonomously within the current phase.

@@ -29,13 +29,16 @@ def authorize(state, plan, check_ids, *, message_id, author, instruction, reason
 
 def applicable(state, check):
     for receipt in state.get('validation_overrides', []):
-        if receipt.get('version') != 2 or receipt.get('status') != 'active':
+        if receipt.get('version') != 2 or receipt.get('status') not in ('active', 'needs_review'):
             continue
         expected = receipt.get('checks', {}).get(check.id)
         if expected == scope(check):
             return receipt
         if expected is not None:
+            # A changed operation invalidates only that binding, not unrelated
+            # checks authorized by the same human message.
             receipt['status'] = 'needs_review'
+            receipt.setdefault('changed_checks', {})[check.id] = scope(check)
     return None
 
 

@@ -4,3 +4,7 @@ google-auth==2.56.0
 google-auth-oauthlib==1.4.0
 markdown==3.10.2
 slack-sdk==3.44.1
+# PrivateBin v2 decoder only; trusted transport replaces the client's CLI/network.
+PBinCLI==0.3.7
+pycryptodome==3.24.0
+base58==2.1.1

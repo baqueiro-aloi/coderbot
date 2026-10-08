@@ -56,7 +56,7 @@ def _open(parsed, address, headers, timeout):
 
 
 def download(url, *, authorization=None, auth_hosts=(), max_bytes=10 * 1024 * 1024,
-             timeout=60, max_redirects=3):
+              timeout=60, max_redirects=3, allowed_hosts=None, headers=None):
     """Never forward credentials after a cross-host redirect, even on return."""
     if max_bytes <= 0 or timeout <= 0 or max_redirects < 0:
         raise DownloadError('Invalid download limits')
@@ -73,14 +73,21 @@ def download(url, *, authorization=None, auth_hosts=(), max_bytes=10 * 1024 * 10
     for hop in range(max_redirects + 1):
         remaining()
         parsed, hostname, address = _target(url)
+        if allowed_hosts is not None and hostname not in allowed_hosts:
+            raise DownloadError('Download destination is not authorized')
         if previous_host is not None and hostname != previous_host:
             auth_allowed = False
         previous_host = hostname
-        headers = {'User-Agent': 'codebot'}
+        request_headers = {'User-Agent': 'codebot', **(headers or {})}
+        if any(name.lower() in ('authorization', 'cookie', 'host') for name in (headers or {})):
+            raise DownloadError('Sensitive headers require scoped authorization')
+        if any(not isinstance(value, str) or '\r' in value or '\n' in value
+               for value in request_headers.values()):
+            raise DownloadError('Invalid download headers')
         if authorization and auth_allowed and hostname in auth_hosts:
-            headers['Authorization'] = authorization
+            request_headers['Authorization'] = authorization
         try:
-            connection, response = _open(parsed, address, headers, remaining())
+            connection, response = _open(parsed, address, request_headers, remaining())
             try:
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.getheader('Location')

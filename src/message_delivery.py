@@ -29,6 +29,7 @@ def attempt(store, row, backend):
     envelope = row["data"]["envelope"]
     receipts = dict(row["data"]["receipts"])
     for artifact in envelope["attachments"]:
+        attachments.assert_safe_text(artifact['path'])
         if receipts.get(artifact["id"], {}).get("status") == "confirmed":
             continue
         if attachments.describe(artifact["path"])["id"] != artifact["id"]:

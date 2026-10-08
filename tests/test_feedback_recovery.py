@@ -245,6 +245,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
             with patch.object(main.phase_checkpoint, "store", return_value=store), \
                  patch.object(main.config, "REPO_PATH", Path(root)), \
                  patch.object(main, "content_snapshot", return_value="head"), \
+                 patch('remote_review.head', return_value={'state': 'OPEN', 'headRefOid': 'a' * 40}), \
                  patch.object(main.agent_runner, "run") as audit, \
                  patch.object(main, "save_state"), \
                  patch.object(main.evidence, "record_evidence", side_effect=RuntimeError("evidence reached")) as record:

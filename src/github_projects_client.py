@@ -28,6 +28,7 @@ import urllib.request
 import config
 import ownership
 import safe_download
+import api_contracts
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -75,13 +76,17 @@ def _graphql(query: str, **variables) -> dict:
         payload = json.loads(out)
     except ValueError as err:
         raise RuntimeError(f"gh api graphql returned non-JSON output: {out[:500]!r}") from err
+    if not isinstance(payload, dict):
+        raise RuntimeError('GraphQL response must be an object')
     if payload.get("errors"):
         detail = json.dumps(payload["errors"])[:2000]
         message = f"GraphQL errors: {detail}"
         if any(marker in detail for marker in _SCOPE_MARKERS):
             message += _SCOPE_HINT
         raise RuntimeError(message)
-    return payload.get("data") or {}
+    if not isinstance(payload.get('data'), dict):
+        raise RuntimeError('GraphQL data missing or invalid')
+    return payload['data']
 
 
 def _target_repo() -> str:
@@ -234,15 +239,15 @@ def _parse_item(node: dict) -> dict:
 def _items() -> list[dict]:
     """Every item on the board, in board order."""
     project_id = _project()["id"]
-    items, cursor = [], None
-    while True:
+    items, cursor, seen = [], None, set()
+    for _ in range(1000):
         data = _graphql(_ITEMS_QUERY, id=project_id, cursor=cursor)
-        page = (data.get("node") or {}).get("items") or {}
-        items.extend(_parse_item(n) for n in page.get("nodes", []) if n)
-        info = page.get("pageInfo") or {}
-        if not info.get("hasNextPage"):
+        page = (data.get("node") or {}).get("items")
+        items.extend(_parse_item(n) for n in api_contracts.collection(page, 'nodes'))
+        cursor = api_contracts.next_cursor(page.get('pageInfo'), seen)
+        if cursor is None:
             return items
-        cursor = info.get("endCursor")
+    raise RuntimeError('GitHub project pagination budget exhausted; results incomplete')
 
 
 def _item(item_id: str) -> dict | None:
@@ -488,7 +493,10 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
         # Install the fingerprinted marker first, then retire the legacy one.
         # Never adopt a legacy label merely because the readable name matches.
         _add_label(task, claim_label())
-        fresh = _item(task["item_id"]) or task
+        fresh = _item(task["item_id"])
+        if fresh is None or claim_label() not in fresh['labels']:
+            log.warning('claim effect not verified; refusing ownership')
+            return False
         rivals = _foreign_claims(fresh["labels"]) - {f"{config.GH_LABEL_PREFIX}:{owner}"}
         if rivals:
             _remove_label(task, claim_label())
@@ -501,7 +509,10 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
         log.info("task already claimed by %r: %r", owner, item_text[:80])
         return False
     _add_label(task, claim_label())
-    fresh = _item(task["item_id"]) or task
+    fresh = _item(task["item_id"])
+    if fresh is None or claim_label() not in fresh['labels']:
+        log.warning('claim effect not verified; refusing ownership')
+        return False
     rivals = _foreign_claims(fresh["labels"])
     if rivals:
         log.info("lost the claim race for %r to %s; backing off", item_text[:80], sorted(rivals))

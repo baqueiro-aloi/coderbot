@@ -33,6 +33,14 @@ class OverrideTests(unittest.TestCase):
                 overrides.authorize({}, self.plan(), ids, message_id='m', author='u',
                     instruction='skip requested checks', reason='explicit')
 
+    def test_one_changed_check_does_not_revoke_other_exact_bindings(self):
+        plan, state = self.plan(), {}
+        overrides.authorize(state, plan, ['local', 'mantle:inference'], message_id='m', author='u',
+            instruction='omit both exact checks', reason='explicit')
+        changed = Check('local', ['different'])
+        self.assertIsNone(overrides.applicable(state, changed))
+        self.assertIsNotNone(overrides.applicable(state, plan[1]))
+
     def test_classifier_contract_preserves_negations_and_rejects_unknown_or_mixed(self):
         self.assertIn('negations', overrides.prompt('NO omitir e2e', self.plan(), 'question'))
         for verdict in ({'action': 'none'}, {'action': 'ambiguous'},
@@ -67,6 +75,15 @@ class OverrideTests(unittest.TestCase):
              patch.object(final_checks, 'snapshot', return_value='new'):
             final_checks.run(state, Path('/repo'), type('Store', (), {'task_identity': lambda *a: 't'})())
         self.assertEqual(len(execute.call_args.args[0]), 2)
+
+    def test_legacy_waiver_without_author_cannot_skip_even_exact_named_check(self):
+        state = {'check_waivers': [{'scope': 'e2e:general', 'instruction': 'skip'}]}
+        check = Check('e2e:general', ['test'])
+        with patch.object(final_checks.check_plan, 'discover', return_value=[check]), \
+             patch.object(final_checks.checks, 'execute_plan', return_value=[{'status': 'pass'}]) as execute, \
+             patch.object(final_checks, 'snapshot', return_value='snapshot'):
+            final_checks.run(state, '.', type('Store', (), {'task_identity': lambda *a: 'task'})())
+        self.assertEqual(execute.call_args.args[0], [check])
 
     def test_controller_resumes_final_gate_without_key_or_extra_approval(self):
         import main

@@ -4,6 +4,23 @@ import hashlib
 import json
 import mimetypes
 from pathlib import Path
+import secret_safety
+
+
+def assert_safe_text(path):
+    """Reject detectable secrets before copying/compressing/publishing bytes.
+
+    Text scanning is not a media/content attestation. Binary evidence needs its
+    separate trusted capture/publication gate, not a guessed MIME exemption.
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return
+    if secret_safety.redact(text) != text:
+        raise ValueError('Attachment contains sensitive text; prepare a sanitized copy before publication')
 
 
 def describe(path, *, role="supporting"):
@@ -26,6 +43,7 @@ def encoded_size(size):
 
 
 def prepare(artifact, limit, directory, *, mime=False):
+    assert_safe_text(artifact['path'])
     if Path(artifact["path"]).suffix.lower() == ".log":
         # Copy into the durable transport area: keep the source log intact and
         # give both providers a real .txt path for MIME/preview detection.

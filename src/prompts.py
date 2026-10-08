@@ -30,6 +30,12 @@ ENVIRONMENT = """Execution environment (facts — do not re-derive or guess):
   change retention/security controls or deploy changes. Resolve local environment problems autonomously;
   never ask the bot user to SSH, edit runtime files, or approve a tool operation.
   Product decisions and proposal/merge approval remain part of the task workflow.
+- Port collisions never authorize killing a process you did not start. Identify
+  ownership, use another isolated port/workspace, or ask before touching unknown
+  services. Docker availability is not proof of containment or remote authority.
+- Repair only approved local dependencies/configuration. IAM changes, new external
+  access, paid provider calls, production mutations and deployment require exact
+  separate authorization; do not "fix permissions" by expanding credentials.
 - NEVER state that a verification step is impossible without having actually run the
   command that proves it and observed it fail. Report what you ran, not what you assume.
 """ + ("".join(f"- {line}\n" if not line.startswith(("-", " ")) else f"{line}\n"
@@ -198,6 +204,11 @@ JSON line with version=1, service, environment, env_keys, permissions, check_ids
 effects, paid (boolean), max_cost (nonnegative number), currency. Also report its
 exact check definitions using CHECK_PLAN version=2; remote checks require kind
 upstream/postdeployment, external_dependencies, env_keys and max_age_seconds.
+Bind each check to approved requirement ids and exact scenario titles. Requirement
+ids are SHA256 of relative spec path (from change root) concatenated with its
+Requirement title, matching the controller inventory. Every applicable requirement
+and scenario needs controller-run evidence or an exact accepted exception; a green
+unrelated suite does not certify coverage.
 The controller asks the user before executing dependent checks. Do not include
 secret values or assume a proposed budget is authorized.
 Split the investigation across several

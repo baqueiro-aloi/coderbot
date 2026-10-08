@@ -48,6 +48,7 @@ class ReconciliationTests(unittest.TestCase):
             (video.parent / "drive-entrega.json").write_text(json.dumps({"file": {"id": "a", "webViewLink": url}, "folder_id": "folder", "sha256": artifact_manifest.file_hash(video)}))
             state = {"item": "task", "slug": "task", "state": "WAIT_MERGE", "pr_url": metadata["pr_url"], "has_e2e_harness": True}
             with patch.object(main.config, "DATA_DIR", root), patch.object(main, "content_snapshot", return_value="snapshot"), \
+                 patch('remote_review.head', return_value={'state': 'OPEN', 'headRefOid': 'a' * 40}), \
                  patch("evidence_delivery.implementation_snapshot", return_value="implementation"), \
                  patch("evidence.valid_media", return_value=True), \
                  patch("drive_client.verify_existing", return_value={"status": "complete", "url": url}) as verify, \

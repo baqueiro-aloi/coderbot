@@ -20,16 +20,16 @@ class VerificationLedgerTests(unittest.TestCase):
             self.assertEqual([v["title"] for v in values], ["Model selector", "Effort"])
             self.assertEqual(values[0]["scenarios"], ["Persist selection"])
 
-    def test_waiver_skips_only_general_collection_and_never_claims_pass(self):
+    def test_legacy_waiver_keeps_history_but_does_not_invent_consent(self):
         state = {"check_waivers": [], "has_e2e_harness": True}
         verification_ledger.waiver(state, "Skip broken general E2E", "e2e:general", "head")
         verification_ledger.waiver(state, "Skip broken general E2E", "e2e:general", "head")
         self.assertEqual(len(state["check_waivers"]), 1)
         plan = [check_plan.Check("unit:backend", ["test"]), check_plan.Check("e2e:general", ["e2e"])]
         with patch.object(final_checks.check_plan, "discover", return_value=plan), \
-             patch.object(final_checks.checks, "execute_plan", return_value=[{"status": "pass"}]) as execute, \
+             patch.object(final_checks.checks, "execute_plan", return_value=[{"status": "pass"}, {"status": "pass"}]) as execute, \
              patch.object(final_checks, "snapshot", return_value="head"):
             result = final_checks.run(state, Path("/repo"), type("Store", (), {"task_identity": lambda *args: "task"})())
-        self.assertEqual([c.id for c in execute.call_args.args[0]], ["unit:backend"])
-        self.assertIn("waived", handoffs.concise_verification(state))
+        self.assertEqual([c.id for c in execute.call_args.args[0]], ["unit:backend", "e2e:general"])
+        self.assertIn("legacy waiver unverified", handoffs.concise_verification(state))
         self.assertEqual(result["status"], "pass")

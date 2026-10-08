@@ -21,7 +21,9 @@ def run(state, repo, store):
     for check in plan:
         exception = validation_overrides.applicable(state, check)
         legacy = next((w for w in state.get('check_waivers', [])
-                       if w.get('scope') == check.id == 'e2e:general'), None)
+                       if w.get('scope') == check.id == 'e2e:general'
+                       and w.get('message_id') and w.get('author') and w.get('instruction')
+                       and w.get('check_scope') == validation_overrides.scope(check)), None)
         if exception or legacy:
             omitted.append({'check': check.id, 'status': 'not_run', 'exception': exception or legacy,
                 'gate': {'status': 'accepted_exception', 'preexisting': [], 'regressions': []}})
@@ -45,7 +47,19 @@ def run(state, repo, store):
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})
     outcomes.extend(omitted)
-    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(
+    report = {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(
         r['gate']['status'] == 'accepted_exception' or r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)
-            else "fail", "checks": outcomes}
+             else "fail", "checks": outcomes}
+    if state.get('investigation_required'):
+        import requirement_coverage
+        coverage = requirement_coverage.evaluate(state, repo, store, report)
+        state['coverage_report'] = coverage
+        report['coverage'] = coverage
+        if coverage['status'] != 'pass':
+            report['status'] = 'indeterminate'
+        import independent_review
+        if not independent_review.valid(state, repo, store):
+            report['independent_review'] = 'missing_or_stale'
+            report['status'] = 'indeterminate'
+    return report

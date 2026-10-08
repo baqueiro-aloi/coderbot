@@ -45,4 +45,5 @@ def waiver(state, text, scope, snapshot):
 
 def report_details(state):
     return json.dumps({key: state.get(key) for key in ("quality_report",
-        "internal_review_report", "final_check_report", "check_waivers")}, ensure_ascii=False, indent=2)
+        "internal_review_report", "final_check_report", "check_waivers", "validation_overrides",
+        "integration_inventory", "reviewed_remote_sha")}, ensure_ascii=False, indent=2)

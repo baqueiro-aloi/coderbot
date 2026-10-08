@@ -46,10 +46,50 @@ key does not authorize the proposed budget. Paid operations remain pending
 unless a scoped authorization is recorded. A positive proposed cost is not
 itself approval or an enforced provider billing cap.
 
-**Secret intake is not complete yet.** Do not send a plaintext credential or
-assume a PrivateBin link is currently resolved safely. Use already provisioned
-runtime credentials or explicitly choose continuation without credentials until
-the private receiver, expiration and recovery tasks are completed.
+**Secret intake is opt-in.** Never send plaintext credentials. Configure
+`CODEBOT_PRIVATEBIN_INSTANCES` with exact trusted HTTPS instance paths. With
+the default `[]`, links are rejected and redacted, not fetched. Only a currently
+bound credential decision on the same task thread can receive a link; one key
+per message, protocol v2 plaintext burn-after-reading only. A provisioned
+`SECRET_REFERENCE: <opaque-handle>` must already match the exact task/check.
+Existing runtime credentials and continuation without keys remain alternatives.
+
+The trusted controller can provision `PrivateSecrets` records in its private
+data area (directory 0700, records 0600), returning opaque handles. Handles bind
+task, exact check operation and environment name, expire within at most 24 hours,
+and survive controller restart. `checks.execute(..., secret_handles=[...])`
+injects them only into the selected child environment; reports are redacted and
+identity uses HMAC rather than stored values. Expired/invalid records can be
+cleaned without touching target work. Deletion removes the file but does not
+promise secure erasure on SSDs, snapshots or backups. Do not put this private
+area in the target repository, general database, outbox or model-accessible paths.
+Slack sanitizes before inbox commit; email sanitizes before returning to the
+controller. General history gets only a receipt description, never full link,
+key or plaintext. A private consumption receipt prevents duplicate fetches;
+crash before successful private persistence requests a new link, while a stored
+complete scope can recover without remote consumption. Key availability does
+not authorize proposed spending. Provider chat retention is outside this local
+boundary: use short-lived credentials and do not expect erasure of sent messages.
+
+PrivateBin decoder supports protocol v2 as implemented by PrivateBin 2.0.6,
+using the pinned PBinCLI 0.3.7 crypto implementation only (never its CLI,
+configuration, network or debug mode). Supported: plaintext formatter, no
+discussion, burn-after-reading, AES-256-GCM with 128-bit tag, 16-byte IV,
+8-byte salt, PBKDF2-SHA256 with 10,000–100,000 iterations, compression none or
+raw deflate bounded to 32 KiB. Password-protected pastes, attachments, other
+formats/protocols and unconfigured HTTPS instance paths are rejected.
+Transport strips the fragment, pins public DNS addresses, disallows redirects,
+requires the configured host, and bounds bytes/time. The private receiver returns
+only a scoped handle. Channel intake accepts links only for bound decisions.
+
+Sources consulted 2026-10-08:
+- https://raw.githubusercontent.com/PrivateBin/PrivateBin/2.0.6/js/privatebin.js
+- https://raw.githubusercontent.com/r4sas/PBinCLI/0.3.7/pbincli/format.py
+- https://pypi.org/pypi/pbincli/json (latest published release 0.3.7, 2025-03-22).
+
+Compatibility tests encrypt independently with Node WebCrypto and with the
+pinned client; reject authenticated-data changes, corrupted ciphertext and
+oversized decompression. No real secret or live burn-after-reading paste used.
 
 ## Exceptions
 
@@ -70,6 +110,21 @@ The rollout/migration of older waivers and all lateral conversation paths remain
 part of the active checklist. Do not infer completion from the presence of helper
 functions or a single passing unit suite.
 
+## Remote review binding
+
+Review delivery records the remote `headRefOid` and includes it in the handoff.
+A later merge verifies that same remote head; unknown or changed heads require
+another review handoff, including legacy tasks without a head receipt. Explicit
+thread bypass does not bypass this condition. The actual GitHub CLI merge uses
+`--match-head-commit` so a push racing the last read is rejected by the provider.
+Reference consulted: https://cli.github.com/manual/gh_pr_merge (2026-10-08).
+
+Docs v1 returns HTTP 400 for stale required revisions *and* invalid requests.
+The client retries a rejected CAS write only after a fresh read establishes a
+different revision; unchanged or unavailable revisions do not imply conflict.
+Reference: https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate#WriteControl
+(2026-10-08).
+
 ## Verification boundaries
 
 Known test reporters retain executed/skipped counts. Zero tests produce
@@ -79,7 +134,20 @@ requires paired current HTML/JSON reports with executed, successful assertions;
 failure artifacts are diagnostic only.
 
 Check identity includes private HMAC-bound `.env` inputs, and configured maximum
-age limits reuse. Effective installed-package probing, full deployment readiness,
-independent-review provenance and complete requirement coverage are still tracked
-separately in the active change. No production deployment is authorized by this
-documentation or by passing local tests.
+age limits reuse. Python distributions and npm's effective installed graph are
+probed in the actual check environment; failed probes prevent reuse. Baseline
+cache applies the same installation/configuration and remote freshness controls.
+New investigated tasks require requirement/scenario coverage linked to actual
+controller execution receipts or exact omissions, plus a separately launched
+read-only review-session receipt. Code changes invalidate that review; moving
+OpenSpec artifacts into the archive alone does not. Local snapshots do not prove
+remote deployment. Full readiness and broader rollout remain active tasks.
+
+Recovery now backs up dirty/index bytes privately before isolation and keeps
+unknown work in its original checkout. Model attribution prose is advisory only.
+Returning to base refuses dirty work/incomplete operations and uses normal
+checkout/fast-forward only, never forced checkout, broad clean or hard reset.
+Backup files can contain secrets: keep recovery-backups private and outside Git,
+outbox and the target workspace. SSD/snapshot erasure is not guaranteed.
+
+No production deployment is authorized by this documentation or passing local tests.

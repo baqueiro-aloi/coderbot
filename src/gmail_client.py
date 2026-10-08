@@ -392,7 +392,8 @@ def poll_reply(thread_id: str) -> tuple[str, str] | None:
     for msg_id, body in reply_candidates(thread.get("messages", []), processed, config.USER_EMAIL):
         if body:
             log.info("new reply in thread %s (msg %s, %d chars)", thread_id, msg_id, len(body))
-            return msg_id, body
+            import secret_intake
+            return msg_id, secret_intake.sanitize(body, thread_id, msg_id)
         # Empty after quote-strip: nothing to hand off, so consume it now to avoid rescan.
         mark_processed(msg_id)
         log.warning("reply msg %s had empty body after quote-strip; skipping", msg_id)

@@ -24,12 +24,12 @@
 
 - [x] 3.1 Implementar inventario versionado de integraciones, contratos, fuentes consultadas, versiones efectivas e incertidumbres materiales.
 - [ ] 3.2 Conectar investigación a exploración/propuesta/aprobación: comprobar referencias y resolver información indispensable antes de acreditar compatibilidad.
-- [ ] 3.3 Actualizar prompts/skill/resumes para documentación por versión, contratos internos reales y contradicciones; eliminar equivalencia entre permisos locales, IAM y gasto.
+- [x] 3.3 Actualizar prompts/skill/resumes para documentación por versión, contratos internos reales y contradicciones; eliminar equivalencia entre permisos locales, IAM y gasto.
 - [x] 3.4 Detectar requisitos de credenciales/budget temprano y generar opciones completas de compartir, continuar sin key o pausar.
-- [ ] 3.5 Implementar almacén privado de handles con permisos, TTL, inyección a proceso autorizado, limpieza y recuperación; mantener plaintext fuera de contexto del modelo.
-- [ ] 3.6 Investigar documentación oficial actual y protocolo de PrivateBin, seleccionar cliente/dependencia mantenida compatible, fijar versión y añadir vectores de descifrado; rechazar protocolos/instancias no soportadas explícitamente.
-- [ ] 3.7 Conectar recepción de enlace seguro/referencia provisionada antes de persistencia de canales; validar host/DNS/redirect/tamaño/timeout y evitar unfurls automáticos.
-- [ ] 3.8 Probar expiración, enlace consumido, crash antes/después de persistencia privada y reenvío seguro sin perder tarea ni repetir resolución ciegamente.
+- [x] 3.5 Implementar almacén privado de handles con permisos, TTL, inyección a proceso autorizado, limpieza y recuperación; mantener plaintext fuera de contexto del modelo.
+- [x] 3.6 Investigar documentación oficial actual y protocolo de PrivateBin, seleccionar cliente/dependencia mantenida compatible, fijar versión y añadir vectores de descifrado; rechazar protocolos/instancias no soportadas explícitamente.
+- [x] 3.7 Conectar recepción de enlace seguro/referencia provisionada antes de persistencia de canales; validar host/DNS/redirect/tamaño/timeout y evitar unfurls automáticos.
+- [x] 3.8 Probar expiración, enlace consumido, crash antes/después de persistencia privada y reenvío seguro sin perder tarea ni repetir resolución ciegamente.
 
 ## 4. Pruebas de contratos, cobertura y revisión
 
@@ -54,13 +54,13 @@
 - [ ] 6.1 Validar payload mínimo GitHub/Jira/Docs/Slack/Drive y distinguir invalid/unknown de vacío; probar colecciones ausentes y tipos malformados.
 - [ ] 6.2 Paginar comentarios y recursos anidados; detectar cursores repetidos/ausentes y limitar ciclos sin afirmar lectura completa.
 - [ ] 6.3 Verificar claim/ownership y mutaciones pertinentes mediante lectura fresca; eliminar fallback de snapshot viejo como confirmación.
-- [ ] 6.4 Clasificar HTTP 400 Docs por causa real; probar revisión obsoleta frente a request inválido.
+- [x] 6.4 Clasificar HTTP 400 Docs por causa real; probar revisión obsoleta frente a request inválido.
 - [ ] 6.5 Reconciliar creación/comentarios mutantes antes de retry ambiguo, con marcadores/receipts y límites; probar efecto aplicado con respuesta perdida.
 - [ ] 6.6 Exponer adjuntos requeridos no descargados y errores sanitizados por categoría, sin asumir contexto irrelevante.
 
 ## 7. Merge, operación y release
 
-- [ ] 7.1 Registrar SHA remoto presentado para revisión, invalidar aprobación ante push externo y aplicar merge con --match-head-commit; cubrir race y force de threads sin bypass de SHA.
+- [x] 7.1 Registrar SHA remoto presentado para revisión, invalidar aprobación ante push externo y aplicar merge con --match-head-commit; cubrir race y force de threads sin bypass de SHA.
 - [ ] 7.2 Separar estados implementado/local/upstream/desplegado/postdespliegue en reportes y documentación, incluidas excepciones.
 - [ ] 7.3 Extender rollout local/AWS/Azure con imagen digest/SHA, versiones/configuración seguras y probes de readiness/smoke; no acreditar función por systemctl/heartbeat.
 - [ ] 7.4 Verificar reconstrucción/recreación por cambios de imagen/env, recuperación de estado y rollback preservando target; pruebas aisladas sin despliegue real.
