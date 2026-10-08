@@ -4227,6 +4227,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
               "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
+              "legacy_validation_waivers",
               "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
               "feedback_question_origin", "remote_branch", "feedback_delivery_pending", "recovery_resume",
               "pending_decision_id", "reminded_decision", "last_effective_progress",
