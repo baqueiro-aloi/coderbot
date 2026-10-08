@@ -15,7 +15,7 @@
 - [x] 2.2 Corregir adapters unittest/Node/JUnit/Playwright/JSON para detectar cero tests, skips y payloads contradictorios; distinguir build/lint de ejecución de tests.
 - [x] 2.3 Añadir modelo de excepción con mensaje/autor original, alcance semántico, ids exactos, razón y estado de aplicabilidad.
 - [ ] 2.4 Eliminar waiver por substring y clasificar mensaje completo en canales normal/lateral/legacy; probar negaciones, preguntas y decisiones condicionadas.
-- [ ] 2.5 Conectar opción «continuar sin key» al controlador: omitir solo checks dependientes, ejecutar alternativas y avanzar sin ampliar consentimiento.
+- [x] 2.5 Conectar opción «continuar sin key» al controlador: omitir solo checks dependientes, ejecutar alternativas y avanzar sin ampliar consentimiento.
 - [ ] 2.6 Persistir excepción durante reinicios, HOLD/CONTINUE y cambio de sesión; revisar solo cambios materiales sin repetir solicitud de key para mismo alcance.
 - [ ] 2.7 Aplicar excepciones exactas en gates/reportes y migrar waivers antiguos sin prefijos amplios o consentimiento inventado.
 - [ ] 2.8 Publicar resultados y omisiones explícitas en conversación y sección bot-owned de PR, preservando edición humana.
@@ -43,8 +43,8 @@
 
 ## 5. Cache y checkpoints
 
-- [ ] 5.1 Incorporar configuración efectiva relevante del proceso/harness, env/secret por HMAC y versiones instaladas a identidad de checks, sin persistir valores.
-- [ ] 5.2 Añadir vigencia de evidencia remota y revalidación antes de promoción; probar upstream mutable con código intacto.
+- [x] 5.1 Incorporar configuración efectiva relevante del proceso/harness, env/secret por HMAC y versiones instaladas a identidad de checks, sin persistir valores.
+- [x] 5.2 Añadir vigencia de evidencia remota y revalidación antes de promoción; probar upstream mutable con código intacto.
 - [ ] 5.3 Invalidar resultados/bloqueos dependientes al provisionar key, corregir permiso o cambiar endpoint/SDK; preservar resultados no afectados.
 - [ ] 5.4 Extender identidad/replay de checkpoints y handoffs con revisiones externas, incertidumbres y excepciones; probar recuperación sin repetir bloqueo resuelto.
 - [ ] 5.5 Migrar receipts históricos sin procedencia a evidencia no verificada preservando historial y tareas, con tests de compatibilidad.
