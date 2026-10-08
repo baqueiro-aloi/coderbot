@@ -6,8 +6,8 @@
 - [ ] 1.4 Proteger preparación/publicación de attachments textuales y media; impedir que contenido sensible se declare seguro únicamente por archivo válido.
 - [x] 1.5 Retirar transcript crudo de commit de archivado y generar solo resumen permitido si corresponde; preservar historial previo sin reescribir Git.
 - [x] 1.6 Desactivar tracing sensible AWS/Azure y reemplazar clone con token en URL por autenticación privada; probar scripts con credenciales sintéticas sin filtración.
-- [ ] 1.7 Sustituir limpieza destructiva de planning por atribución comprobable, backup y aislamiento; probar ediciones humanas concurrentes y branch ajena.
-- [ ] 1.8 Rehacer HOLD para guardar solo paths atribuibles, preservar untracked/secretos ajenos y reportar commit fallido sin «todo committed».
+- [x] 1.7 Sustituir limpieza destructiva de planning por atribución comprobable, backup y aislamiento; probar ediciones humanas concurrentes y branch ajena.
+- [x] 1.8 Rehacer HOLD para guardar solo paths atribuibles, preservar untracked/secretos ajenos y reportar commit fallido sin «todo committed».
 
 ## 2. Contratos de evidencia y overrides
 

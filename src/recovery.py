@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
-import os
 import uuid
 
 import repo_provenance

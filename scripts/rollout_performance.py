@@ -27,7 +27,7 @@ def preserved_mounts(inspected, release=None):
     return mounts
 
 
-def deploy(app, release, image):
+def deploy(app, release, image, *, probes=()):
     app, release = Path(app).resolve(), Path(release).resolve()
     if not (app / "data/state.json").is_file() or not (release / "src/main.py").is_file():
         raise ValueError("Expected existing app state and tested release")
@@ -41,6 +41,8 @@ def deploy(app, release, image):
     private.write_text(json.dumps(inspected))
     private.chmod(0o600)
     old_image = inspected["Image"]
+    expected_image = json.loads(command([*docker, 'image', 'inspect', image]).stdout)[0]['Id']
+    expected_sha = command(['git', 'rev-parse', 'HEAD'], cwd=release).stdout.strip()
     command([*docker, "tag", old_image, "codebot-performance-rollback:" + backup.name.lower()])
     # Freeze the task before copying durable cursors. Docker init terminates/reaps
     # old agent/test children; the target checkout is not edited by this script.
@@ -80,7 +82,18 @@ def deploy(app, release, image):
             raise TimeoutError("Coderbot did not become healthy after rollout")
         result = {"image": image, "release": str(release), "backup": str(backup),
                   "task_before": {k: before.get(k) for k in ("state", "branch", "session_id")},
-                  "original_app_preserved": True, "target_modified_by_rollout": False}
+                   "original_app_preserved": True, "target_modified_by_rollout": False}
+        import sys
+        sys.path.insert(0, str(release / 'src'))
+        from release_readiness import verify
+        current = json.loads(command([*docker, 'inspect', 'app-codebot-1']).stdout)[0]
+        after = json.loads(command(['sudo', '-n', 'python3', '-c',
+            'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))', str(app / 'data/state.json')]).stdout)
+        result['functional'] = verify(image=current['Image'], expected_image=expected_image,
+            release_sha=command(['git', 'rev-parse', 'HEAD'], cwd=release).stdout.strip(),
+            expected_sha=expected_sha, state_before=before, state_after=after, probes=list(probes))
+        if probes and result['functional']['status'] != 'pass':
+            raise RuntimeError('Functional release verification failed; restoring original image')
         (backup / "result.json").write_text(json.dumps(result, indent=2))
         return result
     except BaseException:
