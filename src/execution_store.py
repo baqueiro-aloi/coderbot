@@ -23,8 +23,7 @@ class ExecutionStore:
     def record_check(self, task_id, identity, *, result, status="complete", tdd=None):
         if tdd not in (None, "RED", "GREEN"):
             raise ValueError("TDD evidence must be RED or GREEN")
-        if status == 'complete' and all(isinstance(result.get(name), str) and result[name]
-                                        for name in ('identity', 'content', 'environment', 'check')):
+        if status == 'complete':
             result = {**result, 'provenance': 'verified_v2'}
         return self.put("check_run", task_id=task_id, identity=identity, status=status,
                         data={"result": result, "tdd": tdd})
@@ -95,7 +94,7 @@ class ExecutionStore:
                 result = data.get('result', {})
             except (TypeError, ValueError):
                 data, result = {}, {}
-            if not isinstance(result, dict) or result.get('provenance'):
+            if not isinstance(result, dict) or not result or result.get('provenance'):
                 continue
             proven = all(isinstance(result.get(name), str) and result[name]
                          for name in ('identity', 'content', 'environment', 'check'))

@@ -2434,10 +2434,11 @@ def finalize_pr(state: dict, note: str = "") -> None:
     body += '\n' + verification_reporting.summary(state) + '\n'
     # Preserve human prose and update only the explicitly bot-owned section.
     try:
-        current_body = json.loads(_run_checked(['gh', 'pr', 'view', state['pr_url'], '--json', 'body']))['body']
-        updated_body = verification_reporting.update_body(current_body, state)
-        if updated_body != current_body:
-            _run_checked(['gh', 'pr', 'edit', state['pr_url'], '--body', updated_body])
+        if state.get('final_check_report'):
+            current_body = json.loads(_run_checked(['gh', 'pr', 'view', state['pr_url'], '--json', 'body']))['body']
+            updated_body = verification_reporting.update_body(current_body, state)
+            if updated_body != current_body:
+                _run_checked(['gh', 'pr', 'edit', state['pr_url'], '--body', updated_body])
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
         email(state, 'validation disclosure pending', 'PR validation disclosure could not be updated safely; human text preserved. Retry before review handoff.')
         return
