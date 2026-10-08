@@ -18,8 +18,9 @@ def write(path, *, run_id, snapshot, status, artifacts):
     return value
 
 
-def load(path, *, snapshot=None, approved=True):
-    value = json.loads(Path(path).read_text())
+def load(path, *, snapshot=None, approved=True, artifact_root=None):
+    path = Path(path).resolve()
+    value = json.loads(path.read_text())
     if value.get("version") != 1 or not value.get("run_id"):
         raise ValueError("Invalid artifact manifest")
     if snapshot is not None and value.get("snapshot") != snapshot:
@@ -27,8 +28,16 @@ def load(path, *, snapshot=None, approved=True):
     if approved and value.get("status") != "pass":
         return []
     valid = []
-    for entry in value.get("artifacts", []):
-        file = Path(entry["path"])
-        if file.is_file() and file.stat().st_size and file_hash(file) == entry.get("hash"):
+    if not isinstance(value.get('artifacts'), list):
+        raise ValueError('Invalid artifact collection')
+    root = Path(artifact_root).resolve() if artifact_root else None
+    for entry in value['artifacts']:
+        if not isinstance(entry, dict) or not isinstance(entry.get('path'), str):
+            raise ValueError('Invalid artifact entry')
+        file = Path(entry['path']).resolve()
+        if root is not None and not file.is_relative_to(root):
+            continue
+        if (file.is_file() and file.stat().st_size == entry.get('size') and file.stat().st_size
+                and file_hash(file) == entry.get("hash")):
             valid.append(entry)
     return valid

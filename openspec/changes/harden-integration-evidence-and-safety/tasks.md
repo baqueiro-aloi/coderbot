@@ -39,7 +39,7 @@
 - [ ] 4.4 Conectar inventario de requisitos/scenarios y coverage al controlador, enlazando receipts reales o excepciones aplicables; bloquear afirmaciones sin evidencia.
 - [ ] 4.5 Registrar revisión independiente con sesión, snapshot, findings y resoluciones verificables en ambos runners; rechazar autoafirmación sin recibo.
 - [x] 4.6 Corregir Newman para runner común, resultado estructurado contrastado con exit y reporte fallido etiquetado diagnóstico; probar timeout y reporte sobreescrito.
-- [ ] 4.7 Fortalecer manifests/reutilización de media con run, selección y paths exactos; impedir aceptación por basename o archivo no vacío sin procedencia.
+- [x] 4.7 Fortalecer manifests/reutilización de media con run, selección y paths exactos; impedir aceptación por basename o archivo no vacío sin procedencia.
 
 ## 5. Cache y checkpoints
 

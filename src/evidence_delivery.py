@@ -47,7 +47,8 @@ def reusable_files(state, repo):
             metadata = json.loads(manifest.read_text())
             if metadata.get("pr_url") != state.get("pr_url"):
                 continue
-            files = [Path(entry["path"]) for entry in artifact_manifest.load(manifest, snapshot=content)]
+            files = [Path(entry["path"]) for entry in artifact_manifest.load(
+                manifest, snapshot=content, artifact_root=config.DATA_DIR / 'outbox')]
             if evidence.valid_paths(files):
                 return files
         except (ValueError, OSError, KeyError):
@@ -67,7 +68,8 @@ def reconcile(state, repo, pr_body):
             metadata = json.loads(manifest.read_text())
             if metadata.get("pr_url") != state.get("pr_url"):
                 continue
-            entries = artifact_manifest.load(manifest, snapshot=content)
+            entries = artifact_manifest.load(manifest, snapshot=content,
+                                             artifact_root=config.DATA_DIR / 'outbox')
             for entry in entries:
                 video = Path(entry["path"])
                 if not evidence.valid_media(video):
