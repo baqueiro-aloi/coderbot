@@ -23,7 +23,7 @@
 ## 3. Investigación obligatoria y recepción privada
 
 - [x] 3.1 Implementar inventario versionado de integraciones, contratos, fuentes consultadas, versiones efectivas e incertidumbres materiales.
-- [ ] 3.2 Conectar investigación a exploración/propuesta/aprobación: comprobar referencias y resolver información indispensable antes de acreditar compatibilidad.
+- [x] 3.2 Conectar investigación a exploración/propuesta/aprobación: comprobar referencias y resolver información indispensable antes de acreditar compatibilidad.
 - [x] 3.3 Actualizar prompts/skill/resumes para documentación por versión, contratos internos reales y contradicciones; eliminar equivalencia entre permisos locales, IAM y gasto.
 - [x] 3.4 Detectar requisitos de credenciales/budget temprano y generar opciones completas de compartir, continuar sin key o pausar.
 - [x] 3.5 Implementar almacén privado de handles con permisos, TTL, inyección a proceso autorizado, limpieza y recuperación; mantener plaintext fuera de contexto del modelo.
@@ -61,7 +61,7 @@
 ## 7. Merge, operación y release
 
 - [x] 7.1 Registrar SHA remoto presentado para revisión, invalidar aprobación ante push externo y aplicar merge con --match-head-commit; cubrir race y force de threads sin bypass de SHA.
-- [ ] 7.2 Separar estados implementado/local/upstream/desplegado/postdespliegue en reportes y documentación, incluidas excepciones.
+- [x] 7.2 Separar estados implementado/local/upstream/desplegado/postdespliegue en reportes y documentación, incluidas excepciones.
 - [ ] 7.3 Extender rollout local/AWS/Azure con imagen digest/SHA, versiones/configuración seguras y probes de readiness/smoke; no acreditar función por systemctl/heartbeat.
 - [ ] 7.4 Verificar reconstrucción/recreación por cambios de imagen/env, recuperación de estado y rollback preservando target; pruebas aisladas sin despliegue real.
 - [ ] 7.5 Corregir contradicciones restantes de autonomía/review/repair: permisos remotos, procesos ajenos y alcance requieren autorización concreta.

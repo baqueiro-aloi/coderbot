@@ -12,6 +12,8 @@ class VerificationReportingTests(unittest.TestCase):
         self.assertIn('not_run', text)
         self.assertIn('Accepted omission: remote', text)
         self.assertIn('no deployment receipt', text)
+        self.assertIn('Implementation: code/commit state is not validation evidence.', text)
+        self.assertIn('| remote | upstream | not_run', text)
 
     def test_update_preserves_human_prose_before_and_after_section(self):
         original = 'Human opening\n' + reporting.START + '\nold\n' + reporting.END + '\nHuman closing'

@@ -151,3 +151,14 @@ Backup files can contain secrets: keep recovery-backups private and outside Git,
 outbox and the target workspace. SSD/snapshot erasure is not guaranteed.
 
 No production deployment is authorized by this documentation or passing local tests.
+
+## Evidence terminology
+
+`implemented` means only that a code change exists. `local` identifies a
+controller-run check against the checkout. `upstream` identifies an explicitly
+authorized remote check with a bounded freshness window. `deployed` identifies
+a release receipt binding image digest and source SHA while preserving durable
+task state. `postdeployment` needs its own functional smoke/readiness receipt;
+systemd, Docker health and heartbeat are liveness only. These classes appear
+separately in bot-owned PR validation sections. An accepted omission remains
+`not_run`, with original decision and reason, in every class.

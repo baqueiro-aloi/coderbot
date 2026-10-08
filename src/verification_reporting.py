@@ -5,11 +5,16 @@ END = '<!-- codebot:validation:end -->'
 
 def summary(state):
     report = state.get('final_check_report', {})
-    lines = ['## Validation evidence', '', '| Check | Kind | Execution | Gate |', '| --- | --- | --- | --- |']
+    lines = ['## Validation evidence', '',
+             'Implementation: code/commit state is not validation evidence.',
+             'Local: controller-run repository checks only.',
+             'Upstream: authorized remote operation receipts only.',
+             'Deployed/postdeployment: absent until a release receipt and deployed probe attest them.', '',
+             '| Check | Evidence class | Execution | Gate |', '| --- | --- | --- | --- |']
     for row in report.get('checks', []):
         clean = lambda value: str(value).replace('|', '\\|').replace('\n', ' ')
         lines.append('| ' + ' | '.join(clean(value) for value in (
-            row.get('check', '?'), row.get('kind', 'unknown'), row.get('status', 'not_run'),
+            row.get('check', '?'), _class(row.get('kind')), row.get('status', 'not_run'),
             row.get('gate', {}).get('status', 'indeterminate'))) + ' |')
         exception = row.get('exception')
         if exception:
@@ -22,6 +27,10 @@ def summary(state):
                   'Omissions are not passes. Implementation does not establish deployed/readiness status.',
                   'Deployment: ' + state.get('release_status', 'not verified; no deployment receipt') + '.'])
     return '\n'.join(lines)
+
+
+def _class(kind):
+    return {'local': 'local', 'upstream': 'upstream', 'postdeployment': 'postdeployment'}.get(kind, 'local/other')
 
 
 def update_body(body, state):
