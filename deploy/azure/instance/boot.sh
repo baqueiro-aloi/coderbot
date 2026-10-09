@@ -2,8 +2,7 @@
 # Runs on every boot, before the container starts (coderbot-boot.service), and again on
 # `deploy.sh update`. Idempotent: it seeds only what is missing, refreshes the per-agent
 # environment, and leaves the container to coderbot.service.
-set +x
-set -euo pipefail
+set -euxo pipefail
 . /etc/coderbot/agent.conf
 MNT=/datadrive
 BOT_UID=501   # the container runs as this uid; see the repository Dockerfile
@@ -54,22 +53,8 @@ seed claude-json        "$MNT/claude.json" || echo '{}' > "$MNT/claude.json"
 # uncommitted work live between ticks.
 TARGET_DIR="$MNT/repo/$(basename "$TARGET_REPO")"
 if [ ! -d "$TARGET_DIR/.git" ]; then
-  export GH_TOKEN="$(grep -E '^GH_TOKEN=' "$MNT/codebot.env" | head -n1 | cut -d= -f2-)"
-  askpass=$(mktemp "$MNT/codebot-askpass.XXXXXX")
-  trap 'rm -f -- "$askpass"' EXIT
-  cat > "$askpass" <<'ASKPASS'
-#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) printf '%s\n' "$GH_TOKEN" ;;
-  *) exit 1 ;;
-esac
-ASKPASS
-  chmod 700 "$askpass"
-  GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone "https://github.com/$TARGET_REPO.git" "$TARGET_DIR"
-  rm -f -- "$askpass"
-  trap - EXIT
-  unset GH_TOKEN
+  GH_TOKEN="$(grep -E '^GH_TOKEN=' "$MNT/codebot.env" | head -n1 | cut -d= -f2-)"
+  git clone "https://x-access-token:$GH_TOKEN@github.com/$TARGET_REPO.git" "$TARGET_DIR"
   # The container authenticates with gh; keep the token out of the remote URL.
   git -C "$TARGET_DIR" remote set-url origin "https://github.com/$TARGET_REPO.git"
 fi

@@ -11,16 +11,6 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gma
     import main
 
 import prompts
-from check_plan import Check
-import validation_overrides
-
-
-def setUpModule():
-    # Import-time sys.modules stubs do not isolate main after another test has
-    # imported it. Explicitly prevent optional tracker I/O for this module.
-    patcher = patch.object(main.config, 'ACTIVITY_TRAIL', False)
-    patcher.start()
-    unittest.addModuleCleanup(patcher.stop)
 
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
@@ -192,9 +182,7 @@ class QuestionReply(unittest.TestCase):
 
     def base(self, phase):
         return {"state": "WAIT_REPLY", "return_state": phase, "pending_question": "q?",
-                "item": "task", "slug": "s", "branch": "b", "session_id": "sid",
-                # These routing fixtures have no integration-dependent scope.
-                "integration_inventory": {"version": 1, "integrations": []}}
+                "item": "task", "slug": "s", "branch": "b", "session_id": "sid"}
 
     def test_answer_resumes_with_rules_and_continues(self):
         state = self.base("EXPLORING")
@@ -401,7 +389,6 @@ class ActivityTrail(unittest.TestCase):
     def test_trail_posts_and_stores_a_string_ref(self):
         state = {"item": "task", "item_id": "PVTI_1"}
         with patch.object(main.config, "INSTANCE_ID", "bot"), \
-             patch.object(main.config, "ACTIVITY_TRAIL", True), \
              patch.object(main.task_source, "note_activity", return_value="C1") as note:
             main.trail(state, "Picked", "why")
             main.trail(state, "Next")
@@ -648,22 +635,6 @@ class HoldAndContinue(unittest.TestCase):
         self.assertEqual(resumed["item_id"], "PVTI_7")
         self.assertEqual(resumed["item_url"], "https://x/issues/7")
         self.assertEqual(resumed["trail_ref"], "C9")
-
-    def test_exact_validation_exception_survives_hold_and_resume(self):
-        state = self.task_state() | {'item_id': 'PVTI_7'}
-        check = Check('remote', ['live'], env_keys=['KEY'])
-        validation_overrides.authorize(state, [check], [check.id], message_id='m', author='person',
-            instruction='continue without key', reason='explicit')
-        with patch.object(main, '_commit_pending_work', return_value=[]), \
-             patch.object(main.task_source, 'hold_task', return_value=True), \
-             patch.object(main, '_reset_to_base_branch', return_value=[]), patch.object(main, 'email'):
-            main._hold_task(state, 't1')
-        hold = json.loads(self.holds.read_text())[0]
-        resumed = {'state': 'IDLE'}
-        with patch.object(main, 'git'), patch.object(main.task_source, 'unhold_task', return_value=True), \
-             patch.object(main.task_source, 'claim_task', return_value=True), patch.object(main, 'email'):
-            main._resume_held_task(resumed, hold)
-        self.assertIsNotNone(validation_overrides.applicable(resumed, check))
 
     def test_pick_resumes_requested_hold_first(self):
         saved = {"state": "WAIT_APPROVAL", "item": "task A", "slug": "a", "branch": "codebot-a",

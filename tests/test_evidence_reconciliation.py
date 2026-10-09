@@ -10,15 +10,6 @@ import evidence_delivery
 
 
 class ReconciliationTests(unittest.TestCase):
-    def test_manifest_cannot_adopt_same_named_file_outside_controller_outbox(self):
-        with tempfile.TemporaryDirectory() as root:
-            root = Path(root)
-            outside = root / 'outside.mp4'
-            outside.write_bytes(b'not-controller-evidence')
-            manifest = root / 'verified-delivery.json'
-            artifact_manifest.write(manifest, run_id='run', snapshot='snapshot', status='pass',
-                                    artifacts=[{'path': str(outside)}])
-            self.assertEqual(artifact_manifest.load(manifest, snapshot='snapshot', artifact_root=root / 'outbox'), [])
     def test_arbitrary_pr_link_without_attestation_is_not_adopted(self):
         with tempfile.TemporaryDirectory() as root, patch.object(evidence_delivery.config, "DATA_DIR", Path(root)), \
              patch.object(evidence_delivery.drive_client, "verify_existing") as verify:
@@ -57,7 +48,6 @@ class ReconciliationTests(unittest.TestCase):
             (video.parent / "drive-entrega.json").write_text(json.dumps({"file": {"id": "a", "webViewLink": url}, "folder_id": "folder", "sha256": artifact_manifest.file_hash(video)}))
             state = {"item": "task", "slug": "task", "state": "WAIT_MERGE", "pr_url": metadata["pr_url"], "has_e2e_harness": True}
             with patch.object(main.config, "DATA_DIR", root), patch.object(main, "content_snapshot", return_value="snapshot"), \
-                 patch('remote_review.head', return_value={'state': 'OPEN', 'headRefOid': 'a' * 40}), \
                  patch("evidence_delivery.implementation_snapshot", return_value="implementation"), \
                  patch("evidence.valid_media", return_value=True), \
                  patch("drive_client.verify_existing", return_value={"status": "complete", "url": url}) as verify, \

@@ -27,7 +27,7 @@ def preserved_mounts(inspected, release=None):
     return mounts
 
 
-def deploy(app, release, image, *, probes=()):
+def deploy(app, release, image):
     app, release = Path(app).resolve(), Path(release).resolve()
     if not (app / "data/state.json").is_file() or not (release / "src/main.py").is_file():
         raise ValueError("Expected existing app state and tested release")
@@ -41,8 +41,6 @@ def deploy(app, release, image, *, probes=()):
     private.write_text(json.dumps(inspected))
     private.chmod(0o600)
     old_image = inspected["Image"]
-    expected_image = json.loads(command([*docker, 'image', 'inspect', image]).stdout)[0]['Id']
-    expected_sha = command(['git', 'rev-parse', 'HEAD'], cwd=release).stdout.strip()
     command([*docker, "tag", old_image, "codebot-performance-rollback:" + backup.name.lower()])
     # Freeze the task before copying durable cursors. Docker init terminates/reaps
     # old agent/test children; the target checkout is not edited by this script.
@@ -82,18 +80,7 @@ def deploy(app, release, image, *, probes=()):
             raise TimeoutError("Coderbot did not become healthy after rollout")
         result = {"image": image, "release": str(release), "backup": str(backup),
                   "task_before": {k: before.get(k) for k in ("state", "branch", "session_id")},
-                   "original_app_preserved": True, "target_modified_by_rollout": False}
-        import sys
-        sys.path.insert(0, str(release / 'src'))
-        from release_readiness import verify
-        current = json.loads(command([*docker, 'inspect', 'app-codebot-1']).stdout)[0]
-        after = json.loads(command(['sudo', '-n', 'python3', '-c',
-            'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))', str(app / 'data/state.json')]).stdout)
-        result['functional'] = verify(image=current['Image'], expected_image=expected_image,
-            release_sha=command(['git', 'rev-parse', 'HEAD'], cwd=release).stdout.strip(),
-            expected_sha=expected_sha, state_before=before, state_after=after, probes=list(probes))
-        if result['functional']['status'] != 'pass':
-            raise RuntimeError('Functional release verification failed; restoring original image')
+                  "original_app_preserved": True, "target_modified_by_rollout": False}
         (backup / "result.json").write_text(json.dumps(result, indent=2))
         return result
     except BaseException:
@@ -108,13 +95,5 @@ if __name__ == "__main__":
     parser.add_argument("app")
     parser.add_argument("release")
     parser.add_argument("image")
-    parser.add_argument('--readiness-probe', action='append', default=[], metavar='COMMAND',
-                        help='shell-free argv encoded as JSON, required with --smoke-probe')
-    parser.add_argument('--smoke-probe', action='append', default=[], metavar='COMMAND',
-                        help='shell-free argv encoded as JSON, required with --readiness-probe')
     args = parser.parse_args()
-    probes = ([{'id': 'readiness-' + str(i), 'kind': 'readiness', 'argv': json.loads(value), 'timeout': 120}
-               for i, value in enumerate(args.readiness_probe)] +
-              [{'id': 'smoke-' + str(i), 'kind': 'smoke', 'argv': json.loads(value), 'timeout': 120}
-               for i, value in enumerate(args.smoke_probe)])
-    print(json.dumps(deploy(args.app, args.release, args.image, probes=probes), indent=2))
+    print(json.dumps(deploy(args.app, args.release, args.image), indent=2))

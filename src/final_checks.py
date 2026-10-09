@@ -3,29 +3,23 @@ from pathlib import Path
 
 import check_plan
 import checks
-import validation_overrides
 from check_baseline import baseline_result, compare
 from execution_identity import snapshot
 
 
 def run(state, repo, store):
     plan = [c for c in check_plan.discover(repo) if c.scope == "full"]
+    waived = any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+    if waived:
+        plan = [c for c in plan if not c.id.startswith("e2e")]
     # A reported full check supplements discovery; focused checks never replace it.
     known = {c.id for c in plan}
     for entry in state.get("reported_check_plan", []):
         check = check_plan.Check(**entry)
         if check.scope == "full" and check.id not in known:
+            if waived and check.id.startswith("e2e"):
+                continue
             plan.append(check)
-    omitted = []
-    runnable = []
-    for check in plan:
-        exception = validation_overrides.applicable(state, check)
-        if exception:
-            omitted.append({'check': check.id, 'status': 'not_run', 'exception': exception,
-                'gate': {'status': 'accepted_exception', 'preexisting': [], 'regressions': []}})
-        else:
-            runnable.append(check)
-    plan = runnable
     task_id = store.task_identity(state, repo)
     results = checks.execute_plan(plan, repo, store, task_id)
     outcomes = []
@@ -42,20 +36,6 @@ def run(state, repo, store):
         else:
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})
-    outcomes.extend(omitted)
-    report = {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(
-        r['gate']['status'] == 'accepted_exception' or r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
+    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)
-             else "fail", "checks": outcomes}
-    if state.get('investigation_required'):
-        import requirement_coverage
-        coverage = requirement_coverage.evaluate(state, repo, store, report)
-        state['coverage_report'] = coverage
-        report['coverage'] = coverage
-        if coverage['status'] != 'pass':
-            report['status'] = 'indeterminate'
-        import independent_review
-        if not independent_review.valid(state, repo, store):
-            report['independent_review'] = 'missing_or_stale'
-            report['status'] = 'indeterminate'
-    return report
+            else "fail", "checks": outcomes}

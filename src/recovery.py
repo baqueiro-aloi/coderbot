@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import subprocess
 import shutil
-import uuid
 
 import repo_provenance
 
@@ -55,43 +54,12 @@ def validate_attribution(value, current):
     return owned
 
 
-def backup(repo, directory):
-    """Durable private copy before isolation; original index/worktree untouched."""
-    destination = Path(directory) / 'recovery-backups' / uuid.uuid4().hex
-    destination.mkdir(mode=0o700, parents=True)
-    before = repo_provenance.inspect(repo)
-    for name in before['files']:
-        source, target = Path(repo) / name, destination / 'files' / name
-        if source.is_file() or source.is_symlink():
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copy2(source, target, follow_symlinks=False)
-            if not target.is_symlink():
-                target.chmod(0o600)
-    for label, args in [('index.patch', ['diff', '--cached', '--binary']),
-                        ('worktree.patch', ['diff', '--binary'])]:
-        path = destination / label
-        path.write_bytes(subprocess.run(['git', *args], cwd=repo, capture_output=True,
-                                      check=True, timeout=60).stdout)
-        path.chmod(0o600)
-    after = repo_provenance.inspect(repo)
-    generated = str(destination.relative_to(Path(repo))) + '/' if destination.is_relative_to(Path(repo)) else None
-    actual = {name: value for name, value in after['files'].items()
-              if generated is None or not name.startswith(generated)}
-    if (before['files'] != actual or any(before[key] != after[key] for key in ('head', 'index', 'operations'))):
-        raise ValueError('Concurrent edit during backup; original preserved, retry isolation')
-    metadata = destination / 'metadata.json'
-    metadata.write_text(json.dumps(before))
-    metadata.chmod(0o600)
-    return destination
-
-
 def isolate(state, repo, directory, owned=()):
     """Keep the original checkout untouched; never check out its branch twice."""
     task = state["execution_task_id"][:16]
     destination = Path(directory) / "workspaces" / task
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists():
-        state['recovery_backup'] = str(backup(repo, directory))
         isolated_branch = "codebot-recovery-" + task
         subprocess.run(["git", "worktree", "add", "-b", isolated_branch, str(destination), "HEAD"],
             cwd=repo, capture_output=True, check=True, timeout=60)

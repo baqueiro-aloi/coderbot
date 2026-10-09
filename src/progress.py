@@ -7,7 +7,6 @@ from collections import OrderedDict, deque
 from contextvars import ContextVar
 
 import config
-import secret_safety
 
 _context: ContextVar[dict | None] = ContextVar("progress_task", default=None)
 _lock = threading.Lock()
@@ -25,7 +24,6 @@ def set_context(state: dict | None) -> None:
 
 def sanitize(text: str) -> str:
     """Redact known credentials and common inline secrets before truncating."""
-    text = secret_safety.redact(text)
     for name, value in list(vars(config).items()) + list(os.environ.items()):
         if (re.search(r"TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY", name, re.I)
                 and isinstance(value, str) and len(value) >= 4):

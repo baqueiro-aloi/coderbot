@@ -253,7 +253,9 @@ def verification(state: dict) -> str:
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"
                  else "- Internal review: outcome unavailable")
-    if not state.get("has_e2e_harness"):
+    if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
+        lines.append("- E2E general collection: waived by user; not reported as passed")
+    elif not state.get("has_e2e_harness"):
         lines.append("- E2E: not applicable (no harness)")
     else:
         lines.append("- E2E: " + ("passed" if state.get("e2e_passed") is True
@@ -280,12 +282,10 @@ def concise_verification(state):
     checks = final.get("checks", [])
     accepted = sum(check.get("gate", {}).get("status") == "pass" for check in checks)
     preexisting = sum(len(check.get("gate", {}).get("preexisting", [])) for check in checks)
-    e2e = ("not applicable" if not state.get("has_e2e_harness") else
+    waived = state.get("check_waivers", [])
+    e2e = "waived" if any(w.get("scope") == "e2e:general" for w in waived) else (
+        "not applicable" if not state.get("has_e2e_harness") else
         "passed" if state.get("e2e_passed") else "outcome unavailable")
     return (f"Verification: {accepted}/{len(checks)} final checks accepted; "
-             f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
-             + ("Checks omitted by explicit user decision: " + ', '.join(
-                 str(c.get('check')) for c in checks if c.get('gate', {}).get('status') == 'accepted_exception')
-                + ". No upstream validation is established by omissions. "
-                if any(c.get('gate', {}).get('status') == 'accepted_exception' for c in checks) else "") +
-             "Detailed outcomes and exceptions are in the verification report.")
+            f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
+            "Detailed outcomes and exceptions are in the verification report.")

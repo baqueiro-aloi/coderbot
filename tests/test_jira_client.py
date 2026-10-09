@@ -81,12 +81,10 @@ class JiraHttp(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(jira, "IMAGES_DIR", Path(tmp)), \
-             patch.object(jira.safe_download, "download", return_value=b"image") as download:
+             patch.object(jira.urllib.request, "urlopen", return_value=Response(b"image")):
             files = jira._download_images(issue)
             self.assertEqual(len(files), 1)
             self.assertEqual(Path(files[0]).read_bytes(), b"image")
-            self.assertEqual(download.call_count, 1)
-            self.assertEqual(download.call_args.kwargs['auth_hosts'], {'test.atlassian.net'})
 
     def test_pending_filters_status_labels_and_recovers_own_claim(self):
         def issue(number, summary, status, labels=()):

@@ -2,8 +2,7 @@
 # Runs from the coderbot checkout on the volume, on every boot after bootstrap.sh (and
 # again by `deploy.sh update`). Idempotent: seeds what is missing, rewrites the per-agent
 # env, installs the systemd units and (re)starts the container.
-set +x
-set -euo pipefail
+set -euxo pipefail
 . /etc/coderbot/agent.conf
 export AWS_DEFAULT_REGION="$REGION"
 MNT=/mnt/coderbot
@@ -28,22 +27,8 @@ seed claude-json        "$MNT/claude.json" || echo '{}' > "$MNT/claude.json"
 # The target repo checkout (the agent's working copy; uncommitted work lives here).
 TARGET_DIR="$MNT/repo/$(basename "$TARGET_REPO")"
 if [ ! -d "$TARGET_DIR/.git" ]; then
-  export GH_TOKEN="$(grep -E '^GH_TOKEN=' "$MNT/codebot.env" | head -n1 | cut -d= -f2-)"
-  askpass=$(mktemp "$MNT/codebot-askpass.XXXXXX")
-  trap 'rm -f -- "$askpass"' EXIT
-  cat > "$askpass" <<'ASKPASS'
-#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) printf '%s\n' "$GH_TOKEN" ;;
-  *) exit 1 ;;
-esac
-ASKPASS
-  chmod 700 "$askpass"
-  GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone "https://github.com/$TARGET_REPO.git" "$TARGET_DIR"
-  rm -f -- "$askpass"
-  trap - EXIT
-  unset GH_TOKEN
+  GH_TOKEN="$(grep -E '^GH_TOKEN=' "$MNT/codebot.env" | head -n1 | cut -d= -f2-)"
+  git clone "https://x-access-token:$GH_TOKEN@github.com/$TARGET_REPO.git" "$TARGET_DIR"
   # The container authenticates with gh; keep the token out of the remote URL.
   git -C "$TARGET_DIR" remote set-url origin "https://github.com/$TARGET_REPO.git"
 fi

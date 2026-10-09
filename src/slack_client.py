@@ -15,8 +15,6 @@ from pathlib import Path
 import markdown
 
 import config
-import secret_safety
-import secret_intake
 from command_text import parse_command
 
 log = logging.getLogger(__name__)
@@ -41,8 +39,6 @@ def _database():
                "nonce TEXT UNIQUE NOT NULL, PRIMARY KEY(channel, root_ts))")
     db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, channel TEXT NOT NULL, "
                "root_ts TEXT NOT NULL, ts TEXT NOT NULL, text TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
-    if 'author' not in {row[1] for row in db.execute('PRAGMA table_info(messages)')}:
-        db.execute("ALTER TABLE messages ADD COLUMN author TEXT NOT NULL DEFAULT ''")
     db.execute("CREATE TABLE IF NOT EXISTS status_requests (id TEXT PRIMARY KEY, "
                "channel TEXT NOT NULL, ts TEXT NOT NULL, handled INTEGER NOT NULL DEFAULT 0)")
     db.execute("CREATE TABLE IF NOT EXISTS kick_requests (id TEXT PRIMARY KEY, "
@@ -98,10 +94,7 @@ def validate() -> None:
 
 
 def _accept_event(payload: dict) -> bool:
-    if not isinstance(payload, dict) or not isinstance(payload.get('event'), dict):
-        log.warning('Slack event payload malformed; ignoring')
-        return False
-    event = payload['event']
+    event = payload.get("event") or {}
     if (event.get("type") != "message" or event.get("subtype") or event.get("bot_id")
             or not event.get("user") or event.get("user") == _bot_user
             or event.get("channel") != config.SLACK_CHANNEL_ID):
@@ -137,10 +130,9 @@ def _accept_event(payload: dict) -> bool:
             log.warning("ignoring Slack reply in unregistered thread %s", _thread_id(channel, root))
             return False
         inserted = db.execute(
-            "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text,author) VALUES(?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO messages(id,channel,root_ts,ts,text) VALUES(?,?,?,?,?)",
             (_thread_id(channel, event["ts"]), channel, root, event["ts"],
-              secret_intake.sanitize(event.get("text") or "", _thread_id(channel, root),
-                  _thread_id(channel, event['ts'])), event['user'])).rowcount
+             event.get("text") or "")).rowcount
     if inserted:
         log.info("Slack reply received in thread %s", _thread_id(channel, root))
         _wake.set()
@@ -467,8 +459,6 @@ def send(subject: str, body: str, thread_id: str | None = None,
          attachments: list[Path] | None = None, *, progress: Path | None = None) -> str:
     if not thread_id:
         raise RuntimeError("Slack task messages require an owned task thread")
-    import secret_safety
-    subject, body = secret_safety.redact(subject), secret_safety.redact(body)
     channel, root_ts = _split_thread(thread_id)
     # Upload evidence first so the message's index describes only files Slack accepted.
     failed = []
@@ -712,12 +702,6 @@ def mark_processed(message_id: str) -> None:
         db.execute("UPDATE messages SET handled=1 WHERE id=?", (message_id,))
         db.execute("UPDATE status_requests SET handled=1 WHERE id=?", (message_id,))
         db.execute("UPDATE kick_requests SET handled=1 WHERE id=?", (message_id,))
-
-
-def message_author(message_id):
-    with _database() as db:
-        row = db.execute('SELECT author FROM messages WHERE id=?', (message_id,)).fetchone()
-    return row[0] if row and row[0] else None
 
 
 def drain_thread(thread_id: str) -> int:

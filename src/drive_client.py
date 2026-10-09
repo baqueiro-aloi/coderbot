@@ -19,21 +19,7 @@ log = logging.getLogger(__name__)
 
 _SCOPE_HINT = ("uploading to Drive needs the full Drive scope; re-run "
                "scripts/setup_oauth.py on the host to grant it (data/token.json was "
-                "issued with the old read-only scope)")
-
-
-def _collection(payload, name):
-    values = payload.get(name) if isinstance(payload, dict) else None
-    if not isinstance(values, list) or any(not isinstance(value, dict) for value in values):
-        raise ValueError('Drive response missing or malformed ' + name)
-    return values
-
-
-def _id(payload, name='id'):
-    value = payload.get(name) if isinstance(payload, dict) else None
-    if not isinstance(value, str) or not value:
-        raise ValueError('Drive response missing ' + name)
-    return value
+               "issued with the old read-only scope)")
 
 # Resolved once per process: the folder is looked up (or created) on the first upload
 # and reused afterwards. Cleared on any upload error so a folder that went away
@@ -68,16 +54,16 @@ def _folder_id(service) -> str:
     name = config.DRIVE_FOLDER_NAME
     query = (f"name = '{_escape(name)}' and mimeType = 'application/vnd.google-apps.folder' "
              "and 'root' in parents and trashed = false")
-    found = _collection(service.files().list(q=query, spaces="drive", fields="files(id)",
-                                 pageSize=1).execute(num_retries=3), 'files')
+    found = service.files().list(q=query, spaces="drive", fields="files(id)",
+                                 pageSize=1).execute(num_retries=3).get("files", [])
     if found:
-        _folder_cache = _id(found[0])
+        _folder_cache = found[0]["id"]
         log.info("using existing Drive folder %r (%s)", name, _folder_cache)
     else:
         created = service.files().create(
             body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
             fields="id").execute(num_retries=3)
-        _folder_cache = _id(created)
+        _folder_cache = created["id"]
         log.info("created Drive folder %r (%s)", name, _folder_cache)
     return _folder_cache
 
@@ -97,10 +83,10 @@ def publish_evidence(path: Path, name: str, *, upload_only=False, uploaded=None)
         service = _drive_service()
         folder = _folder_id(service)
         identity = hashlib.sha256(path.read_bytes()).hexdigest()
-        existing = [{"id": _id(uploaded), "webViewLink": uploaded.get("url") or uploaded.get("webViewLink")}] if uploaded else _collection(service.files().list(
+        existing = [{"id": uploaded["id"], "webViewLink": uploaded.get("url") or uploaded.get("webViewLink")}] if uploaded else service.files().list(
             q=f"'{_escape(folder)}' in parents and trashed = false and appProperties has {{ key='codebotEvidence' and value='{identity}' }}",
             fields="files(id,webViewLink)", pageSize=1, supportsAllDrives=True,
-            includeItemsFromAllDrives=True).execute(num_retries=3), 'files')
+            includeItemsFromAllDrives=True).execute(num_retries=3).get("files", [])
         if existing:
             created = existing[0]
         else:
@@ -108,15 +94,15 @@ def publish_evidence(path: Path, name: str, *, upload_only=False, uploaded=None)
             created = service.files().create(
                 body={"name": name, "parents": [folder], "appProperties": {"codebotEvidence": identity}}, media_body=media,
                 fields="id,webViewLink", supportsAllDrives=True).execute(num_retries=3)
-        link = _id(created, 'webViewLink')
-        result = {"status": "blocked", "stage": "access", "id": _id(created), "url": link,
+        link = created["webViewLink"]
+        result = {"status": "blocked", "stage": "access", "id": created["id"], "url": link,
                   "hash": identity, "access": False}
         if upload_only:
             return {**result, "status": "complete", "stage": "upload"}
         try:
-            permissions = _collection(service.permissions().list(fileId=_id(created),
-                fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3), 'permissions')
-            result.update(verify_inherited(service, _id(created), folder, permissions))
+            permissions = service.permissions().list(fileId=created["id"],
+                fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
+            result.update(verify_inherited(service, created["id"], folder, permissions))
         except Exception:  # noqa: BLE001
             log.exception("uploaded %s but could not verify inherited access for %s", name, link)
             result.update(status="retryable", error="Inherited permission verification failed")
@@ -143,8 +129,8 @@ def verify_inherited(service, file_id, folder, permissions=None):
     if file.get("trashed") or folder not in file.get("parents", []):
         return {"status": "blocked", "access": False, "error": "Evidence is not in the authorized folder"}
     if permissions is None:
-        permissions = _collection(service.permissions().list(fileId=file_id, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3), 'permissions')
-    parent = _collection(service.permissions().list(fileId=folder, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3), 'permissions')
+        permissions = service.permissions().list(fileId=file_id, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
+    parent = service.permissions().list(fileId=folder, fields="permissions(type,role,emailAddress,domain)", supportsAllDrives=True).execute(num_retries=3).get("permissions", [])
     def identities(entries):
         return {(p.get("type"), p.get("emailAddress", "").lower(), p.get("domain", "").lower()) for p in entries
                 if p.get("role") in ("reader", "writer", "owner", "organizer", "fileOrganizer")}

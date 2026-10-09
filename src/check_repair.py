@@ -6,8 +6,7 @@ import prompts
 
 def unresolved(report):
     return [item for item in report.get("checks", [])
-            if item.get('gate', {}).get('status') != 'accepted_exception' and
-            (item.get("status") != "pass" or item.get("gate", {}).get("status") != "pass")]
+            if item.get("status") != "pass" or item.get("gate", {}).get("status") != "pass"]
 
 
 def prompt(state, context):

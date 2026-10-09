@@ -16,12 +16,6 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gma
 main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
-def setUpModule():
-    patcher = patch.object(main, 'task_source', Mock())
-    patcher.start()
-    unittest.addModuleCleanup(patcher.stop)
-
-
 def result(output, question=None):
     return SimpleNamespace(
         session_id="session-2", output=output, question=question, attachments=[])

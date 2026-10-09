@@ -82,11 +82,6 @@ def poll_reply(thread_id: str):
     return _backend().poll_reply(thread_id)
 
 
-def message_author(message_id):
-    lookup = getattr(_backend(), 'message_author', None)
-    return lookup(message_id) if lookup else None
-
-
 def mark_processed(message_id: str) -> None:
     _backend().mark_processed(message_id)
 

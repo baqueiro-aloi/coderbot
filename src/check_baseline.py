@@ -99,24 +99,15 @@ def compare(feature, baseline, *, roots=()):
 def baseline_result(check, repo, sha, store):
     cache_task = "baseline:" + str(Path(repo).resolve()) + ":" + sha
     from checks import tool_versions, environment_revision
-    import effective_environment
-    import time
-    installed = effective_environment.installed(check.argv, Path(repo) / check.cwd)
-    environment = environment_identity(check.argv, repo, env_keys=check.env_keys,
-        tools={**tool_versions(check.argv, Path(repo) / check.cwd), 'installed': installed},
-        config_files=sorted(set([Path(repo) / '.env', Path(repo) / check.cwd / '.env',
-                                *Path(repo).glob('.env.*')])), key_path=store.path.parent / "identity.key")
+    environment = environment_identity(check.argv, repo, env_keys=check.env_keys, tools=tool_versions(check.argv, Path(repo) / check.cwd),
+                                       key_path=store.path.parent / "identity.key")
     dependencies = dependency_inputs(check, repo)
     current_dependencies = dependency_snapshot(repo, dependencies)
     identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment,
                        "dependencies": current_dependencies, "version": 2,
                        "repair_revision": environment_revision(store, repo, check.id)})
     saved = store.reusable_check(cache_task, identity)
-    age = time.time() - saved['data']['result'].get('finished', 0) if saved else float('inf')
-    fresh = check.max_age_seconds is None or 0 <= age <= check.max_age_seconds
-    if check.kind in ('upstream', 'postdeployment') and check.max_age_seconds is None:
-        fresh = False
-    if saved and fresh and installed['verified'] and saved["data"]["result"]["status"] in ("pass", "fail"):
+    if saved and saved["data"]["result"]["status"] in ("pass", "fail"):
         return saved["data"]["result"]
     with worktree(repo, sha, store.path.parent) as path:
         # Absolute executables may be reused only with identical dependency inputs.

@@ -10,10 +10,5 @@ def render(state, phase, *, max_chars=16000):
               "checks": [{"check": r.get("check"), "status": r.get("status"), "report": r.get("report"),
                            "gate": r.get("gate")} for r in state.get("final_check_report", {}).get("checks", [])],
               "next_action": phase, "checkpoint": state.get("execution_checkpoint_id"),
-              "review": state.get("internal_review_report"), "repair_round": state.get("final_repair_round", 0),
-              "integration_inventory": state.get('integration_inventory'),
-              "validation_overrides": state.get('validation_overrides', []),
-              "credential_prerequisite": state.get('pending_credential_request'),
-              "coverage": state.get('coverage_report'),
-              "remote_review_sha": state.get('reviewed_remote_sha')}
+              "review": state.get("internal_review_report"), "repair_round": state.get("final_repair_round", 0)}
     return "Durable task handoff (facts):\n" + json.dumps(values, ensure_ascii=False)[:max_chars]

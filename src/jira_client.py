@@ -15,7 +15,6 @@ from pathlib import Path
 
 import config
 import ownership
-import safe_download
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -59,8 +58,8 @@ def _jql_quote(value: str) -> str:
 
 def _search(jql: str, fields: list[str] | None = None) -> list[dict]:
     """Enhanced paginated JQL search; /search is being removed by Atlassian."""
-    results, cursor, seen = [], None, set()
-    for _ in range(1000):
+    results, cursor = [], None
+    while True:
         body = {"jql": jql, "fields": fields or ["summary", "description", "status",
                                                "labels", "attachment"], "maxResults": 100}
         if cursor:
@@ -68,21 +67,13 @@ def _search(jql: str, fields: list[str] | None = None) -> list[dict]:
         page = _request("POST", "/search/jql", body)
         if not isinstance(page, dict):
             raise RuntimeError("Jira /search/jql returned a non-object response")
-        issues = page.get('issues')
-        if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
-            raise RuntimeError('Jira /search/jql missing or malformed issues collection')
-        results.extend(issues)
+        results.extend(page.get("issues", []))
         next_cursor = page.get("nextPageToken")
-        last = page.get('isLast', not next_cursor)
-        if type(last) is not bool:
-            raise RuntimeError('Jira /search/jql invalid completion flag')
-        if last:
+        if page.get("isLast", not next_cursor) or not next_cursor:
             return results
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen:
-            raise RuntimeError("Jira /search/jql missing or repeated pagination token")
-        seen.add(next_cursor)
+        if cursor == next_cursor:
+            raise RuntimeError("Jira /search/jql repeated its pagination token")
         cursor = next_cursor
-    raise RuntimeError('Jira /search/jql pagination budget exhausted; results incomplete')
 
 
 def adf_text(node: dict | str | None) -> str:
@@ -129,14 +120,18 @@ def _download_images(issue: dict) -> list[str]:
             continue
         url = attachment.get("content", "")
         if urllib.parse.urlparse(url).netloc != urllib.parse.urlparse(config.JIRA_URL).netloc:
-            log.warning("skipping attachment outside configured Jira site")
+            log.warning("skipping attachment outside configured Jira site: %s", url)
             continue
         name = re.sub(r"[^a-zA-Z0-9_.-]", "_", attachment.get("filename", "image"))
         dest = IMAGES_DIR / f"{attachment.get('id', 'image')}-{name}"
         try:
             token = base64.b64encode(f"{config.JIRA_EMAIL}:{config.JIRA_API_TOKEN}".encode()).decode()
-            data = safe_download.download(url, authorization=f"Basic {token}",
-                auth_hosts={urllib.parse.urlparse(config.JIRA_URL).hostname}, timeout=_TIMEOUT)
+            request = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
+            with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+                data = response.read(10 * 1024 * 1024 + 1)
+            if len(data) > 10 * 1024 * 1024:
+                log.warning("Jira image %s exceeds the 10 MB download limit", name)
+                continue
             IMAGES_DIR.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
             images.append(str(dest))

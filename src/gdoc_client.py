@@ -7,7 +7,6 @@ under us — another instance claiming, the user typing — fails the write inst
 landing on shifted indexes; the caller re-reads and retries."""
 import logging
 import re
-import hashlib
 
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
@@ -15,7 +14,6 @@ from googleapiclient.errors import HttpError
 
 import config
 import ownership
-import safe_download
 from google_auth import load_credentials
 from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
@@ -183,7 +181,7 @@ def _pending(tasks: list[dict]) -> list[dict]:
     return items
 
 
-def _download_images(document: dict, object_ids: list[str], errors=None) -> list[str]:
+def _download_images(document: dict, object_ids: list[str]) -> list[str]:
     """Download the doc's inline images to IMAGES_DIR and return the local paths.
 
     contentUri is short-lived and requires the account's credentials, so images are
@@ -198,29 +196,19 @@ def _download_images(document: dict, object_ids: list[str], errors=None) -> list
                .get("embeddedObject", {}).get("imageProperties", {}).get("contentUri"))
         if not uri:
             log.warning("inline object %s has no contentUri; skipping", oid)
-            if errors is not None:
-                errors.append({'id': oid, 'category': 'missing_reference'})
             continue
         dest = IMAGES_DIR / (re.sub(r"[^A-Za-z0-9_.-]", "_", oid) + ".png")
         try:
             if session is None:
                 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-                session = load_credentials()
-            if not safe_download.google_image_host(uri):
-                raise safe_download.DownloadError('Unsupported Google image destination')
-            if not session.valid:
-                from google.auth.transport.requests import Request
-                session.refresh(Request())
-            from urllib.parse import urlsplit
-            content = safe_download.download(uri, authorization=f"Bearer {session.token}",
-                auth_hosts={urlsplit(uri).hostname})
-            dest.write_bytes(content)
+                session = AuthorizedSession(load_credentials())
+            resp = session.get(uri, timeout=60)
+            resp.raise_for_status()
+            dest.write_bytes(resp.content)
             paths.append(str(dest))
-            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(content))
+            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(resp.content))
         except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
-            log.warning("doc image %s unavailable", oid)
-            if errors is not None:
-                errors.append({'id': oid, 'category': 'unavailable'})
+            log.exception("could not download doc image %s", oid)
     if object_ids:
         log.info("downloaded %d/%d inline image(s) for a backlog item", len(paths), len(object_ids))
     return paths
@@ -234,14 +222,10 @@ def list_pending_items() -> list[dict]:
     screenshots, downloaded from the doc ([] when it has none).
     """
     doc = _docs_service().documents().get(documentId=config.DOC_ID).execute()
-    if not isinstance(doc, dict) or not isinstance(doc.get('body'), dict) or not isinstance(doc.get('revisionId'), str):
-        raise RuntimeError('Docs response missing required document body or revision')
     tasks = _tasks(doc)
     items = _pending(tasks)
     for item in items:
-        errors = []
-        item["images"] = _download_images(doc, item["images"], errors)
-        item['attachment_errors'] = errors
+        item["images"] = _download_images(doc, item["images"])
     foreign = [owner for t in tasks
                if _in_section(t) and not t["struck"]
                if (owner := claimed_by(t["text"]))
@@ -311,13 +295,8 @@ def _cas_update(service, doc: dict, requests: list[dict]) -> bool:
         ).execute()
     except HttpError as err:
         if err.resp.status == 400:
-            # Docs v1 also uses 400 for invalid ranges/fields. Establish a
-            # stale revision by a fresh read, not by status code alone.
-            fresh = service.documents().get(documentId=config.DOC_ID).execute()
-            revision = fresh.get('revisionId') if isinstance(fresh, dict) else None
-            if isinstance(revision, str) and revision and revision != doc['revisionId']:
-                log.info("doc revision changed; rejected write will be replanned from fresh read")
-                return False
+            log.info("doc changed since it was read; write rejected, will re-read")
+            return False
         raise
     return True
 
@@ -594,17 +573,6 @@ def note_activity(item_text: str, item_id: str | None, message: str,
     later calls reply to it; a reply to a comment that was deleted or resolved starts
     a new thread and returns the new id."""
     service = _drive_service()
-    marker = '[codebot-activity:' + hashlib.sha256((str(item_id) + message).encode()).hexdigest()[:24] + ']'
-    def existing():
-        values = service.comments().list(fileId=config.DOC_ID, fields='comments(id,content)',
-            pageSize=100).execute().get('comments', [])
-        if not isinstance(values, list):
-            raise RuntimeError('Drive comment reconciliation returned malformed collection')
-        found = [value.get('id') for value in values if isinstance(value, dict)
-                 and marker in value.get('content', '') and isinstance(value.get('id'), str)]
-        if len(found) > 1:
-            raise RuntimeError('Drive comment reconciliation is ambiguous')
-        return found[0] if found else None
     try:
         if ref:
             try:
@@ -616,12 +584,9 @@ def note_activity(item_text: str, item_id: str | None, message: str,
                 if err.resp.status != 404:
                     raise
                 log.info("doc comment %s is gone (deleted/resolved); starting a new thread", ref)
-        prior = existing()
-        if prior:
-            return prior
         created = service.comments().create(
             fileId=config.DOC_ID, fields="id",
-            body={"content": message + '\n' + marker,
+            body={"content": message,
                   "quotedFileContent": {"value": item_text, "mimeType": "text/plain"}},
         ).execute()
         log.info("started activity thread %s on the doc for: %r", created["id"], item_text[:80])
@@ -629,12 +594,6 @@ def note_activity(item_text: str, item_id: str | None, message: str,
     except HttpError as err:
         if err.resp.status == 403:
             raise RuntimeError(f"Drive comment rejected (403): {_SCOPE_HINT}") from err
-        raise
-    except (OSError, TimeoutError, ConnectionError):
-        # A provider may have accepted the create while the response was lost.
-        reconciled = existing()
-        if reconciled:
-            return reconciled
         raise
 
 

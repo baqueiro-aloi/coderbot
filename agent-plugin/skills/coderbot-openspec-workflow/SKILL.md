@@ -29,23 +29,9 @@ The agent must never push, create a PR, merge, choose archive timing, finish the
 
 Stop after reporting phase output and evidence; coderbot performs lifecycle side effects.
 
-Never kill unknown/human processes to repair a port collision. Prove ownership or
-choose isolated ports/workspaces. Local repair does not authorize IAM changes,
-privilege expansion, paid provider calls, remote data mutations or deployment.
-Ask for specific authorization when those effects are indispensable; preserve
-work and offer local alternatives rather than fabricating remote validation.
-
 ## Headless Input
 
 For a truly material unresolved decision, return `NEED_USER_INPUT` with the decision, options, and impact. Do not ask an interactive question. Otherwise continue autonomously within the current phase.
-
-## Integration Evidence
-
-Before dependent design, inspect declared, installed and deployment versions and official documentation for the exact SDK/library version and endpoint. Record source URL, consultation date and relevant evidence; `latest` documentation does not establish old-version compatibility. Inspect actual internal handlers, schemas and consumers instead of inventing response shapes. Record contracts for routing, authentication, isolation, parameters, responses and errors; resolve documentation/code/runtime contradictions and material assumptions explicitly.
-
-Detect missing credentials early. Explain least privilege, environment, checks, effects and any paid-call budget. Offer secure provisioning, continuing without credentials by explicitly omitting dependent live validation and using alternatives, or pausing. Honor controller-recorded exceptions across recovery; no repeated key request for unchanged scope. Refusal plus continuation is not task completion, merge/deployment approval or authorization to relax security/retention. Local tool permission does not prove external IAM access or authorize paid inference.
-
-Fixtures derive from investigated contracts and reject incorrect auth/routes/params. Verify outbound requests and parameter preservation; local/mock success and model listing do not establish live inference/tools/streaming/resumption. Revalidate after material endpoint/version/scope changes. Report local, upstream, deployment and postdeployment evidence separately; skipped or omitted checks never count as pass.
 
 ## Parallelism
 

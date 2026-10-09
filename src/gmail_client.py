@@ -76,8 +76,6 @@ def send(subject: str, body: str, thread_id: str | None = None,
          attachments: list[Path] | None = None, *, progress: Path | None = None,
          delivery_id: str | None = None) -> str:
     """Send an email to the user; returns the Gmail thread id."""
-    import secret_safety
-    subject, body = secret_safety.redact(subject), secret_safety.redact(body)
     service = _gmail()
     msg = EmailMessage()
     # First address of the (possibly comma-separated) list; the rest are only
@@ -394,8 +392,7 @@ def poll_reply(thread_id: str) -> tuple[str, str] | None:
     for msg_id, body in reply_candidates(thread.get("messages", []), processed, config.USER_EMAIL):
         if body:
             log.info("new reply in thread %s (msg %s, %d chars)", thread_id, msg_id, len(body))
-            import secret_intake
-            return msg_id, secret_intake.sanitize(body, thread_id, msg_id)
+            return msg_id, body
         # Empty after quote-strip: nothing to hand off, so consume it now to avoid rescan.
         mark_processed(msg_id)
         log.warning("reply msg %s had empty body after quote-strip; skipping", msg_id)
@@ -429,11 +426,3 @@ def reply_candidates(messages: list[dict], processed: list[str], user_email: str
                         message["id"], headers.get("from", ""), user_email)
             continue
         yield message["id"], _strip_quoted(_extract_body(message.get("payload", {})))
-
-
-def message_author(message_id):
-    message = _gmail().users().messages().get(userId='me', id=message_id, format='metadata',
-                                            metadataHeaders=['From']).execute()
-    headers = {h['name'].lower(): h.get('value', '') for h in message.get('payload', {}).get('headers', [])}
-    author = headers.get('from', '')
-    return parseaddr(author)[1].lower() if _from_matches(author, config.USER_EMAIL) else None

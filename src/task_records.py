@@ -8,14 +8,6 @@ def migrate(state, store, repo):
     task_id = store.task_identity(state, repo)
     state.setdefault("execution_task_id", task_id)
     state.setdefault("conversation_version", 1)
-    # Old free-text waivers cannot be upgraded into consent. Preserve them for
-    # audit, remove them from active policy, and require an exact new receipt.
-    legacy = state.pop('check_waivers', [])
-    if legacy:
-        history = state.setdefault('legacy_validation_waivers', [])
-        for waiver in legacy:
-            if isinstance(waiver, dict) and waiver not in history:
-                history.append({**waiver, 'status': 'legacy_unverified', 'migrated_at': time.time()})
     # Never infer that old work was created by the bot from a dirty checkout alone.
     if state.get("pending_question"):
         store.record("feedback", state, repo, "legacy-question", {

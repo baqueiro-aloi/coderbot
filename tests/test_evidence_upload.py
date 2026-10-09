@@ -72,7 +72,6 @@ class FinalizePrTests(unittest.TestCase):
                       "pr_url": "https://github.com/acme/repo/pull/7", "pr_summary": "summary",
                       "e2e_kind": "playwright", "has_e2e_harness": True}
         for p in (patch.object(main.config, "EVIDENCE_UPLOAD", True),
-                  patch('remote_review.head', return_value={'state': 'OPEN', 'headRefOid': 'a' * 40}),
                   patch.object(main.config, "DATA_DIR", Path(self.scratch.name) / "data"),
                   patch.object(main, "content_snapshot", return_value="fixture"),
                   patch.object(main, "_run_checked", return_value='{"body":"summary"}'),
