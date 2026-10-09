@@ -70,7 +70,9 @@ def classify(text, plan):
     message = ' '.join(text.strip().split())
     if not message or '?' in message or re.search(r'\b(no|not|nunca|never|don\'t|do not)\s+(?:omitir|skip|run|continue)', message, re.I):
         return {'action': 'none'}
-    match = re.fullmatch(r'(?:continue|continuar)\s+(?:without|sin)\s+(?:the\s+)?(?:key|clave)\s*(?::\s*(.*))?', message, re.I)
+    match = re.fullmatch(r'(?:(?:continue|continuar)\s+(?:without|sin)\s+(?:the\s+)?(?:key|clave)|'
+                         r'(?:no\s+(?:key|clave)|sin\s+(?:key|clave))\s*,\s*(?:continue|continuar))\s*'
+                         r'(?::\s*(.*))?', message, re.I)
     if not match:
         return {'action': 'none'}
     raw = match.group(1)

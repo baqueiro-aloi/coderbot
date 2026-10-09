@@ -28,3 +28,19 @@ class TargetValidationTests(unittest.TestCase):
                 value = self.value(); mutate(value)
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     target_validation.validate(value, root)
+
+    def test_invocation_rejects_duplicate_auth_wrong_api_and_dropped_parameters(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root); (root / 'fixtures').mkdir(); (root / 'fixtures/service.json').write_text('{}')
+            contract = target_validation.validate(self.value(), root)
+            good = dict(route='/v1/chat', headers={'Authorization': 'Bearer synthetic'},
+                        payload={'model': 'test', 'stream': False},
+                        transport={'effective_route': '/v1/chat', 'isolation_id': 'task-a'})
+            self.assertEqual(target_validation.invocation(contract, 'service', 'inference', **good)['parameters'], ['model', 'stream'])
+            for change in (
+                {'headers': {'Authorization': 'Bearer x', 'X-Api-Key': 'x'}},
+                {'route': '/v0/chat'}, {'payload': {'model': 'test', 'internal': True}},
+                {'transport': {'effective_route': '/v1/chat', 'isolation_id': ''}}):
+                args = {**good, **change}
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    target_validation.invocation(contract, 'service', 'inference', **args)
