@@ -55,7 +55,7 @@
 - [x] 6.2 Paginar comentarios y recursos anidados; detectar cursores repetidos/ausentes y limitar ciclos sin afirmar lectura completa.
 - [x] 6.3 Verificar claim/ownership y mutaciones pertinentes mediante lectura fresca; eliminar fallback de snapshot viejo como confirmación.
 - [x] 6.4 Clasificar HTTP 400 Docs por causa real; probar revisión obsoleta frente a request inválido.
-- [ ] 6.5 Reconciliar creación/comentarios mutantes antes de retry ambiguo, con marcadores/receipts y límites; probar efecto aplicado con respuesta perdida.
+- [x] 6.5 Reconciliar creación/comentarios mutantes antes de retry ambiguo, con marcadores/receipts y límites; probar efecto aplicado con respuesta perdida.
 - [x] 6.6 Exponer adjuntos requeridos no descargados y errores sanitizados por categoría, sin asumir contexto irrelevante.
 
 ## 7. Merge, operación y release
@@ -64,12 +64,12 @@
 - [x] 7.2 Separar estados implementado/local/upstream/desplegado/postdespliegue en reportes y documentación, incluidas excepciones.
 - [ ] 7.3 Extender rollout local/AWS/Azure con imagen digest/SHA, versiones/configuración seguras y probes de readiness/smoke; no acreditar función por systemctl/heartbeat.
 - [ ] 7.4 Verificar reconstrucción/recreación por cambios de imagen/env, recuperación de estado y rollback preservando target; pruebas aisladas sin despliegue real.
-- [ ] 7.5 Corregir contradicciones restantes de autonomía/review/repair: permisos remotos, procesos ajenos y alcance requieren autorización concreta.
+- [x] 7.5 Corregir contradicciones restantes de autonomía/review/repair: permisos remotos, procesos ajenos y alcance requieren autorización concreta.
 
 ## 8. Regresiones, documentación y validación final
 
 - [ ] 8.1 Añadir escenarios de presión de ISSUES.md y sweep para ambos runners/canales, incluidos override sin key, negación, fuga, contrato asumido, cache viejo y readiness falsa.
-- [ ] 8.2 Añadir tests de integración FSM que ejerciten gates y wiring reales, no solamente funciones aisladas o respuestas sintéticas permisivas.
+- [x] 8.2 Añadir tests de integración FSM que ejerciten gates y wiring reales, no solamente funciones aisladas o respuestas sintéticas permisivas.
 - [x] 8.3 Documentar schemas/migración, configuración del receptor privado, presupuesto, TTL, excepciones, limitaciones del chat y operación/rollback.
 - [x] 8.4 Ejecutar suite Python completa, tests JavaScript/runtime y validación OpenSpec strict; registrar resultados reales y corregir regresiones sin reducir alcance.
 - [ ] 8.5 Obtener revisión independiente del cambio completo y revalidar fixes con evidencia trazable.

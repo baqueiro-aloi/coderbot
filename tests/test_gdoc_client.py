@@ -253,6 +253,7 @@ class ActivityTrail(unittest.TestCase):
         self.comments = self.drive.comments.return_value
         self.replies = self.comments.replies.return_value
         self.comments.create.return_value.execute.return_value = {"id": "C1"}
+        self.comments.list.return_value.execute.return_value = {'comments': []}
         patches = [patch.object(gdoc_client, "_drive_service", return_value=self.drive),
                    patch.object(gdoc_client, "HttpError", _HttpError),
                    patch.object(config, "DOC_ID", "doc1")]
@@ -264,7 +265,7 @@ class ActivityTrail(unittest.TestCase):
         self.assertEqual(gdoc_client.note_activity("Task A", "", "[bot] Picked"), "C1")
         kwargs = self.comments.create.call_args.kwargs
         self.assertEqual(kwargs["fileId"], "doc1")
-        self.assertEqual(kwargs["body"]["content"], "[bot] Picked")
+        self.assertTrue(kwargs["body"]["content"].startswith("[bot] Picked\n[codebot-activity:"))
         self.assertEqual(kwargs["body"]["quotedFileContent"]["value"], "Task A")
         self.replies.create.assert_not_called()
 
@@ -287,3 +288,10 @@ class ActivityTrail(unittest.TestCase):
         self.replies.create.return_value.execute.side_effect = _HttpError(500)
         with self.assertRaises(_HttpError):
             gdoc_client.note_activity("Task A", "", "note", ref="C1")
+
+    def test_lost_create_response_reconciles_marker_without_duplicate_comment(self):
+        self.comments.create.return_value.execute.side_effect = ConnectionError('response lost')
+        self.comments.list.return_value.execute.return_value = {
+            'comments': [{'id': 'C-existing', 'content': '[bot] note\n[codebot-activity:' +
+                __import__('hashlib').sha256(b'note').hexdigest()[:24] + ']'}]}
+        self.assertEqual(gdoc_client.note_activity('Task A', '', 'note'), 'C-existing')

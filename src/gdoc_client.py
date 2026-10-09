@@ -7,6 +7,7 @@ under us — another instance claiming, the user typing — fails the write inst
 landing on shifted indexes; the caller re-reads and retries."""
 import logging
 import re
+import hashlib
 
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
@@ -593,6 +594,17 @@ def note_activity(item_text: str, item_id: str | None, message: str,
     later calls reply to it; a reply to a comment that was deleted or resolved starts
     a new thread and returns the new id."""
     service = _drive_service()
+    marker = '[codebot-activity:' + hashlib.sha256((str(item_id) + message).encode()).hexdigest()[:24] + ']'
+    def existing():
+        values = service.comments().list(fileId=config.DOC_ID, fields='comments(id,content)',
+            pageSize=100).execute().get('comments', [])
+        if not isinstance(values, list):
+            raise RuntimeError('Drive comment reconciliation returned malformed collection')
+        found = [value.get('id') for value in values if isinstance(value, dict)
+                 and marker in value.get('content', '') and isinstance(value.get('id'), str)]
+        if len(found) > 1:
+            raise RuntimeError('Drive comment reconciliation is ambiguous')
+        return found[0] if found else None
     try:
         if ref:
             try:
@@ -604,9 +616,12 @@ def note_activity(item_text: str, item_id: str | None, message: str,
                 if err.resp.status != 404:
                     raise
                 log.info("doc comment %s is gone (deleted/resolved); starting a new thread", ref)
+        prior = existing()
+        if prior:
+            return prior
         created = service.comments().create(
             fileId=config.DOC_ID, fields="id",
-            body={"content": message,
+            body={"content": message + '\n' + marker,
                   "quotedFileContent": {"value": item_text, "mimeType": "text/plain"}},
         ).execute()
         log.info("started activity thread %s on the doc for: %r", created["id"], item_text[:80])
@@ -614,6 +629,12 @@ def note_activity(item_text: str, item_id: str | None, message: str,
     except HttpError as err:
         if err.resp.status == 403:
             raise RuntimeError(f"Drive comment rejected (403): {_SCOPE_HINT}") from err
+        raise
+    except (OSError, TimeoutError, ConnectionError):
+        # A provider may have accepted the create while the response was lost.
+        reconciled = existing()
+        if reconciled:
+            return reconciled
         raise
 
 
