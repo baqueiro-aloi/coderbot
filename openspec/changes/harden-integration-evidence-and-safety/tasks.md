@@ -51,7 +51,7 @@
 
 ## 6. Clientes API y ownership remoto
 
-- [ ] 6.1 Validar payload mínimo GitHub/Jira/Docs/Slack/Drive y distinguir invalid/unknown de vacío; probar colecciones ausentes y tipos malformados.
+- [x] 6.1 Validar payload mínimo GitHub/Jira/Docs/Slack/Drive y distinguir invalid/unknown de vacío; probar colecciones ausentes y tipos malformados.
 - [x] 6.2 Paginar comentarios y recursos anidados; detectar cursores repetidos/ausentes y limitar ciclos sin afirmar lectura completa.
 - [x] 6.3 Verificar claim/ownership y mutaciones pertinentes mediante lectura fresca; eliminar fallback de snapshot viejo como confirmación.
 - [x] 6.4 Clasificar HTTP 400 Docs por causa real; probar revisión obsoleta frente a request inválido.

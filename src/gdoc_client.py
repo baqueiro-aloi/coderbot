@@ -233,6 +233,8 @@ def list_pending_items() -> list[dict]:
     screenshots, downloaded from the doc ([] when it has none).
     """
     doc = _docs_service().documents().get(documentId=config.DOC_ID).execute()
+    if not isinstance(doc, dict) or not isinstance(doc.get('body'), dict) or not isinstance(doc.get('revisionId'), str):
+        raise RuntimeError('Docs response missing required document body or revision')
     tasks = _tasks(doc)
     items = _pending(tasks)
     for item in items:

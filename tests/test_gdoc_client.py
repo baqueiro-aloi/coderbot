@@ -98,6 +98,13 @@ class TaskGrouping(unittest.TestCase):
 
 
 class Pending(unittest.TestCase):
+    def test_missing_document_body_or_revision_is_invalid_not_empty(self):
+        service = MagicMock()
+        service.documents.return_value.get.return_value.execute.return_value = {'body': {}}
+        with patch.object(gdoc_client, '_docs_service', return_value=service):
+            with self.assertRaisesRegex(RuntimeError, 'required document'):
+                gdoc_client.list_pending_items()
+
     def test_only_configured_section_when_set(self):
         with patch.object(config, "DOC_SECTION", SECTION):
             texts = [i["text"] for i in gdoc_client._pending(gdoc_client._tasks(DOC))]
