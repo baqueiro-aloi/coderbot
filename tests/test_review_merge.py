@@ -176,6 +176,37 @@ class ThreadHelpers(unittest.TestCase):
 
 
 class MergeGate(unittest.TestCase):
+    def test_repair_handoff_refreshes_snapshot_and_next_merge_succeeds(self):
+        state = self.state()
+        state.update(state="PUSHING", reviewed_pr_snapshot="old", pr_threads=[],
+                     push_context={"continuation": "threads", "output": "Fixed"})
+        with patch.object(main, "_resolve_review_threads", return_value=0), \
+             patch.object(main, "content_snapshot", return_value="repaired"):
+            main._finish_address_pr_threads(state)
+            self.assertEqual(state["reviewed_pr_snapshot"], "repaired")
+            self.assertEqual(state["state"], "WAIT_MERGE")
+            email, finish, merge = self.run_merge(state, threads=[], reply="merge")
+        merge.assert_called_once()
+        finish.assert_called_once()
+
+    def test_changes_after_repair_handoff_still_block_merge(self):
+        state = self.state()
+        state["reviewed_pr_snapshot"] = "repaired"
+        with patch.object(main, "content_snapshot", return_value="changed-again"):
+            email, finish, merge = self.run_merge(state, threads=[], reply="merge")
+        merge.assert_not_called()
+        finish.assert_not_called()
+        self.assertIn("content changed", email.call_args.args[2])
+
+    def test_wait_log_describes_new_pending_replies_not_missing_history(self):
+        state = self.state()
+        state.update(thread_id="C123:1", last_email={"subject": "merge blocked"})
+        with patch.object(main.gmail_client, "poll_reply", return_value=None), \
+             patch.object(main.log, "debug") as log:
+            main.handle_wait(state)
+        self.assertIn("no new unprocessed replies", log.call_args.args[0])
+        self.assertEqual(log.call_args.args[-1], "merge blocked")
+
     def state(self):
         return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
                 "session_id": "sid", "pr_url": PR}

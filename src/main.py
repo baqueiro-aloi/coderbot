@@ -3154,6 +3154,9 @@ def _finish_address_pr_threads(state: dict) -> None:
     if resolved + answered < len(threads):
         log.warning("%d/%d review thread(s) still unresolved after the round",
                     len(threads) - resolved - answered, len(threads))
+    # The repaired content has passed the push gates and is now the PR presented
+    # for review. Do not compare the user's next merge against the pre-repair PR.
+    state["reviewed_pr_snapshot"] = content_snapshot(config.REPO_PATH)
     state["state"] = "WAIT_MERGE"
 
 
@@ -3525,7 +3528,9 @@ def check_clean_checkout(state: dict) -> None:
 def handle_wait(state: dict) -> None:
     polled = gmail_client.poll_reply(state["thread_id"]) if state.get("thread_id") else None
     if polled is None:
-        log.debug("%s: no reply yet on thread %s", state["state"], state.get("thread_id"))
+        log.debug("%s: no new unprocessed replies on thread %s; last notification=%r",
+                  state["state"], state.get("thread_id"),
+                  (state.get("last_email") or {}).get("subject"))
         return
     msg_id, reply = polled
     if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
