@@ -34,7 +34,7 @@
 ## 4. Pruebas de contratos, cobertura y revisión
 
 - [x] 4.1 Definir contrato de validación del target con matriz de capacidades/rutas/auth/parámetros y trazabilidad de fixtures a fuente real.
-- [ ] 4.2 Añadir regresiones estrictas de auth duplicada, API incompatible, payload interno distinto y parámetros descartados; probar SDK/proxy efectivos y aislamiento concurrente donde aplique.
+- [x] 4.2 Añadir regresiones estrictas de auth duplicada, API incompatible, payload interno distinto y parámetros descartados; probar SDK/proxy efectivos y aislamiento concurrente donde aplique.
 - [ ] 4.3 Implementar ejecución controlada de smoke upstream con datos sintéticos, timeout/recursos y autorización de gasto; no confundir auth/listado con inferencia/tools/streaming.
 - [x] 4.4 Conectar inventario de requisitos/scenarios y coverage al controlador, enlazando receipts reales o excepciones aplicables; bloquear afirmaciones sin evidencia.
 - [x] 4.5 Registrar revisión independiente con sesión, snapshot, findings y resoluciones verificables en ambos runners; rechazar autoafirmación sin recibo.
