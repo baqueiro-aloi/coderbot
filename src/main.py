@@ -3017,10 +3017,13 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
-    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
-                              + handoffs.classification_context(state),
-                              contract=False)
-    verdict = parse_json_reply(result.output)
+    if re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*", reply):
+        verdict = {"action": "merge", "force": True}
+    else:
+        result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
+                                  + handoffs.classification_context(state),
+                                  contract=False)
+        verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r force=%r", action, verdict.get("force"))
     if action not in ("merge", "changes", "abort", "complete"):
@@ -5224,10 +5227,18 @@ def _dispatch_conversation(state):
     rows = parallel_conversation.flow_pending(store, state, config.REPO_PATH)
     if not rows:
         return False
-    rows = [r for r in rows if not r["data"].get("deferred_pr_decision") or state["state"] == "WAIT_MERGE"]
+    rows = [r for r in rows if not (r["data"].get("deferred_pr_decision") or r["data"].get("queued_pr_url"))
+            or state["state"] == "WAIT_MERGE"]
     if not rows:
         return False
     row = rows[0]
+    if row["data"].get("queued_pr_url"):
+        if row["data"]["queued_pr_url"] != state.get("pr_url"):
+            store.update("conversation", row, status="complete", outcome="stale PR; not authorized")
+            email(state, "PR instruction needs confirmation", "The PR changed. Please send your instruction again; I did not merge.")
+            return True
+        if not row["data"].get("deferred_pr_decision"):
+            row = store.update("conversation", row, snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
     if row["data"].get("deferred_pr_decision"):
         if state["state"] != "WAIT_MERGE":
             return False  # Repairs and push continue; lateral worker does not consume it.

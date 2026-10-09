@@ -180,7 +180,7 @@ class MergeGate(unittest.TestCase):
         return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
                 "session_id": "sid", "pr_url": PR}
 
-    def run_merge(self, state, threads, force=None, mergeable="MERGEABLE"):
+    def run_merge(self, state, threads, force=None, mergeable="MERGEABLE", reply="merge if review is clear"):
         v = {"action": "merge"}
         if force is not None:
             v["force"] = force
@@ -192,7 +192,7 @@ class MergeGate(unittest.TestCase):
              patch.object(main, "_finish_task") as finish, \
              patch.object(main.subprocess, "run",
                           return_value=subprocess.CompletedProcess([], 0, "", "")) as merge:
-            main.do_merge_reply(state, "merge")
+            main.do_merge_reply(state, reply)
         return email, finish, merge
 
     def test_failed_thread_query_blocks(self):
@@ -216,6 +216,14 @@ class MergeGate(unittest.TestCase):
         email, finish, merge = self.run_merge(self.state(), threads=[human()], force=True)
         merge.assert_called_once()
         finish.assert_called_once()
+
+    def test_plain_merge_and_merge_anyway_bypass_review_gate_without_classifier(self):
+        for reply in ("merge", "merge anyway", "MERGE!", "fusiona"):
+            with self.subTest(reply=reply):
+                email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
+                merge.assert_called_once()
+                finish.assert_called_once()
+                email.assert_not_called()
 
     def test_clean_pr_merges(self):
         email, finish, merge = self.run_merge(self.state(), threads=[])

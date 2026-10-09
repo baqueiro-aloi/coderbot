@@ -59,6 +59,14 @@ def process_one(store, repo, generate, deliver):
             return True
         inputs = register_inputs(store, row, repo)
         if row["data"].get("output") is None:
+            ready = [r for r in inputs if r["data"].get("message_id") == row["id"]]
+            if (row["data"]["classification"]["intent"] == "change_request"
+                    and ready and all(r["status"] == "ready" for r in ready)):
+                spanish = row["data"]["snapshot"].get("task_language", "").casefold() == "spanish"
+                row = store.update("conversation", row, status="generated", output=(
+                    "OK, entendido. La instrucción quedó en cola para el flujo principal; aún no se ha aplicado."
+                    if spanish else "OK, understood. The instruction is queued for the main workflow; it has not been applied yet."))
+        if row["data"].get("output") is None:
             sessions = [r["data"].get("session_id") for r in store.list("conversation", row["task_id"])
                         if r["data"].get("session_id")]
             row = store.update("conversation", row, status="generating")
@@ -240,8 +248,12 @@ def classification_prompt(row):
             "a lateral clarification references the input ID, not the workflow question. "
             "Only use replaces/clarifies for an unambiguous existing pending input ID. "
             "If an action depends on a change, do not authorize the action. /btw is always "
-            "lateral and cannot authorize workflow actions. Without a pending decision, "
-            "non-command messages are conversation/context/change, not answers. "
+             "lateral and cannot authorize workflow actions. Without a pending decision, "
+             "non-command messages are conversation/context/change, not answers. "
+             "Explicit instructions must not be classified as mere conversation: populate "
+             "requested_action for workflow actions and inputs of kind change for requests "
+             "to modify, verify, generate or deliver work. They will be queued for the controller. "
+             "Do not infer an action from a question, negation or hypothetical discussion. "
             "Return ONLY JSON: {\"intent\":\"answer|conversation|change_request|ambiguous\","
             "\"resolves_pending_question\":false,\"requested_action\":null,"
             "\"action_depends_on_change\":false,\"inputs\":[{\"kind\":\"context|change\","
@@ -292,6 +304,23 @@ def save_classification(store, row, value):
     if value["intent"] == "change_request" and not value.get("inputs"):
         value = {**value, "intent": "ambiguous", "resolves_pending_question": False}
     view = row["data"]["snapshot"]
+    # Operational instructions are controller work, even when captured between
+    # waits. Bind an early merge to this PR, not to whichever PR exists later.
+    merge = (re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*",
+                         row["data"]["original_text"]) or value.get("requested_action") == "merge")
+    if (merge and view.get("pr_url") and not row["data"]["explicit_btw"]
+            and not value.get("inputs") and not value.get("action_depends_on_change")
+            and len(row["data"]["text"]) <= 5000):
+        return store.update("conversation", row, status="classified", route="flow",
+            classification={**value, "intent": "answer", "resolves_pending_question": True},
+            queued_pr_url=view["pr_url"], deferred_pr_decision=pr_decision_key(view))
+    if (value.get("requested_action") and not value.get("inputs") and not row["data"]["explicit_btw"]
+            and not (value["intent"] == "answer" and value["resolves_pending_question"]
+                     and view.get("state") in {"WAIT_REPLY", "WAIT_STUCK", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_CLEAN"})):
+        # Preserve instructions the classifier identified instead of answering
+        # that the lateral assistant cannot act. Feedback assesses their meaning.
+        value = {**value, "intent": "change_request", "resolves_pending_question": False,
+                 "inputs": [{"kind": "change", "text": row["data"]["text"]}]}
     if deferred_pr_reply(view, row["data"]["original_text"]) and not value.get("inputs") and not value.get("action_depends_on_change"):
         return store.update("conversation", row, status="classified", route="flow",
             classification={"intent": "answer", "resolves_pending_question": True, "inputs": []},
@@ -424,7 +453,8 @@ def response_prompt(row, inputs):
             "Explain the blocker and alternatives if requested. Do not claim unverified work, "
             "approve changes, retry, cancel, merge or resolve the workflow decision. "
             "Existing workflow questions remain pending. Ask a lateral clarification only when "
-            "needed; identify its request ID. Describe registered changes as received, NOT applied. "
+             "needed; identify its request ID. Describe registered changes as received, NOT applied. "
+             "Instructions are forwarded to the controller, not rejected because this chat cannot act. "
             "Material scope changes require proposal review and explicit approval; context is "
             "incorporated at the next safe point. If a change invalidates current work, offer "
             "pause/reorientation but do not interrupt. If intent is ambiguous, ask what action "

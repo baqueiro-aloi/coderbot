@@ -383,8 +383,9 @@ Classify their intent. Respond with ONLY a JSON object, no other text:
 
 Merging is IRREVERSIBLE, so:
 - "merge" ONLY when the reply is a clear, explicit instruction to merge the PR as-is.
-  Set "force": true ONLY when they explicitly insist on merging despite known problems
-  (e.g. "merge anyway", "force merge", "merge regardless of the comments"); otherwise false.
+  An unconditional user instruction to merge means "merge anyway": set "force": true,
+  including plain "merge". Honor explicit conditions instead of treating a conditional,
+  negated or hypothetical merge as unconditional authorization.
 - "changes" when they request any modification; put the substance in "feedback". Choose
   "changes" even if they also ask to close/withdraw the PR as part of those changes.
 - "complete" ONLY when the reply explicitly says to mark the task done WITHOUT codebot

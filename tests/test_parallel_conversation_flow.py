@@ -16,6 +16,51 @@ from execution_store import ExecutionStore
 
 
 class ParallelFlowTests(unittest.TestCase):
+    def test_merge_during_push_without_saved_decision_is_queued_for_same_pr(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        row = self.classify("merge anyway", "answer")
+        self.assertEqual(row["data"]["route"], "flow")
+        generate = Mock()
+        self.assertFalse(lateral.process_one(self.store, self.repo, generate, Mock()))
+        generate.assert_not_called()
+        with patch.object(main, "_dispatch_wait_reply") as handler, patch.object(main, "save_state"):
+            self.assertFalse(main._dispatch_conversation(self.state))
+            self.state["state"] = "WAIT_MERGE"
+            self.assertTrue(main._dispatch_conversation(self.state))
+            handler.assert_called_once_with(self.state, row["identity"], "merge anyway")
+
+    def test_early_merge_cannot_target_another_pr(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        self.classify("merge anyway", "answer")
+        self.state.update(state="WAIT_MERGE", pr_url="https://github.com/org/repo/pull/2")
+        with patch.object(main, "_dispatch_wait_reply") as handler, patch.object(main, "email"):
+            self.assertTrue(main._dispatch_conversation(self.state))
+            handler.assert_not_called()
+
+    def test_plain_merge_during_push_is_queued_without_lateral_refusal(self):
+        self.state.update(state="PUSHING", pr_url="https://github.com/org/repo/pull/1")
+        row = self.classify("merge", "answer")
+        self.assertEqual(row["data"]["route"], "flow")
+        self.assertEqual(row["data"]["queued_pr_url"], self.state["pr_url"])
+        self.assertFalse(lateral.process_one(self.store, self.repo, Mock(), Mock()))
+
+    def test_captured_instruction_is_acknowledged_and_transferred_once(self):
+        self.state["state"] = "PUSHING"
+        row = lateral.receive(self.store, self.state, self.repo, "instruction", "Publica el MP4")
+        row = lateral.save_classification(self.store, row, {
+            "intent": "conversation", "resolves_pending_question": False,
+            "requested_action": "deliver evidence", "inputs": []})
+        generate = Mock()
+        deliver = Mock(return_value={"complete": True, "notification_id": "r"})
+        self.assertTrue(lateral.process_one(self.store, self.repo, generate, deliver))
+        generate.assert_not_called()
+        self.assertIn("quedó en cola", deliver.call_args.args[0]["data"]["output"])
+        lateral.transfer_changes(self.store, self.state, self.repo)
+        lateral.transfer_changes(self.store, self.state, self.repo)
+        events = self.store.list("feedback", "task")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"]["text"], "Publica el MP4")
+
     def test_merge_anyway_during_repairs_waits_for_safe_merge_decision(self):
         self.state.update(state="ADDRESS_PR_THREADS", pr_url="https://github.com/org/repo/pull/1")
         self.state.pop("pending_question", None)
@@ -235,7 +280,7 @@ class ParallelFlowTests(unittest.TestCase):
     def test_shutdown_stops_lateral_worker_without_mutating_task(self):
         before = copy.deepcopy(self.state)
         worker = lateral.Worker(lambda: self.store, self.repo, Mock(), Mock())
-        with patch.object(main.turn_control, "request_kick") as kick:
+        with patch("turn_control.request_kick") as kick:
             worker.close()
         self.assertTrue(worker.stop.is_set())
         kick.assert_called_once_with("conversation")
