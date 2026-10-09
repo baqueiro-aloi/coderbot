@@ -98,7 +98,10 @@ def validate() -> None:
 
 
 def _accept_event(payload: dict) -> bool:
-    event = payload.get("event") or {}
+    if not isinstance(payload, dict) or not isinstance(payload.get('event'), dict):
+        log.warning('Slack event payload malformed; ignoring')
+        return False
+    event = payload['event']
     if (event.get("type") != "message" or event.get("subtype") or event.get("bot_id")
             or not event.get("user") or event.get("user") == _bot_user
             or event.get("channel") != config.SLACK_CHANNEL_ID):
