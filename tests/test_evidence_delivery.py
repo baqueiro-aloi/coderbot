@@ -10,6 +10,41 @@ from execution_store import ExecutionStore
 
 
 class EvidenceDeliveryTests(unittest.TestCase):
+    def test_missing_recordings_on_delivery_request_start_repair_and_block_merge_wait(self):
+        import main
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"item": "task", "slug": "task", "state": "WAIT_MERGE", "session_id": "sid",
+                     "has_e2e_harness": True, "pr_url": "https://github.com/a/b/pull/1"}
+            row = feedback.receive(store, state, root, "request", "Generate missing video")
+            row = store.update("feedback", row, assessment={"action": "delivery", "answer": "Generate",
+                "reason": "Evidence", "references": "request"})
+            with patch.object(main.evidence_delivery, "deliver", return_value={"status": "retryable", "stage": "capture/validation"}), \
+                 patch.object(main.evidence_delivery, "recovery_details", return_value="missing demo"), \
+                 patch.object(main, "content_snapshot", return_value="same"), \
+                 patch.object(main, "save_state"), patch.object(main, "email"):
+                main._apply_received_feedback(state, store, row)
+            self.assertEqual(state["state"], "REPAIR_CHECKS")
+            self.assertTrue(state["check_repair"]["evidence"])
+            self.assertEqual(store.get("feedback", row["id"])["status"], "pending")
+
+    def test_review_conversion_retries_without_regenerating_valid_recordings(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            store = ExecutionStore(root / "db")
+            clip, mp4 = root / "demo.webm", root / "demo.mp4"
+            clip.write_bytes(b"clip")
+            mp4.write_bytes(b"video")
+            state = {"item": "task", "pr_url": "pr", "e2e_kind": "playwright"}
+            with patch("evidence_delivery.snapshot", return_value="same"), \
+                 patch("evidence.valid_media", return_value=True), \
+                 patch("evidence.record_evidence", return_value=[clip]) as record, \
+                 patch("evidence.stitch_playwright_clips", side_effect=[None, mp4]) as convert:
+                self.assertEqual(evidence_delivery.review_files(store, state, root), [])
+                self.assertEqual(evidence_delivery.review_files(store, state, root), [mp4])
+            record.assert_called_once()
+            self.assertEqual(convert.call_count, 2)
+
     def test_delivery_during_proposal_wait_preserves_approval(self):
         import main
         with tempfile.TemporaryDirectory() as root:

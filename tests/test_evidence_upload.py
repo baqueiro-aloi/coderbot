@@ -78,6 +78,7 @@ class FinalizePrTests(unittest.TestCase):
                   patch.object(main, "save_state"),
                   patch.object(main, "_publish_progress"),
                   patch.object(main, "_sync_pr_video"),
+                  patch.object(main.evidence, "valid_media", return_value=True),
                   patch.object(main, "unresolved_review_threads", return_value=[])):
             p.start()
             self.addCleanup(p.stop)
@@ -90,7 +91,7 @@ class FinalizePrTests(unittest.TestCase):
         return email.call_args.args, upload
 
     def test_links_video_and_sends_no_attachment(self):
-        args, _ = self._finalize([MP4], LINK)
+        args, _ = self._finalize([self.mp4], LINK)
         self.assertEqual(args[1], "PR ready for review")
         self.assertIn(f"Video: {LINK}", args[2])
         self.assertNotIn("Attached:", args[2])
@@ -101,7 +102,7 @@ class FinalizePrTests(unittest.TestCase):
     def test_slack_pr_ready_links_drive_video_in_the_task_thread(self):
         self.state["thread_id"] = "C123:100.000001"
         with patch.object(main.config, "COMM_CHANNEL", "slack"), \
-             patch.object(main.evidence, "record_evidence", return_value=[MP4]), \
+             patch.object(main.evidence, "record_evidence", return_value=[self.mp4]), \
              patch.object(main.evidence_delivery, "publish", return_value={"status": "complete", "url": LINK}), \
              patch.object(main.gmail_client, "send", return_value="C123:100.000001") as banner, \
              patch.object(main.gmail_client, "deliver", return_value={"thread_id": "C123:100.000001", "complete": True}) as send, \
@@ -134,7 +135,7 @@ class FinalizePrTests(unittest.TestCase):
     def test_replayed_upload_restores_video_link_and_updates_pr_metadata(self):
         def replay(database, task_id, identity, step, action, **kwargs):
             if step == "RECORD":
-                return []
+                return [str(self.mp4)]
             if step == "UPLOAD":
                 return {"files": [], "url": LINK}
             return action()
@@ -143,6 +144,19 @@ class FinalizePrTests(unittest.TestCase):
             main.finalize_pr(self.state)
         self.assertEqual(self.state["evidence_url"], LINK)
         sync.assert_called_once_with(self.state, LINK)
+
+    def test_missing_video_blocks_ready_cover_and_starts_implementation_repair(self):
+        with patch.object(main.evidence_delivery, "review_files", return_value=[]), \
+             patch.object(main.evidence_delivery, "recovery_details", return_value="recording.log: missing tests"), \
+             patch.object(main, "email") as notify, \
+             patch.object(main.evidence_delivery, "publish") as publish:
+            main.finalize_pr(self.state)
+        self.assertEqual(self.state["state"], "REPAIR_CHECKS")
+        self.assertTrue(self.state["check_repair"]["evidence"])
+        self.assertEqual(self.state["push_context"]["continuation"], "evidence")
+        publish.assert_not_called()
+        self.assertNotIn("PR ready for review", [c.args[1] for c in notify.call_args_list])
+        self.assertIn("implementing a fix", notify.call_args.args[2])
 
 
 class FeedbackPushTests(unittest.TestCase):

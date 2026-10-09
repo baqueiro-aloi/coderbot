@@ -1674,6 +1674,8 @@ def _begin_check_repair(state: dict, report: dict, *, resume: str) -> None:
     state["check_repair"] = {"attempt": attempt, "resume": resume,
         "checks": check_repair.unresolved(report), "before": content_snapshot(config.REPO_PATH),
         "previous": previous.get("findings", ""), "guidance": previous.get("guidance", "")}
+    if previous.get("evidence"):
+        state["check_repair"]["evidence"] = True
     state["state"] = "REPAIR_CHECKS"
     save_state(state)
     if attempt > config.QUALITY_GATE_MAX_ROUNDS:
@@ -1742,6 +1744,11 @@ def _complete_check_repair(state: dict, result) -> None:
                     "internal_review_report", "reviewed_snapshot"):
             state.pop(key, None)
     active = not state.get("archive_path") and (config.REPO_PATH / "openspec/changes" / state["slug"]).is_dir()
+    if context.get("evidence"):
+        state["state"] = "EVIDENCE_REVIEW" if changed else "PUSHING"
+        save_state(state)
+        trail(state, "Evidence repair returned to controller verification", context["findings"])
+        return
     state["state"] = "VERIFYING" if changed and active else context["resume"]
     if state["state"] == "VERIFYING":
         state["verify_round"] = 0
@@ -2340,6 +2347,49 @@ def _render_review_threads(state: dict, key: str = "review_threads") -> str:
     return rendered
 
 
+def _begin_evidence_repair(state: dict, *, note: str = "") -> None:
+    state.setdefault("push_context", {"continuation": "evidence", "note": note})
+    state["evidence_recovery_round"] = state.get("evidence_recovery_round", 0) + 1
+    previous = state.setdefault("check_repair", {})
+    previous["evidence"] = True
+    previous["attempt"] = max(previous.get("attempt", 0), state["evidence_recovery_round"] - 1)
+    report = {"checks": [{"check": "e2e", "status": "fail",
+        "gate": {"status": "fail", "reason": "Complete playable evidence is required before PR delivery"},
+        "recording_diagnostics": evidence_delivery.recovery_details(config.REPO_PATH)}]}
+    _begin_check_repair(state, report, resume="PUSHING")
+
+
+def _complete_evidence_review(state: dict, result) -> None:
+    if handle_result(state, result, "EVIDENCE_REVIEW"):
+        return
+    parsed, reason = parse_internal_review(result.output)
+    if parsed is None:
+        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round", reason,
+                     _gate_report(result.output, "INTERNAL_REVIEW"))
+        return
+    if _tracked_snapshot()[1]:
+        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round",
+                     "Evidence review repairs must be committed", result.output)
+        return
+    state.pop("review_gate_round", None)
+    state["internal_review_report"] = parsed
+    state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
+    state["state"] = "PUSHING"
+    save_state(state)
+
+
+def do_evidence_review(state: dict) -> None:
+    result = agent_runner.resume(state["session_id"],
+        _gate_feedback(state, "review_gate_round") + prompts.ENVIRONMENT +
+        "\nReview the evidence recovery changes with a fresh reviewer. Inspect the current "
+        "approved task and archived specs without restoring/rearchiving them. Fix and commit "
+        "findings; preserve scope, validators and unrelated work. Do not push or merge. "
+        "Run focused diagnostics and end with INTERNAL_REVIEW: {\"status\":\"pass\","
+        "\"critical\":0,\"important\":0,\"tests\":[\"command: result\"]}. "
+        "Only report pass when the review is clean. Controller final checks run next.\n")
+    _complete_evidence_review(state, result)
+
+
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
     database = phase_checkpoint.store()
@@ -2356,8 +2406,11 @@ def finalize_pr(state: dict, note: str = "") -> None:
         email(state, "evidence reconciliation pending",
               "Existing video delivery could not be verified just now. No new recording or upload was started; retry reconciliation.")
         return
-    recorded = [] if adopted else evidence_delivery.prepare(database, state, config.REPO_PATH, identity=identity)
+    recorded = [] if adopted else evidence_delivery.review_files(database, state, config.REPO_PATH, identity=identity)
     evidence_files = [Path(p) for p in recorded]
+    if state.get("has_e2e_harness") and not adopted and not evidence_files:
+        _begin_evidence_repair(state, note=note)
+        return
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
     def upload():
         files, url = _offload_evidence_video(state, evidence_files)
@@ -2384,6 +2437,10 @@ def finalize_pr(state: dict, note: str = "") -> None:
         deliverable.append(path)
         size += path.stat().st_size
     evidence_files = deliverable
+    if state.get("has_e2e_harness") and not video_url and not any(
+            p.suffix.lower() in (".mp4", ".html") for p in evidence_files):
+        _begin_evidence_repair(state, note=note)
+        return
     detailed = diagnostics.report(database, state, config.REPO_PATH, config.DATA_DIR,
         "VERIFICATION", detail=verification_ledger.report_details(state))
     state["verification_diagnostic"] = str(detailed)
@@ -2468,6 +2525,7 @@ def finalize_pr(state: dict, note: str = "") -> None:
         state.pop(key, None)
     state["state"] = "WAIT_MERGE"
     state["reviewed_pr_snapshot"] = content_snapshot(config.REPO_PATH)
+    state.pop("evidence_recovery_round", None)
     for row in database.list("feedback", task_id, status="verifying"):
         if state.get("last_delivery", {}).get("complete") is not False:
             database.update("feedback", row, status="complete", outcome="verified delivery")
@@ -3130,10 +3188,10 @@ def do_push(state: dict) -> None:
     if not isinstance(context, dict):
         raise RuntimeError("PUSHING state is missing push_context")
     continuation = context.get("continuation")
-    if continuation not in ("review", "feedback", "threads", "conflicts"):
+    if continuation not in ("review", "feedback", "threads", "conflicts", "evidence"):
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
-    if config.DETERMINISTIC_CHECKS:
+    if config.DETERMINISTIC_CHECKS or state.get("check_repair", {}).get("evidence") or continuation == "evidence":
         report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
         state["final_check_report"] = report
         save_state(state)
@@ -3157,8 +3215,19 @@ def do_push(state: dict) -> None:
             _enter_review_wait(state)
         else:
             finalize_pr(state)
+    elif continuation == "evidence":
+        # A failed new recording may queue another repair; retain its new context.
+        state.pop("push_context", None)
+        if state.get("has_code_review"):
+            _enter_review_wait(state)
+        else:
+            finalize_pr(state, note=context.get("note", ""))
+        return
     elif continuation == "feedback":
-        recorded = [Path(p) for p in evidence_delivery.prepare(phase_checkpoint.store(), state, config.REPO_PATH)] if state.get("has_e2e_harness") else []
+        recorded = evidence_delivery.review_files(phase_checkpoint.store(), state, config.REPO_PATH) if state.get("has_e2e_harness") else []
+        if state.get("has_e2e_harness") and not recorded:
+            _begin_evidence_repair(state)
+            return
         attachments = [Path(path) for path in context.get("attachments", [])]
         attachments.extend(path for path in recorded if path not in attachments)
         attachments, video_url = _offload_evidence_video(state, attachments)
@@ -3183,6 +3252,7 @@ def do_push(state: dict) -> None:
         state.pop("pending_feedback", None)
         state["state"] = "WAIT_MERGE"
         state["reviewed_pr_snapshot"] = (state.get("final_check_report") or {}).get("snapshot")
+        state.pop("evidence_recovery_round", None)
     else:
         _finish_address_pr_threads(state)
     state.pop("push_context", None)
@@ -3203,6 +3273,7 @@ PING_KEYS = ("last_contact", "ping_count", "last_ping_at")
 USER_SIDE_WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"}
 
 _PHASE_ACTIVITY = {
+    "EVIDENCE_REVIEW": "reviewing and fixing evidence recovery changes before controller checks and recording",
     "REPAIR_CHECKS": "diagnosing failing checks and implementing repairs before controller verification",
     "RECOVERING": "diagnosing and repairing a task-owned repository condition",
     "REPLANNING": "revising the proposal to incorporate material feedback",
@@ -3416,6 +3487,7 @@ def _maybe_ping(state: dict) -> None:
 PHASES = {
     "RECOVERING": lambda state: do_recover(state),
     "REPAIR_CHECKS": do_repair_checks,
+    "EVIDENCE_REVIEW": do_evidence_review,
     "REPLANNING": lambda state: do_replan(state),
     "APPLY_FEEDBACK": lambda state: do_apply_feedback(state),
     "IDLE": do_pick,
@@ -3729,6 +3801,13 @@ def _apply_received_feedback(state: dict, database, row: dict) -> bool:
                 sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"),
                 read_pr=lambda s: json.loads(_run_checked(["gh", "pr", "view", s["pr_url"], "--json", "body"]))["body"])
             if outcome["status"] != "complete":
+                if (state.get("pr_url") and state.get("has_e2e_harness") and
+                        original_phase == "WAIT_MERGE" and
+                        outcome.get("stage") in ("capture/validation", "conversion", "video")):
+                    database.update("feedback", row, status="pending", delivery_error=str(outcome),
+                                    retry_after=time.time() + 60)
+                    _begin_evidence_repair(state)
+                    return True
                 raise RuntimeError(f"Evidence delivery pending at {outcome['stage']}: {outcome.get('error', outcome['status'])}")
         except Exception as exc:
             database.update("feedback", row, status="pending", delivery_error=str(exc), retry_after=time.time() + 60)
@@ -4118,7 +4197,7 @@ RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_deta
               "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
-              "approved_task_inventory", "verified_task_inventory")
+              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
@@ -4912,6 +4991,7 @@ def _continue_apply_pr_feedback(state: dict, result) -> None:
 CONTINUATIONS = {
     "RECOVERING": _complete_recovery,
     "REPAIR_CHECKS": _complete_check_repair,
+    "EVIDENCE_REVIEW": _complete_evidence_review,
     "REPLANNING": _continue_replanning,
     "APPLY_FEEDBACK": _complete_local_feedback,
     "FEEDBACK_QUESTION": lambda state, result: state.update(state="VERIFYING"),
@@ -4938,6 +5018,9 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
         context["guidance"] = reply
         context["attempt"] = 1
         return check_repair.prompt(state, context)
+    if phase == "EVIDENCE_REVIEW":
+        return (prompts.ENVIRONMENT + "\n" + prompts.PHASE_RULES[phase] +
+                "\n" + prompts.fenced_authoritative("user recovery guidance", reply))
     if phase == "E2E" and config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
         state["check_repair"] = {"attempt": 1, "resume": "E2E",
             "checks": check_repair.unresolved(state["final_check_report"]),

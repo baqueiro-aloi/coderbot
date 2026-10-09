@@ -41,9 +41,20 @@ def prompt(state, context):
             "full suites or baseline suites: after your turn the controller reruns "
             "unresolved checks and reuses valid unaffected checks. A previous no-change "
             "attempt is not progress: change the diagnosis/repair approach or ask one "
-            "concrete human decision with 2-4 options and consequences. Never just "
-            "recommend ignoring errors or repeating the same check.\n"
-            + prompts.fenced("unresolved controller check results", json.dumps(context["checks"], ensure_ascii=False))
+             "concrete human decision with 2-4 options and consequences. Never just "
+             "recommend ignoring errors or repeating the same check.\n"
+             + ("Evidence delivery is BLOCKED. Read the recording logs and JSON reports, "
+                "compare selected case inventory with actual cases and current-run video attachments. "
+                "Implement missing approved functionality, E2E/demo tests, video opt-in, mounts, "
+                "validator selection handling or conversion prerequisites as needed. Generate "
+                "complete evidence, not just a diagnosis. Do not weaken inventory validation, "
+                "remove tests, accept failed runs, reuse unattested clips or deliver zero videos. "
+                "A full-spec recording has already been attempted; repair the cause before "
+                "another attempt. Missing @evidence tests must be implemented as watchable demos. "
+                "Do not restore or rearchive an archived OpenSpec change. The controller will "
+                "review changed code, rerun final checks, push and regenerate evidence.\n"
+                if context.get("evidence") else "")
+             + prompts.fenced("unresolved controller check results", json.dumps(context["checks"], ensure_ascii=False))
             + "\n" + prompts.fenced("previous repair findings", context.get("previous", ""))
             + ("\n" + prompts.fenced_authoritative("user recovery guidance", context["guidance"])
                if context.get("guidance") else "")

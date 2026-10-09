@@ -297,12 +297,13 @@ def _run_recording(specs: list[str], extra_args: list[str]) -> str:
     return (proc.stdout + proc.stderr)[-1500:]
 
 
-def _record_playwright_video(spec_files: list[str]) -> list[Path]:
+def _record_playwright_video(spec_files: list[str], *, full_suite: bool = False) -> list[Path]:
     """Re-run the given specs with video forced on; return the recorded .webm files.
 
     Prefers the dedicated `@evidence` demo test (the IMPLEMENT prompt requires one per
     feature): it is written to be watchable, so recording only it keeps loosely related
-    tests out of the delivered video. Missing matches remain a diagnosable failure.
+    tests out of the delivered video. If the filtered run is incomplete or rejected,
+    generate the complete selected specs and validate that fresh run before delivery.
     """
     def clips() -> dict[Path, tuple]:
         files = set()
@@ -314,8 +315,9 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     before = clips()
     content = snapshot(config.REPO_PATH)
     specs = [Path(s).name for s in spec_files]
-    log.info("recording evidence: re-running @evidence tests of %s with video on", specs)
-    tail = _run_recording(specs, ["--grep", "@evidence"])
+    log.info("recording evidence: re-running %s of %s with video on",
+             "complete specs" if full_suite else "@evidence tests", specs)
+    tail = _run_recording(specs, [] if full_suite else ["--grep", "@evidence"])
     after = clips()
     new = sorted(p for p, identity in after.items() if before.get(p) != identity)
     reports = set()
@@ -344,6 +346,9 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     if not _passed:
         log.warning("evidence %s failed; %d captured clip(s) preserved. Report: %s",
                     diagnostic["stage"], len(new), report)
+        if not full_suite and snapshot(config.REPO_PATH) == content:
+            log.info("evidence incomplete/rejected; generating complete selected specs before delivery")
+            return _record_playwright_video(spec_files, full_suite=True)
         return []
     if not new:
         log.warning("no NEW .webm files after evidence run (before=%d, after=%d); "
@@ -353,11 +358,13 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
     videos = new
     # Only selected report videos, not unrelated current-run files, are candidates.
     selected = set()
+    demo_specs = set()
     for report_path in reports:
         def attachments(suite):
             for spec in suite.get("specs", []):
                 if "@evidence" not in spec.get("title", ""):
                     continue
+                demo_specs.add(Path(spec.get("file", suite.get("file", ""))).name)
                 for test in spec.get("tests", []):
                     for result in test.get("results", []):
                         for item in result.get("attachments", []):
@@ -366,6 +373,12 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
             for nested in suite.get("suites", []):
                 yield from attachments(nested)
         selected.update(p for suite in json.loads(report_path.read_text())["suites"] for p in attachments(suite))
+    if not set(specs).issubset(demo_specs):
+        diagnostic.update(status="retryable", stage="implementation",
+                          detail="Missing @evidence demos for: " + ", ".join(sorted(set(specs) - demo_specs)))
+        (run_dir / "diagnostic.json").write_text(json.dumps(diagnostic))
+        log.warning(diagnostic["detail"])
+        return []
     kept, hashes = [], set()
     for v in videos:
         if v.resolve() in selected and valid_media(v) and (hash_value := artifact_manifest.file_hash(v)) not in hashes:
@@ -373,6 +386,14 @@ def _record_playwright_video(spec_files: list[str]) -> list[Path]:
             hashes.add(hash_value)
     for v in kept:
         log.info("evidence clip: %s (%d bytes)", v, v.stat().st_size)
+    if {v.resolve() for v in kept} != selected:
+        diagnostic.update(status="retryable", stage="validation",
+                          detail="Not all selected demo videos are fresh, unique and playable")
+        (run_dir / "diagnostic.json").write_text(json.dumps(diagnostic))
+        log.warning(diagnostic["detail"])
+        if not full_suite and snapshot(config.REPO_PATH) == content:
+            return _record_playwright_video(spec_files, full_suite=True)
+        return []
     dropped = [v for v in videos if v.stat().st_size == 0]
     if dropped:
         log.warning("dropped %d zero-byte clip(s): %s", len(dropped), [str(v) for v in dropped])

@@ -36,6 +36,21 @@ traversal, unrelated paths and escaping symlinks are rejected.
 
 ## Separate PICA harness correction
 
+PR-ready and feedback delivery require a playable MP4 (or the validated Newman
+HTML report). Missing evidence blocks the ready cover and merge wait: it is not a
+successful delivery with zero attachments. If the filtered `@evidence` recording
+fails validation or produces no complete videos, codebot records the complete
+selected specs, validates the fresh run, and only then converts its demo clips.
+Rejected clips remain diagnostic artifacts, never delivery evidence.
+
+If that full recording still fails, the controller enters bounded automatic
+diagnosis/implementation repair. The agent must implement missing approved
+functionality, demo tests, runner/video support or conversion prerequisites, not
+merely label evidence invalid. Changed code receives internal review and controller
+final checks before pushing; recording and delivery are retried afterward. Archived
+OpenSpec plans are not restored or rearchived. Exhausted repairs remain blocked and
+request concrete recovery guidance; they never waive evidence or invite merge.
+
 The target's `e2e/validate-results.cjs` currently parses `--grep` but counts the complete
 selected-file inventory. In a separately authorized PICA change, filter inventory
 titles with the same Playwright selection semantics before validating count and

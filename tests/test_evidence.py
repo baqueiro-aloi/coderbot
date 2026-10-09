@@ -104,7 +104,8 @@ class EvidenceTests(unittest.TestCase):
         # @evidence demo test first, then the full spec when no clip appeared.
         commands = [c.args[0] for c in run.call_args_list]
         self.assertEqual(commands, [
-            ["./run.sh", "dynamic-page-title.spec.ts", "--grep", "@evidence"]])
+            ["./run.sh", "dynamic-page-title.spec.ts", "--grep", "@evidence"],
+            ["./run.sh", "dynamic-page-title.spec.ts"]])
         self.assertEqual(run.call_args.kwargs["env"]["PICA_E2E_VIDEO"], "on")
         self.assertEqual(run.call_args.kwargs["env"]["PW_VIDEO"], "on")
 
@@ -118,7 +119,7 @@ class EvidenceTests(unittest.TestCase):
                 (results / "demo.webm").write_bytes(b"video")
                 import json
                 (e2e_dir / "results.json").write_text(json.dumps({"stats": {"expected": 1}, "errors": [],
-                    "suites": [{"specs": [{"title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
+                    "suites": [{"specs": [{"file": "a.spec.ts", "title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
                         "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [
                             {"contentType": "video/webm", "path": str(results / "demo.webm")}]}]}]}]}]}))
                 return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -131,6 +132,55 @@ class EvidenceTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
         self.assertEqual([c.name for c in clips], ["demo.webm"])
+
+    def test_rejected_demo_generates_and_validates_complete_spec_before_conversion(self):
+        import json
+        e2e_dir = Path(self.scratch.name) / "e2e"
+        results = e2e_dir / "test-results"
+        results.mkdir(parents=True)
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            clip = results / ("partial.webm" if len(calls) == 1 else "complete.webm")
+            clip.write_bytes(b"video")
+            (e2e_dir / "results.json").write_text(json.dumps({"stats": {"expected": 1}, "errors": [],
+                "suites": [{"specs": [{"file": "a.spec.ts", "title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
+                    "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [
+                        {"contentType": "video/webm", "path": str(clip)}]}]}]}]}]}))
+            return subprocess.CompletedProcess(cmd, 1 if len(calls) == 1 else 0, "1 passed", "inventory mismatch" if len(calls) == 1 else "")
+
+        with patch.object(evidence, "E2E_DIR", e2e_dir), \
+             patch("evidence.operations.run", side_effect=run), \
+             patch("evidence.valid_media", return_value=True), \
+             patch("evidence._stitch_to_mp4", return_value=None) as stitch:
+            clips = evidence._record_playwright_video(["a.spec.ts"])
+        self.assertEqual(calls, [["./run.sh", "a.spec.ts", "--grep", "@evidence"], ["./run.sh", "a.spec.ts"]])
+        self.assertEqual(clips, [results / "complete.webm"])
+        self.assertEqual(stitch.call_args.args[0], clips)
+        self.assertTrue((results / "partial.webm").exists())
+
+    def test_passing_full_suite_without_demo_for_every_spec_requires_implementation(self):
+        import json
+        e2e_dir = Path(self.scratch.name) / "e2e"
+        results = e2e_dir / "test-results"
+        results.mkdir(parents=True)
+        def run(cmd, **kwargs):
+            clip = results / "demo.webm"
+            clip.write_bytes(b"video")
+            (e2e_dir / "results.json").write_text(json.dumps({"stats": {"expected": 1}, "errors": [],
+                "suites": [{"specs": [{"file": "a.spec.ts", "title": "@evidence demo", "tests": [{"status": "expected", "expectedStatus": "passed",
+                    "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [
+                        {"contentType": "video/webm", "path": str(clip)}]}]}]}]}]}))
+            return subprocess.CompletedProcess(cmd, 0, "1 passed", "")
+        with patch.object(evidence, "E2E_DIR", e2e_dir), \
+             patch("evidence.operations.run", side_effect=run), \
+             patch("evidence.valid_media", return_value=True), patch("evidence._stitch_to_mp4") as stitch:
+            self.assertEqual(evidence._record_playwright_video(["a.spec.ts", "missing.spec.ts"], full_suite=True), [])
+        stitch.assert_not_called()
+        diagnostic = json.loads(next(Path(self.scratch.name).rglob("diagnostic.json")).read_text())
+        self.assertEqual(diagnostic["stage"], "implementation")
+        self.assertIn("missing.spec.ts", diagnostic["detail"])
 
     def test_suite_timeout_tears_down_stack_and_reports(self):
         with tempfile.TemporaryDirectory() as tmp:

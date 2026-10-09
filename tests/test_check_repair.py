@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
     import main
 import check_repair
-import checks
+checks = main.checks
 from check_plan import Check
 from execution_store import ExecutionStore
 
@@ -172,3 +172,31 @@ class CheckRepairTests(unittest.TestCase):
         self.assertEqual(state["check_repair"]["attempt"], 2)
         self.assertIn("commit only intended", state["check_repair"]["previous"])
         invalidate.assert_not_called()
+
+    def test_archived_evidence_repair_requires_review(self):
+        state = {"state": "REPAIR_CHECKS", "slug": "task", "item": "task", "archive_path": "archive/task",
+                 "push_context": {"continuation": "evidence"},
+                 "check_repair": {"attempt": 1, "resume": "PUSHING", "before": "old",
+                                  "checks": failed()["checks"], "evidence": True}}
+        with patch.object(main, "content_snapshot", return_value="new"), \
+             patch.object(main.phase_checkpoint, "store"), patch.object(checks, "invalidate_environment"), \
+             patch.object(main, "save_state"), patch.object(main, "trail"):
+            main._complete_check_repair(state, SimpleNamespace(output="Implemented missing demo and video support"))
+        self.assertEqual(state["state"], "EVIDENCE_REVIEW")
+        self.assertEqual(state["push_context"]["continuation"], "evidence")
+        self.assertNotIn("e2e_passed", state)
+        prompt = check_repair.prompt(state, state["check_repair"])
+        self.assertIn("Implement missing approved functionality", prompt)
+        self.assertIn("Do not weaken inventory validation", prompt)
+
+    def test_evidence_push_requires_checks_even_when_default_disabled(self):
+        state = {"state": "PUSHING", "slug": "task", "item": "task",
+                 "push_context": {"continuation": "evidence"}}
+        with patch.object(main.config, "DETERMINISTIC_CHECKS", False), \
+             patch.object(main.final_checks, "run", return_value=failed()) as run, \
+             patch.object(main, "content_snapshot", return_value="same"), \
+             patch.object(main, "save_state"), patch.object(main, "email"), patch.object(main, "git") as git:
+            main.do_push(state)
+        run.assert_called_once()
+        git.assert_not_called()
+        self.assertEqual(state["state"], "REPAIR_CHECKS")

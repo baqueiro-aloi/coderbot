@@ -134,6 +134,46 @@ def prepare(store, state, repo, *, identity=None):
         validate=evidence.valid_paths)
 
 
+def review_files(store, state, repo, *, identity=None):
+    """No empty/partial video delivery: reuse capture and retry MP4 conversion."""
+    paths = prepare(store, state, repo, identity=identity)
+    if not evidence.valid_paths(paths):
+        return []
+    if state.get("e2e_kind") == "newman":
+        return [Path(p) for p in paths if Path(p).suffix.lower() == ".html"]
+    videos = [Path(p) for p in paths if Path(p).suffix.lower() == ".mp4"]
+    if videos:
+        return videos
+    clips = [Path(p) for p in paths if Path(p).suffix.lower() == ".webm"]
+    if not clips:
+        return []
+    converted = delivery_checkpoint.step(store, store.task_identity(state, repo),
+        digest([snapshot(repo), [(str(p), artifact_manifest.file_hash(p)) for p in clips]]),
+        "CONVERT", lambda: str(p) if (p := evidence.stitch_playwright_clips(clips)) else None,
+        validate=lambda p: bool(p) and evidence.valid_media(Path(p)))
+    return [Path(converted)] if converted and evidence.valid_media(Path(converted)) else []
+
+
+def recovery_details(repo):
+    """Actual current-run logs, not a misleading cleanup stderr tail."""
+    content = snapshot(repo)
+    root = config.DATA_DIR / "outbox/evidence"
+    details = []
+    for path in sorted(root.rglob("diagnostic.json") if root.exists() else [],
+                       key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        try:
+            value = json.loads(path.read_text())
+            if value.get("snapshot") != content:
+                continue
+            details.append({"stage": value.get("stage"), "report": value.get("report"),
+                            "clips": value.get("clips", []), "detail": value.get("detail", "")})
+            if len(details) == 2:
+                break
+        except (ValueError, OSError):
+            continue
+    return json.dumps(details, ensure_ascii=False) if details else "No current recording report: inspect spec detection, missing demo tests and recording configuration."
+
+
 def sync(store, state, repo, url, sync_pr):
     return delivery_checkpoint.step(store, store.task_identity(state, repo),
         digest([state["pr_url"], url]), "PR_SYNC", lambda: _sync(sync_pr, state, url), validate=bool)
