@@ -621,6 +621,16 @@ def _reconcile(thread_id: str) -> None:
 
 
 def poll_command():
+    """Recover missed commands even when no task thread is currently active.
+
+    Held threads remain registered in roots. Reconcile every owned thread using
+    the same per-thread throttle as reply/status polling, then inspect the durable
+    inbox. Retired threads are excluded and processed messages remain deduplicated.
+    """
+    with _database() as db:
+        roots = db.execute("SELECT channel,root_ts FROM roots").fetchall()
+    for channel, root_ts in roots:
+        _reconcile(_thread_id(channel, root_ts))
     for msg_id, text, channel, root_ts in _pending():
         parsed = parse_command(text)
         if not parsed:

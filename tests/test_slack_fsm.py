@@ -1,12 +1,43 @@
 """Slack thread-scoped commands cannot mutate an unrelated active task."""
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import config
 import main
+import slack_client
 
 
 class ThreadCommands(unittest.TestCase):
+    def test_idle_recovers_missed_continue_and_persists_resume_request(self):
+        state = {"state": "IDLE"}
+        hold = {"thread_id": "C123:100.0", "item": "held", "requested": False}
+        web = MagicMock()
+        web.conversations_replies.return_value = {"messages": [
+            {"ts": "101.0", "user": "Uhuman", "text": "continue use B"}]}
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(config, "DATA_DIR", Path(directory)), \
+             patch.object(config, "SLACK_CHANNEL_ID", "C123"), \
+             patch.object(config, "COMM_CHANNEL", "slack"), \
+             patch.dict(slack_client._last_reconcile, {}, clear=True), \
+             patch.dict(slack_client._last_reconciled_at, {}, clear=True), \
+             patch.object(slack_client, "web", return_value=web), \
+             patch.object(main, "_load_holds", return_value=[hold]), \
+             patch.object(main, "_save_holds") as save_holds, \
+             patch.object(main.gmail_client, "poll_command", side_effect=slack_client.poll_command), \
+             patch.object(main.gmail_client, "mark_processed", side_effect=slack_client.mark_processed), \
+             patch.object(main, "_send_localized"):
+            with slack_client._database() as db:
+                db.execute("INSERT INTO roots(channel,root_ts,nonce) VALUES(?,?,?)",
+                           ("C123", "100.0", "held-task"))
+            self.assertFalse(main.check_commands(state))
+            self.assertTrue(hold["requested"])
+            self.assertEqual(hold["note"], "use B")
+            save_holds.assert_called_once_with([hold])
+            self.assertEqual(state, {"state": "IDLE"})
+            self.assertIsNone(slack_client.poll_command())
+
     def test_abort_held_task_does_not_abort_active_task(self):
         state = {"state": "WAIT_APPROVAL", "item": "active", "thread_id": "C123:2.0"}
         hold = {"thread_id": "C123:1.0", "item": "held", "item_id": "issue-1",

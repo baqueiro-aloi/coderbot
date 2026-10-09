@@ -121,6 +121,54 @@ class SlackInbox(unittest.TestCase):
                 slack._socket_request(socket, request)
             socket.send_socket_mode_response.assert_not_called()
 
+    def test_command_poll_recovers_missed_continue_without_active_thread(self):
+        thread = "C123:100.000001"
+        reply = {"ts": "101.0", "user": "Uhuman", "text": "continue use B"}
+        self.web.conversations_replies.return_value = {"messages": [reply]}
+        self.assertEqual(slack.poll_command(),
+                         ("C123:101.0", thread, "CONTINUE", False, "use B"))
+        slack.mark_processed("C123:101.0")
+        self.assertIsNone(slack.poll_command())
+        self.web.conversations_replies.assert_called_once()
+        slack._last_reconcile.pop(thread)  # next scan overlaps the same message
+        self.assertIsNone(slack.poll_command())
+        with slack._database() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+
+    def test_command_poll_reconciles_all_owned_threads_but_not_retired_threads(self):
+        with slack._database() as db:
+            db.execute("INSERT INTO roots(channel,root_ts,nonce) VALUES(?,?,?)",
+                       ("C123", "200.0", "held-task"))
+            db.execute("INSERT INTO roots(channel,root_ts,nonce) VALUES(?,?,?)",
+                       ("C123", "300.0", "finished-task"))
+        slack.close_thread("C123:300.0")
+
+        def replies(**args):
+            return {"messages": [{"ts": "201.0", "user": "Uhuman", "text": "resume"}]
+                    if args["ts"] == "200.0" else []}
+
+        self.web.conversations_replies.side_effect = replies
+        self.assertEqual(slack.poll_command(),
+                         ("C123:201.0", "C123:200.0", "CONTINUE", False, ""))
+        self.assertEqual({call.kwargs["ts"] for call in
+                          self.web.conversations_replies.call_args_list},
+                         {"100.000001", "200.0"})
+
+    def test_command_reconciliation_failure_does_not_block_socket_commands(self):
+        self.assertTrue(slack._accept_event(self.event("101.0", "continue")))
+        self.web.conversations_replies.side_effect = RuntimeError("Slack unavailable")
+        with patch.object(slack.log, "exception"):
+            self.assertEqual(slack.poll_command()[2], "CONTINUE")
+
+    def test_command_reconciliation_filters_bots_and_other_instance_commands(self):
+        self.web.conversations_replies.return_value = {"messages": [
+            {"ts": "101.0", "user": "Ubot", "bot_id": "B1", "text": "continue"},
+            {"ts": "102.0", "user": "Uhuman", "text": "continue codebot-other"},
+            {"ts": "103.0", "user": "Uhuman", "text": "continue"},
+        ]}
+        self.assertEqual(slack.poll_command(),
+                         ("C123:103.0", "C123:100.000001", "CONTINUE", False, ""))
+
     def test_existing_root_is_reused_and_task_messages_stay_threaded(self):
         state = {"item": "task", "thread_nonce": "nonce"}
         self.assertEqual(slack.open_thread(state), "C123:100.000001")
