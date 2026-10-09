@@ -182,7 +182,7 @@ def _pending(tasks: list[dict]) -> list[dict]:
     return items
 
 
-def _download_images(document: dict, object_ids: list[str]) -> list[str]:
+def _download_images(document: dict, object_ids: list[str], errors=None) -> list[str]:
     """Download the doc's inline images to IMAGES_DIR and return the local paths.
 
     contentUri is short-lived and requires the account's credentials, so images are
@@ -197,6 +197,8 @@ def _download_images(document: dict, object_ids: list[str]) -> list[str]:
                .get("embeddedObject", {}).get("imageProperties", {}).get("contentUri"))
         if not uri:
             log.warning("inline object %s has no contentUri; skipping", oid)
+            if errors is not None:
+                errors.append({'id': oid, 'category': 'missing_reference'})
             continue
         dest = IMAGES_DIR / (re.sub(r"[^A-Za-z0-9_.-]", "_", oid) + ".png")
         try:
@@ -216,6 +218,8 @@ def _download_images(document: dict, object_ids: list[str]) -> list[str]:
             log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(content))
         except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
             log.warning("doc image %s unavailable", oid)
+            if errors is not None:
+                errors.append({'id': oid, 'category': 'unavailable'})
     if object_ids:
         log.info("downloaded %d/%d inline image(s) for a backlog item", len(paths), len(object_ids))
     return paths
@@ -232,7 +236,9 @@ def list_pending_items() -> list[dict]:
     tasks = _tasks(doc)
     items = _pending(tasks)
     for item in items:
-        item["images"] = _download_images(doc, item["images"])
+        errors = []
+        item["images"] = _download_images(doc, item["images"], errors)
+        item['attachment_errors'] = errors
     foreign = [owner for t in tasks
                if _in_section(t) and not t["struck"]
                if (owner := claimed_by(t["text"]))

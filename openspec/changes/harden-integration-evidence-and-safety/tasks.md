@@ -56,7 +56,7 @@
 - [x] 6.3 Verificar claim/ownership y mutaciones pertinentes mediante lectura fresca; eliminar fallback de snapshot viejo como confirmación.
 - [x] 6.4 Clasificar HTTP 400 Docs por causa real; probar revisión obsoleta frente a request inválido.
 - [ ] 6.5 Reconciliar creación/comentarios mutantes antes de retry ambiguo, con marcadores/receipts y límites; probar efecto aplicado con respuesta perdida.
-- [ ] 6.6 Exponer adjuntos requeridos no descargados y errores sanitizados por categoría, sin asumir contexto irrelevante.
+- [x] 6.6 Exponer adjuntos requeridos no descargados y errores sanitizados por categoría, sin asumir contexto irrelevante.
 
 ## 7. Merge, operación y release
 

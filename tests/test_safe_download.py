@@ -139,5 +139,7 @@ class SafeDownloadTests(unittest.TestCase):
             self.assertEqual(len(google._download_images(document, ['image'])), 1)
             self.assertEqual(download.call_args.kwargs['auth_hosts'], {'lh3.googleusercontent.com'})
             document['inlineObjects']['image']['inlineObjectProperties']['embeddedObject']['imageProperties']['contentUri'] = 'https://attacker.example/a'
-            self.assertEqual(google._download_images(document, ['image']), [])
+            errors = []
+            self.assertEqual(google._download_images(document, ['image'], errors), [])
+            self.assertEqual(errors, [{'id': 'image', 'category': 'unavailable'}])
             self.assertEqual(download.call_count, 1)
