@@ -3147,9 +3147,17 @@ def do_merge_reply(state: dict, reply: str) -> None:
                       "anyway' to merge despite them.")
                 state["pr_thread_notified"] = True  # don't re-address them every tick
                 return  # stay in WAIT_MERGE
-        log.info("merging PR %s (squash)", state["pr_url"])
-        merge = subprocess.run(["gh", "pr", "merge", state["pr_url"], "--squash"],
-                               cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        # Merge only the head the user was shown. delivered_sha is recorded on every
+        # push; legacy states without it merge exactly as before.
+        expected = state.get("delivered_sha")
+        if expected and _pr_head_moved(state, expected, _remote_pr_head(state)):
+            return  # stay in WAIT_MERGE
+        log.info("merging PR %s (squash%s)", state["pr_url"],
+                 f", head {expected[:12]}" if expected else "")
+        merge = _gh_squash_merge(state["pr_url"], expected)
+        if merge.returncode != 0 and expected and \
+                _pr_head_moved(state, expected, _remote_pr_head(state)):
+            return  # GitHub refused because the head moved; stay in WAIT_MERGE
         if merge.returncode != 0:
             # A late-breaking conflict or other GitHub rejection (e.g. branch behind the
             # base branch). Don't crash into the retry loop — surface it and wait for the
@@ -3164,6 +3172,45 @@ def do_merge_reply(state: dict, reply: str) -> None:
             return  # stay in WAIT_MERGE
         trail(state, f"PR merged: {state['pr_url']}")
     _finish_task(state, "PR merged.", reset_repo=False, merged=True)
+
+
+def _remote_pr_head(state: dict) -> str | None:
+    """The PR's current head SHA, or None when it can't be read (never raises)."""
+    try:
+        return _pr_publication(state)["headRefOid"]
+    except Exception as error:  # noqa: BLE001 — the merge itself still pins the head
+        log.warning("could not read the PR head before merging: %s", error)
+        return None
+
+
+def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
+    """When the PR head differs from the one presented for review, tell the user, adopt
+    the new head as the one to review, and return True (the caller must not merge)."""
+    if not head or head == expected:
+        return False
+    log.warning("PR head moved since review: expected %s, found %s", expected[:12], head[:12])
+    email(state, "merge blocked — the PR changed since review",
+          f"I did not merge: the PR branch moved after I presented it "
+          f"({expected[:12]} -> {head[:12]}).\nPR: {state['pr_url']}\n\n"
+          "Please review the new commits and reply 'merge' again to merge them.")
+    state["delivered_sha"] = head
+    state.pop("reviewed_pr_snapshot", None)
+    return True
+
+
+def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
+    """`gh pr merge --squash`, pinned to `expected` when known. A gh too old for
+    --match-head-commit gets one retry without it rather than a permanent failure."""
+    command = ["gh", "pr", "merge", pr_url, "--squash"]
+    run = lambda args: subprocess.run(args, cwd=config.REPO_PATH, capture_output=True, text=True,
+                                      timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    if not expected:
+        return run(command)
+    merge = run(command + ["--match-head-commit", expected])
+    if merge.returncode != 0 and "unknown flag" in (merge.stderr or "").lower():
+        log.warning("gh does not support --match-head-commit; merging without the pin")
+        merge = run(command)
+    return merge
 
 
 def _finish_address_pr_threads(state: dict) -> None:
