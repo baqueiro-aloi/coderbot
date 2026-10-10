@@ -100,6 +100,7 @@ SETTINGS = (
     field("CODEBOT_E2E_MAX_ROUNDS", "Limits", "Maximum E2E repair rounds.", "5", "positive", advanced=True),
     field("CODEBOT_SUBPROCESS_TIMEOUT", "Limits", "Git/GitHub subprocess timeout.", "120", "positive", advanced=True),
     field("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "Limits", "Verification/internal-review repair rounds.", "3", "positive", advanced=True),
+    field("CODEBOT_EMPTY_SUITE_FAILS", "Limits", "Fail the final gate when a check the agent declared ran 0 tests (auto-discovered suites are only reported).", "off", "choice", advanced=True, choices=("off", "on")),
     field("CODEBOT_ARCHIVE_MAX_ROUNDS", "Limits", "OpenSpec archive repair rounds.", "3", "positive", advanced=True),
     field("CODEBOT_MAX_STATE_FAILURES", "Limits", "Failures before WAIT_STUCK.", "5", "positive", advanced=True),
     field("CODEBOT_QUESTION_MAX_ROUNDS", "Limits", "Consecutive question round-trips.", "8", "positive", advanced=True),

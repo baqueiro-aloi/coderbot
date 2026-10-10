@@ -231,6 +231,11 @@ SUBPROCESS_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBPROCESS_TIMEOUT", "1
 # (e.g. an external resource stuck from a prior run) doesn't spin forever.
 E2E_MAX_ROUNDS = int(os.environ.get("CODEBOT_E2E_MAX_ROUNDS", "5"))
 QUALITY_GATE_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUALITY_GATE_MAX_ROUNDS", "3"))
+# A suite that ran zero tests (or skipped them all) is always reported as such. With this
+# flag on, it also fails the final gate, but only for checks the agent declared in its
+# CHECK_PLAN; auto-discovered suites are never failed for being empty. Off by default.
+EMPTY_SUITE_FAILS = (os.environ.get("CODEBOT_EMPTY_SUITE_FAILS") or "off").strip().lower() in (
+    "1", "on", "true", "yes")
 # After this many CONSECUTIVE failures of the same FSM state, codebot stops retrying
 # silently and emails the user (entering WAIT_STUCK). Any successful tick resets it.
 MAX_STATE_FAILURES = int(os.environ.get("CODEBOT_MAX_STATE_FAILURES", "5"))

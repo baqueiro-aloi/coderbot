@@ -249,6 +249,8 @@ def verification(state: dict) -> str:
             lines.append("  Pre-existing: " + "; ".join(check["gate"]["preexisting"]))
         if check.get("status") in ("unknown", "infrastructure"):
             lines.append("  Outcome not established; not reported as passed.")
+        if check.get("zero_tests"):
+            lines.append("  Executed 0 tests; this is not evidence of working behaviour.")
     if gate.get("preexisting"):
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"

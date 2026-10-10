@@ -59,4 +59,39 @@ def parse_output(output, exit_code, reporter="text"):
     # Playwright list output is not a stable identity contract. Use JSON/JUnit via
     # an explicit plan for baseline attribution; zero exit is still a real pass.
     status = "pass" if exit_code == 0 else "fail" if recognized and failures else "unknown"
-    return {"status": status, "failures": failures, "exit_code": exit_code}
+    result = {"status": status, "failures": failures, "exit_code": exit_code}
+    if status == "pass" and _zero_tests(output, reporter):
+        # Informational only: the status stays "pass" so nothing downstream changes.
+        # final_checks decides (behind CODEBOT_EMPTY_SUITE_FAILS) whether it matters.
+        result.update(zero_tests=True, detail="0 tests executed")
+    return result
+
+
+def _zero_tests(output, reporter):
+    """True only on an explicit zero count from a recognized reporter (never a guess):
+    unrecognized output keeps meaning what it meant before."""
+    try:
+        if reporter == "unittest":
+            ran = re.findall(r"^Ran (\d+) tests? in", output, re.M)
+            if not ran:
+                return False
+            count = int(ran[-1])
+            skipped = re.search(r"^OK \(skipped=(\d+)\)\s*$", output, re.M)
+            return count == 0 or bool(skipped and int(skipped[1]) >= count)
+        if reporter == "node":
+            tests = re.search(r"^# tests (\d+)\s*$", output, re.M)
+            passed = re.search(r"^# pass (\d+)\s*$", output, re.M)
+            return bool(tests and int(tests[1]) == 0) or bool(passed and int(passed[1]) == 0
+                                                               and not re.search(r"^# fail [1-9]", output, re.M))
+        if reporter == "junit":
+            cases = list(ET.fromstring(output).iter("testcase"))
+            return not cases or all(any(child.tag == "skipped" for child in case) for case in cases)
+        if reporter == "json":
+            value = json.loads(output)
+            return isinstance(value, dict) and value.get("ran") == 0
+        if reporter == "playwright":
+            return (bool(re.search(r"\b\d+ skipped\b", output))
+                    and not re.search(r"\b\d+ (?:passed|failed|flaky)\b", output))
+    except (ValueError, TypeError, ET.ParseError):
+        return False
+    return False
