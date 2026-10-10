@@ -110,3 +110,26 @@ class VmAction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BootScriptSecrets(unittest.TestCase):
+    """Cloud boot scripts must never trace or embed the GitHub token."""
+
+    SCRIPTS = (
+        Path(__file__).resolve().parent.parent / "deploy/aws/instance/boot.sh",
+        Path(__file__).resolve().parent.parent / "deploy/azure/instance/boot.sh",
+    )
+
+    def test_scripts_parse(self):
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_no_token_in_trace_or_clone_url(self):
+        for script in self.SCRIPTS:
+            text = script.read_text()
+            with self.subTest(script=script.parent.parent.name):
+                self.assertNotIn("x-access-token:$GH_TOKEN@", text)
+                self.assertNotIn("set -euxo", text)
+                self.assertIn("GIT_ASKPASS=", text)
+                self.assertIn("unset GH_TOKEN", text)
