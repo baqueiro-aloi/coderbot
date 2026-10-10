@@ -79,11 +79,22 @@ def poll_verify(thread_id: str | None = None):
 
 
 def poll_reply(thread_id: str):
-    return _backend().poll_reply(thread_id)
+    polled = _backend().poll_reply(thread_id)
+    # PrivateBin links never reach logs, transcripts or the model. Anything unexpected
+    # (feature off, an unusual return value) passes through untouched.
+    import secret_store
+    if not secret_store.enabled() or not isinstance(polled, tuple) or len(polled) != 2:
+        return polled
+    message_id, text = polled
+    return message_id, secret_store.capture(message_id, text)
 
 
 def mark_processed(message_id: str) -> None:
     _backend().mark_processed(message_id)
+    import secret_store
+    if secret_store.forget(message_id) and config.COMM_CHANNEL == "slack":
+        import slack_client
+        slack_client.scrub_message(message_id)
 
 
 def drain_thread(thread_id: str) -> int:

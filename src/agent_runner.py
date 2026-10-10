@@ -12,6 +12,7 @@ from contextvars import ContextVar
 import claude_runner
 import activity
 import config
+import secret_store
 import turn_control
 import phase_checkpoint
 import repo_provenance
@@ -226,7 +227,7 @@ def _after_kick(prompt: str) -> str:
 
 
 def _opencode_environment() -> dict[str, str]:
-    env = os.environ.copy()
+    env = secret_store.environment()  # the process env plus this task's credentials
     env["OPENCODE_DISABLE_DEFAULT_PLUGINS"] = "1"
     npmrc = Path(env.get("NPM_CONFIG_USERCONFIG") or Path.home() / ".npmrc")
     if npmrc.is_file():

@@ -1,6 +1,5 @@
 """Deterministic checks with content-bound results and per-run reports."""
 from pathlib import Path
-import os
 import subprocess
 import time
 import uuid
@@ -39,8 +38,9 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
 
 
 def check_environment():
-    """The environment checks run with (provisioned credentials are added here)."""
-    return dict(os.environ)
+    """The environment checks run with: the process env plus this task's credentials."""
+    import secret_store
+    return secret_store.environment()
 
 
 def execute(check, repo, store, task_id, *, reuse=True):

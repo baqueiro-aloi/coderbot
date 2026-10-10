@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import config
+import secret_store
 import handoffs
 import turn_control
 import operations
@@ -160,7 +161,7 @@ def _restore_config() -> bool:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    env = secret_store.environment()  # the process env plus this task's credentials
     # Overrides inherited/project defaults, including headless Claude's manual default.
     env["CAVEMAN_DEFAULT_MODE"] = (
         "caveman" if config.USE_CAVEMAN and "--tools" not in cmd else "off")

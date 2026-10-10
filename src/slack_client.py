@@ -714,6 +714,19 @@ def mark_processed(message_id: str) -> None:
         db.execute("UPDATE kick_requests SET handled=1 WHERE id=?", (message_id,))
 
 
+def scrub_message(message_id: str) -> None:
+    """Replace secure links in a handled message's stored copy. Never raises."""
+    try:
+        import secret_store
+        with _database() as db:
+            row = db.execute("SELECT text FROM messages WHERE id=?", (message_id,)).fetchone()
+            if row:
+                db.execute("UPDATE messages SET text=? WHERE id=?",
+                           (secret_store.scrub(row[0]), message_id))
+    except Exception:  # noqa: BLE001
+        log.warning("could not scrub stored Slack message %s", message_id, exc_info=True)
+
+
 def drain_thread(thread_id: str) -> int:
     pending = _pending(thread_id)
     for msg_id, _text, _channel, _root in pending:
