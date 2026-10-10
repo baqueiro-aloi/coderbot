@@ -900,6 +900,56 @@ for anyone. In Slack mode each instance uses separate app credentials; commands
 only work as replies in that app's own task threads, never as fleet-wide top-level
 messages.
 
+## Secrets for live checks (optional)
+
+Some changes can only be proven against the real third-party API (payments, email
+providers, LLM APIs). With `CODEBOT_CREDENTIAL_REQUESTS=on` the agent can ask for a
+credential it is missing, and you never paste the value into Slack or email.
+
+How it works:
+
+1. The agent ends a turn with
+   `CREDENTIAL_REQUEST: {"env": "STRIPE_KEY", "service": "Stripe", "purpose": "live refund test"}`.
+   Codebot pauses the phase (`WAIT_REPLY`) and offers three options:
+   **1** send it through a secure one-time link, **2** continue without it, **3** pause.
+   Numbers, short phrases ("sigue sin la clave", "send me the link") and free text are
+   accepted; anything it cannot classify is handled as a normal answer.
+2. On **1**, codebot starts a temporary [PrivateBin](https://privatebin.info) container
+   (`CODEBOT_PRIVATEBIN_IMAGE`, burn-after-reading on, no discussions or attachments) and
+   exposes it through a [localhost.run](https://localhost.run) SSH tunnel. It sends you
+   the `https://….lhr.life` address. Paste only the value, press Create, and reply with
+   the link PrivateBin gives you.
+3. Codebot reads the paste once through the local container address, decrypts it
+   locally (the key is in the link's `#fragment`, which PrivateBin's server never sees),
+   closes the page and resumes the agent. The paste is destroyed by that first read.
+4. On **2**, the agent continues; checks that need the credential are reported as
+   **skipped**, never as passed. On **3**, nothing happens until you reply 1 or 2.
+
+Where the value goes: `data/secrets/<task>/<NAME>.json` (directory `0700`, file `0600`)
+for `CODEBOT_SECRET_TTL_SECONDS` (default 4 h), deleted when the task ends. It is injected
+as environment variable `NAME` into the agent (Claude Code and OpenCode, from the next
+turn) and into controller-run checks, and registered with the log redactor. It is never
+written to `state.json`, transcripts, prompts, PR bodies or Git. Names that would shadow
+the bot's own settings (`GH_TOKEN`, `PATH`, `CODEBOT_*`, `CLAUDE_*`, `SLACK_*`…) are refused.
+
+Optional checks: a check in the agent's `CHECK_PLAN` (or `.codebot/checks.json`) that
+calls a live API lists its credentials in `"env_keys"` and sets `"optional": true`. Without
+those values it is reported as `skipped (missing credential NAME)`; with them it runs
+normally.
+
+Requirements and limits:
+
+- The bot needs the Docker CLI with access to the daemon and outbound SSH (port 22) to
+  `localhost.run`; the image already has both. Inside Docker the page joins the bot's
+  network namespace and listens on `127.0.0.1:48080`. If the page cannot start, codebot
+  says why and options 2 and 3 still work.
+- `CODEBOT_PRIVATEBIN_INSTANCES` (comma-separated HTTPS base URLs) accepts links from
+  PrivateBin instances you already run, without the temporary page.
+- The full link you reply with stays in Slack or the mailbox. It is useless after codebot
+  reads it (burn after reading), but prefer short-lived, least-privilege credentials.
+- Codebot replaces any PrivateBin-shaped link with `[secure-link]` before logging or
+  showing a reply to the agent, and scrubs its local Slack inbox copy once handled.
+
 ## Optional Caveman mode
 
 In `scripts/setup.sh`, open **Agent** and select **Usar Caveman: YES/NO**.

@@ -13,6 +13,12 @@ next to the code they exercise:
   tests/test_malformed_payloads.py
 - zero-test suites never fail the gate unless opted in, never for discovered suites:
   tests/test_empty_suites.py
+- credential requests: off by default, every hook falls back to today's reply path,
+  commands keep their meaning, a failed resume is retried, a page that cannot start
+  still lets the user continue without the credential: tests/test_credential_flow.py
+- secret storage and link capture are inert when off and tolerate an unreadable store:
+  tests/test_secret_store.py; page lifecycle never raises from stop/cleanup:
+  tests/test_privatebin_instance.py
 """
 import ast
 import os
