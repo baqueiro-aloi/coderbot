@@ -73,10 +73,10 @@ try:
                        *(os.environ.get(name) for name in (
                            "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                            "CLAUDE_API_KEY", "ANTHROPIC_API_KEY")))
-    redaction.install()
 except Exception:  # redaction is best-effort; it must never keep the bot from starting
-    log.warning("log redaction unavailable", exc_info=True)
+    log.warning("log redaction secrets unavailable", exc_info=True)
 progress.install()
+redaction.install()  # after every root handler exists (never raises)
 
 
 # ---------------------------------------------------------------- state
