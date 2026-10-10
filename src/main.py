@@ -562,6 +562,18 @@ def _looks_like_evidence(path: str) -> bool:
     return lower.endswith(_EVIDENCE_EXTENSIONS) or any(h in lower for h in _EVIDENCE_PATH_HINTS)
 
 
+_SECRET_FILE_RE = re.compile(
+    r"(^|/)(?:\.env(?:\.(?!example$|sample$|template$|dist$)[^/]*)?|[^/]*\.(?:pem|key|p12|pfx)"
+    r"|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|credentials\.json|token\.json|service[-_]account[^/]*\.json)$",
+    re.I)
+
+
+def _looks_like_secret(path: str) -> bool:
+    """Untracked files the bot must never sweep into one of its own commits (by name only;
+    no content scanning). `.env.example`-style templates are fine."""
+    return bool(_SECRET_FILE_RE.search(path.strip()))
+
+
 def _branch_evidence_paths(branch: str, base_branch: str) -> list[str]:
     """Files added/changed on `branch` since it diverged from `base_branch` that look
     like recorded test evidence rather than application code — these must never be
@@ -4157,10 +4169,73 @@ def _git_quiet(*args: str) -> bool:
     return proc.returncode == 0
 
 
-def _reset_to_base_branch() -> list[str]:
-    """Best-effort LOCAL reset: abort any half-finished git op, discard changes, land on a
-    clean, up-to-date base branch. Never touches remote branches or PRs. Returns notes about
-    any step that left the tree unclean (empty list when fully clean)."""
+def _uncommitted_paths() -> list[str]:
+    """Modified, staged, unmerged and untracked (non-ignored) paths, parsed from -z output
+    so renames and odd file names are handled."""
+    status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                            cwd=config.REPO_PATH, capture_output=True, text=True,
+                            timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout
+    paths, entries = [], [e for e in status.split("\0") if e]
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        paths.append(entry[3:])
+        if entry[:2].strip() and entry[0] in "RC":  # rename/copy: the next record is the source
+            index += 1
+        index += 1
+    return [p for p in paths if p]
+
+
+def _preserve_uncommitted(label: str) -> str | None:
+    """Before a destructive reset, put whatever is uncommitted somewhere recoverable.
+
+    Stash first (tracked + untracked, minus evidence); if git refuses (e.g. unmerged
+    paths mid-merge), copy the files and a patch under data/backups. Never raises and
+    never prevents the reset: the next task must still start clean. Returns a note for
+    the user, or None when there was nothing to preserve."""
+    try:
+        keep = [p for p in _uncommitted_paths() if not _looks_like_evidence(p)]
+        if not keep:
+            return None
+        title = f"codebot: {label}"
+        if _git_quiet("stash", "push", "--include-untracked", "-m", title, "--", *keep):
+            return (f"uncommitted changes ({len(keep)} path(s)) were saved in git stash "
+                    f"'{title}' before the reset; `git stash list` shows it")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = config.DATA_DIR / "backups" / f"{re.sub(r'[^A-Za-z0-9_.-]+', '-', label)[:60]}-{stamp}"
+        dest.mkdir(parents=True, exist_ok=True)
+        budget, copied = 200 * 1024 * 1024, 0
+        for rel in keep:
+            source = config.REPO_PATH / rel
+            if not source.is_file():
+                continue
+            budget -= source.stat().st_size
+            if budget < 0:
+                break
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+            copied += 1
+        patch = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=config.REPO_PATH,
+                               capture_output=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+        if patch.returncode == 0 and patch.stdout:
+            (dest / "changes.patch").write_bytes(patch.stdout)
+        return (f"git could not stash the uncommitted changes; {copied} of {len(keep)} file(s) "
+                f"were copied to {dest} before the reset")
+    except Exception as error:  # noqa: BLE001 — preservation is best-effort, the reset is not optional
+        log.warning("could not preserve uncommitted changes before reset: %s", error)
+        return f"could not preserve uncommitted changes before the reset: {error}"
+
+
+def _reset_to_base_branch(label: str = "reset") -> list[str]:
+    """Best-effort LOCAL reset: save anything uncommitted (stash or backup), abort any
+    half-finished git op, discard changes, land on a clean, up-to-date base branch. Never
+    touches remote branches or PRs. Returns notes about preserved work and about any step
+    that left the tree unclean (empty list when there was nothing to report)."""
+    problems = []
+    preserved = _preserve_uncommitted(label)
+    if preserved:
+        problems.append(preserved)
     _abort_in_progress_ops()  # a half-finished merge/rebase would block the checkout
     _git_quiet("reset", "--hard")                            # drop staged/unstaged tracked changes
     _git_quiet("checkout", "-f", config.BASE_BRANCH)         # leave whatever codebot branch we were on
@@ -4169,7 +4244,6 @@ def _reset_to_base_branch() -> list[str]:
     # the remote. Best-effort — a network failure here doesn't block the reset (do_pick pulls too).
     if _git_quiet("fetch", "origin", config.BASE_BRANCH):
         _git_quiet("reset", "--hard", f"origin/{config.BASE_BRANCH}")
-    problems = []
     branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
                             cwd=config.REPO_PATH, capture_output=True, text=True, timeout=config.SUBPROCESS_TIMEOUT_SECONDS).stdout.strip()
     if branch != config.BASE_BRANCH:
@@ -4243,9 +4317,9 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
                 f"done:\n\n{item}\n\nPlease mark it done (or delete it) promptly "
                 "— until then it may be picked again.")
     if reset_repo:
-        problems = _reset_to_base_branch()
+        problems = _reset_to_base_branch(f"finished {state.get('slug') or state.get('branch') or 'task'}")
         if problems:
-            body += ("\n\nThe repo reset finished with issues (I'll re-check before the "
+            body += ("\n\nNotes from the repo reset (I'll re-check before the "
                      "next task):\n- " + "\n- ".join(problems))
     body += "\n\nI'll pick up the next pending item from the backlog."
     if merged:
@@ -4406,7 +4480,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     aborted_task = state.get("item", "-")
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
-    problems = _reset_to_base_branch()
+    problems = _reset_to_base_branch(f"aborted {state.get('slug') or state.get('branch') or 'task'}")
     # The task goes back to the pool, so its claim marker must go too — otherwise no
     # instance (including this one, if its state was wiped) would ever pick it again.
     if aborted_task and aborted_task != "-":
@@ -4419,7 +4493,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
             problems.append("could not release the item's claim in the backlog — "
                             "release it manually or no instance will pick the task")
     status = (f"The working tree was reset to a clean, up-to-date `{config.BASE_BRANCH}`." if not problems
-              else "The reset finished with issues (I'll re-check the tree before starting the "
+              else "Notes from the reset (I'll re-check the tree before starting the "
                    "next task):\n- " + "\n- ".join(problems))
     email(state, "aborted — reset to IDLE",
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
@@ -4468,7 +4542,11 @@ def _commit_pending_work(state: dict) -> list[str]:
     _git_quiet("add", "-u")  # every tracked change
     untracked = [p for p in git("ls-files", "--others", "--exclude-standard").splitlines()
                  if p.strip()]
-    kept = [p for p in untracked if not _looks_like_evidence(p)]
+    secrets_found = [p for p in untracked if _looks_like_secret(p)]
+    kept = [p for p in untracked if not _looks_like_evidence(p) and p not in secrets_found]
+    if secrets_found:
+        notes.append("left out of the commit because they look like credentials: "
+                     + ", ".join(secrets_found[:10]))
     if kept:
         _git_quiet("add", "--", *kept)
     if git("status", "--porcelain", "--untracked-files=no"):
@@ -4508,10 +4586,11 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
             "first thing after my current work.")
     if notes:
         body += "\n\nNotes:\n- " + "\n- ".join(notes)
-    email(state, "on hold", body)
-    problems = _reset_to_base_branch()
+    problems = _reset_to_base_branch(f"hold {state.get('slug') or state.get('branch') or 'task'}")
     if problems:
-        log.warning("reset after hold left issues: %s", problems)
+        log.warning("reset after hold left notes: %s", problems)
+        body += "\n\nRepo reset:\n- " + "\n- ".join(problems)
+    email(state, "on hold", body)
     with _status_command_lock:
         _publish_progress(state, "paused")
         for key in RESET_KEYS:
