@@ -56,6 +56,7 @@ import turn_control
 import conversation as gmail_client
 import progress
 import prompts
+import redaction
 from command_text import parse_command
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
@@ -65,6 +66,14 @@ logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
 for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3", "slack_sdk"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("codebot")
+try:
+    redaction.register(config.JIRA_API_TOKEN, config.SLACK_BOT_TOKEN, config.SLACK_APP_TOKEN,
+                       *(os.environ.get(name) for name in (
+                           "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                           "CLAUDE_API_KEY", "ANTHROPIC_API_KEY")))
+    redaction.install()
+except Exception:  # redaction is best-effort; it must never keep the bot from starting
+    log.warning("log redaction unavailable", exc_info=True)
 progress.install()
 
 

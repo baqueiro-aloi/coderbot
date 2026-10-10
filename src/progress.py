@@ -1,12 +1,12 @@
 """Channel-neutral progress and bounded, safe operational log tails per task."""
 import logging
-import os
 import re
 import threading
 from collections import OrderedDict, deque
 from contextvars import ContextVar
 
 import config
+import redaction
 
 _context: ContextVar[dict | None] = ContextVar("progress_task", default=None)
 _lock = threading.Lock()
@@ -23,14 +23,12 @@ def set_context(state: dict | None) -> None:
 
 
 def sanitize(text: str) -> str:
-    """Redact known credentials and common inline secrets before truncating."""
-    for name, value in list(vars(config).items()) + list(os.environ.items()):
-        if (re.search(r"TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY", name, re.I)
-                and isinstance(value, str) and len(value) >= 4):
-            text = text.replace(value, "[REDACTED]")
-    text = re.sub(r"(?i)\b(?:https?://)[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@", text)
-    text = re.sub(r"(?i)\b(?:xox[baprs]-[\w-]+|sk-[\w-]+|gh[pousr]_[\w]+)\b",
-                  "[REDACTED]", text)
+    """Redact known credentials and inline assignments before truncating.
+
+    Progress tails are short public lines, so the assignment heuristic below is acceptable
+    here; prompts, state and logs go through ``redaction.redact`` only.
+    """
+    text = redaction.redact(text)
     text = re.sub(r"(?i)((?:bearer\s+)|(?:[\w-]*(?:token|secret|password|api[_-]?key)[\w-]*"
                   r"[\"']?\s*(?:=|:|\s)\s*))(?:\"[^\"]*\"|'[^']*'|[^\s\"']+)",
                   r"\1[REDACTED]", text)

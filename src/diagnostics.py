@@ -7,20 +7,26 @@ from pathlib import Path
 import re
 import traceback
 
+import redaction
+
 
 def redact(text, environ=None):
+    """Incident redaction: the shared value/shape redactor plus the caller's explicit secrets.
+
+    With ``environ`` given, secret-named entries of that mapping are stripped too. The
+    default process environment is scanned conservatively (long, non-numeric values only)
+    so ordinary settings such as ``..._TOKEN_BUDGET=80000`` are never redacted.
+    """
     text = str(text)
-    env = os.environ if environ is None else environ
+    explicit = environ is not None
+    env = environ if explicit else os.environ
+    minimum = redaction.MIN_LENGTH if explicit else 16
     secrets = {value for key, value in env.items()
                if re.search(r"TOKEN|PASSWORD|SECRET|API_KEY|CREDENTIAL", key, re.I)
-               and len(value) >= 4}
+               and isinstance(value, str) and len(value) >= minimum and not value.isdigit()}
     for value in sorted(secrets, key=len, reverse=True):
-        text = text.replace(value, "[REDACTED]")
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[REDACTED]", text)
-    text = re.sub(r"\b(?:xox[baprs]-[\w-]+|gh[pousr]_[\w]+)\b", "[REDACTED]", text)
-    text = re.sub(r"(?i)([?&](?:token|api_key|password|secret)=)[^&\s]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(https?://)[^/\s:@]+:[^@\s/]+@", r"\1[REDACTED]@", text)
-    return text
+        text = text.replace(value, redaction.PLACEHOLDER)
+    return redaction.redact(text)
 
 
 def report(store, state, repo, directory, phase, *, error=None, detail="", identity=None):

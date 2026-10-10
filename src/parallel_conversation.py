@@ -10,6 +10,7 @@ from pathlib import Path
 
 import handoffs
 import prompts
+import redaction
 from command_text import parse_command, parse_btw
 
 
@@ -154,7 +155,7 @@ def _safe(value):
     if isinstance(value, str):
         value = re.sub(r"(?i)(bearer\s+|(?:api[_-]?key|password|secret)\s*[:=]\s*)\S+",
                        r"\1[redacted]", value)
-        return value[:5000]
+        return redaction.redact(value)[:5000]
     return value
 
 
