@@ -30,9 +30,10 @@ id for GitHub), carried alongside as state["item_id"] and preferred by backends 
 have one. Every backend accepts an identity-less call and matches on text.
 """
 import config
-from task_text import normalize  # noqa: F401 — part of the façade's surface
+from task_text import MalformedPayload, normalize, require_list  # noqa: F401 — part of the façade's surface
 
 SOURCES = ("gdoc", "github", "jira")
+
 
 
 def _impl():

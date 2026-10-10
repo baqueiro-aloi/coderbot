@@ -1,6 +1,7 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
 import fcntl
+import os
 import copy
 import json
 import hashlib
@@ -52,6 +53,7 @@ import milestones
 import task_phases
 import proposal_package
 import task_source
+from task_text import MalformedPayload
 import turn_control
 import conversation as gmail_client
 import progress
@@ -4585,7 +4587,7 @@ def _is_transient_network_error(error: BaseException) -> bool:
     """A network blip talking to Gmail/GitHub (TLS EOF, connection reset, DNS, timeout,
     5xx/429), as opposed to a fault in the state being executed."""
     if isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError,
-                          socket.gaierror, socket.herror)):
+                          socket.gaierror, socket.herror, MalformedPayload)):
         return True
     if type(error).__module__.startswith("httplib2"):  # ServerNotFoundError & co.
         return True

@@ -16,6 +16,7 @@ from pathlib import Path
 import config
 import ownership
 import safe_download
+import task_source
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ def _search(jql: str, fields: list[str] | None = None) -> list[dict]:
         page = _request("POST", "/search/jql", body)
         if not isinstance(page, dict):
             raise RuntimeError("Jira /search/jql returned a non-object response")
-        results.extend(page.get("issues", []))
+        results.extend(task_source.require_list(page, "issues", "Jira /search/jql"))
         next_cursor = page.get("nextPageToken")
         if page.get("isLast", not next_cursor) or not next_cursor:
             return results
@@ -261,8 +262,12 @@ def validate() -> None:
         if name.casefold() not in available:
             raise RuntimeError(f"{key}={name!r} is not a status in Jira project "
                                f"{config.JIRA_PROJECT_KEY}; available: {sorted(available)}")
-    _search(f"project = {_jql_quote(config.JIRA_PROJECT_KEY)}",
-            fields=["summary", "status"])
+    try:
+        _search(f"project = {_jql_quote(config.JIRA_PROJECT_KEY)}",
+                fields=["summary", "status"])
+    except task_source.MalformedPayload as error:
+        # Startup must not depend on the search payload's shape: the loop retries that.
+        log.warning("Jira search returned an unexpected payload during startup: %s", error)
 
 
 def describe() -> str:

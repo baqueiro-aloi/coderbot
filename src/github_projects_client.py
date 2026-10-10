@@ -28,6 +28,7 @@ import urllib.request
 import config
 import ownership
 import safe_download
+import task_source
 
 # Hosts that may receive the GitHub token when fetching issue images.
 GITHUB_IMAGE_HOSTS = ("github.com", "api.github.com", "githubusercontent.com")
@@ -241,8 +242,13 @@ def _items() -> list[dict]:
     items, cursor = [], None
     while True:
         data = _graphql(_ITEMS_QUERY, id=project_id, cursor=cursor)
-        page = (data.get("node") or {}).get("items") or {}
-        items.extend(_parse_item(n) for n in page.get("nodes", []) if n)
+        node = data.get("node")
+        if not isinstance(node, dict) or not isinstance(node.get("items"), dict):
+            raise task_source.MalformedPayload(
+                "GitHub Projects items query returned no project node (payload keys: "
+                f"{sorted(data)})")
+        page = node["items"]
+        items.extend(_parse_item(n) for n in task_source.require_list(page, "nodes", "GitHub Projects items") if n)
         info = page.get("pageInfo") or {}
         if not info.get("hasNextPage"):
             return items

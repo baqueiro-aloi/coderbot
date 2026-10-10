@@ -16,6 +16,7 @@ from googleapiclient.errors import HttpError
 import config
 import ownership
 import safe_download
+import task_source
 from google_auth import load_credentials
 from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
@@ -83,8 +84,11 @@ def _iter_paragraphs(document: dict):
     inline object ids of images embedded in the paragraph; a paragraph that is ONLY an
     image (no text) is still yielded so the image reaches the task above it.
     """
-    for element in document.get("body", {}).get("content", []):
-        para = element.get("paragraph")
+    body = document.get("body") if isinstance(document, dict) else None
+    if not isinstance(body, dict):
+        raise task_source.MalformedPayload("Docs API returned a document without a body")
+    for element in task_source.require_list(body, "content", "Docs document body"):
+        para = element.get("paragraph") if isinstance(element, dict) else None
         if not para:
             continue
         text_parts = []
