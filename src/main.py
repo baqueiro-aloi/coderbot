@@ -3641,7 +3641,8 @@ def _maybe_request_credential(state: dict, result, phase: str) -> bool:
         log.warning("could not request a credential; continuing without pausing", exc_info=True)
         return False
     state["question_rounds"] = rounds
-    state["credential_request"] = {**request, "phase": phase, "asked_at": time.time(), "session": None}
+    state["credential_request"] = {**request, "phase": phase, "asked_at": time.time(), "session": None,
+                                   "question": text}
     state["pending_question"] = text
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
@@ -3691,10 +3692,19 @@ def _credential_action(state: dict, msg_id: str, reply: str):
             return None
         links = secret_store.take_links(msg_id)
         request = state.get("credential_request")
+        if (request and not request.get("resume")
+                and state.get("pending_question") != request.get("question")):
+            # The agent has since asked something else: this reply answers that question.
+            privatebin.stop(request.get("session"))
+            state.pop("credential_request", None)
+            request = None
         if not (request and state["state"] == "WAIT_REPLY" and state.get("item")):
-            if links:
-                return lambda: email(state, "secure link not used",
-                                     _credential_text(state, "credential_unexpected"), localized=True)
+            if links:  # never opened; the rest of the message still takes today's path
+                try:
+                    email(state, "secure link not used",
+                          _credential_text(state, "credential_unexpected"), localized=True)
+                except Exception:  # noqa: BLE001
+                    log.warning("could not send the unused-link notice", exc_info=True)
             return None
         if request.get("resume"):
             return lambda: _credential_resume(state)  # a previous resume failed: retry it

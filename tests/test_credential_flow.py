@@ -49,7 +49,8 @@ class Base(unittest.TestCase):
         state = {"state": "WAIT_REPLY", "item": "task", "slug": "s", "branch": "b", "thread_id": "T",
                  "session_id": "sid", "return_state": "IMPLEMENTING", "pending_question": "q",
                  "credential_request": {"env": "STRIPE_KEY", "service": "Stripe", "purpose": "p",
-                                        "optional": True, "phase": "IMPLEMENTING", "session": None}}
+                                        "optional": True, "phase": "IMPLEMENTING", "session": None,
+                                        "question": "q"}}
         state.update(extra)
         secret_store.activate(main._credential_key(state))
         return state
@@ -240,11 +241,27 @@ class Replies(Base):
     def test_unexpected_link_is_not_opened(self):
         state = self.waiting()
         state.pop("credential_request")
-        with patch.object(main.privatebin, "fetch") as fetch:
-            queue, answer, _, _ = self.reply(state, LINK)
+        with patch.object(main.privatebin, "fetch") as fetch, \
+                patch.object(main, "_queue_conversation", return_value=True) as queue:
+            captured = secret_store.capture("m1", f"approved, and the key is {LINK}")
+            with patch.object(main.gmail_client, "poll_reply", return_value=("m1", captured)), \
+                    patch.object(main.gmail_client, "foreign_command", return_value=None), \
+                    patch.object(main.gmail_client, "mark_processed"):
+                main.handle_wait(state)
         fetch.assert_not_called()
-        queue.assert_not_called()
+        queue.assert_called_once()  # the rest of the message still takes today's path
+        self.assertEqual(queue.call_args.args[2], "approved, and the key is [secure-link]")
         self.assertEqual(self.email.call_args.args[1], "secure link not used")
+
+    def test_a_superseded_request_does_not_capture_answers_to_the_next_question(self):
+        state = self.waiting(pending_question="Which refund policy? 1. Full 2. Partial")
+        state["credential_request"]["session"] = dict(SESSION)
+        with patch.object(main.privatebin, "start") as start, patch.object(main.privatebin, "stop") as stop:
+            queue, answer, _, _ = self.reply(state, "1")
+        start.assert_not_called()
+        stop.assert_called_once()
+        queue.assert_called_once()
+        self.assertNotIn("credential_request", state)
 
 
 class Housekeeping(Base):
