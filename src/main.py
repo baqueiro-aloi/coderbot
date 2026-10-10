@@ -3610,7 +3610,8 @@ def check_clean_checkout(state: dict) -> None:
 # returns control to the existing code path; none of them can stall the loop.
 
 def _credential_key(state: dict) -> str:
-    return progress.task_key(state)
+    """Stable for the whole task: recovery isolation rewrites the branch, not the item."""
+    return str(state.get("item_id") or state.get("item") or "")
 
 
 def _skipped_credentials(state: dict) -> list[str]:
@@ -3682,6 +3683,12 @@ def _credential_action(state: dict, msg_id: str, reply: str):
     try:
         if not secret_store.enabled():
             return None
+        command = parse_command(reply)
+        # HOLD, ABORT, STATUS... keep their existing meaning. "continue without it" parses
+        # as CONTINUE plus a note, which in a task thread is only ever an answer.
+        if (command and not (command[0] == "CONTINUE" and command[2])) or re.fullmatch(
+                r"(?i)\s*(retry|abort|complete|merge(?: anyway)?)\s*[.!]?\s*", reply):
+            return None
         links = secret_store.take_links(msg_id)
         request = state.get("credential_request")
         if not (request and state["state"] == "WAIT_REPLY" and state.get("item")):
@@ -3689,6 +3696,8 @@ def _credential_action(state: dict, msg_id: str, reply: str):
                 return lambda: email(state, "secure link not used",
                                      _credential_text(state, "credential_unexpected"), localized=True)
             return None
+        if request.get("resume"):
+            return lambda: _credential_resume(state)  # a previous resume failed: retry it
         if links or secret_store.available(request["env"]):
             return lambda: _credential_provided(state, links)
         action = _classify_credential_reply(state, reply)
@@ -3744,29 +3753,41 @@ def _credential_provided(state: dict, links: list[str]) -> None:
         secret_store.put(_credential_key(state), env, value, ttl=config.SECRET_TTL_SECONDS,
                          source="privatebin")
     privatebin.stop(request.get("session"))
+    request["session"] = None
     state.setdefault("credentials", {})[env] = {"decision": "provided", "at": time.time()}
-    state.pop("credential_request", None)
+    request["resume"] = (f"The credential {env} is now set as environment variable {env} for "
+                         "you and for controller-run checks. Do not print, log or commit its "
+                         "value. Continue the work.")
     save_state(state)
     email(state, "credential received", _credential_text(
         state, "credential_received", env=env, hours=max(1, config.SECRET_TTL_SECONDS // 3600)),
         localized=True)
-    _answer_question(state, f"The credential {env} is now set as environment variable {env} for "
-                            "you and for controller-run checks. Do not print, log or commit its "
-                            "value. Continue the work.")
+    _credential_resume(state)
 
 
 def _credential_skip(state: dict) -> None:
     request = state["credential_request"]
     env = request["env"]
     privatebin.stop(request.get("session"))
+    request["session"] = None
     state.setdefault("credentials", {})[env] = {"decision": "skip", "at": time.time()}
-    state.pop("credential_request", None)
+    request["resume"] = (f"The user chose to continue without {env}; do not ask for it again. "
+                         f"Checks that need it must list it in env_keys with optional: true; "
+                         "they will be reported as skipped. Continue with everything else.")
     save_state(state)
     email(state, "continuing without credential", _credential_text(
         state, "credential_skipped", env=env), localized=True)
-    _answer_question(state, f"The user chose to continue without {env}; do not ask for it again. "
-                            f"Checks that need it must list it in env_keys with optional: true; "
-                            "they will be reported as skipped. Continue with everything else.")
+    _credential_resume(state)
+
+
+def _credential_resume(state: dict) -> None:
+    """Resume the session after a decision. The request is kept (with its resume message)
+    until the resume returns, so a transient failure is retried on the next poll instead
+    of stranding the user; a new request raised by the resumed turn is left in place."""
+    request = state["credential_request"]
+    _answer_question(state, request["resume"])
+    if state.get("credential_request") is request:
+        state.pop("credential_request", None)
 
 
 def _credential_tick(state: dict) -> None:

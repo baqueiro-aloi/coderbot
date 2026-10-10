@@ -166,13 +166,16 @@ def decode(payload: dict, key: bytes) -> str:
 # The bot can host its own short-lived PrivateBin: a container from the pinned image,
 # reachable by the user through a localhost.run SSH tunnel (no account, no inbound
 # port). Inside Docker the container joins the bot's network namespace
-# (--network container:<bot>), so "127.0.0.1:8080" is the same address for the bot's
-# fetch and for the tunnel. Outside Docker it publishes 127.0.0.1:HOST_PORT instead.
+# (--network container:<bot>) and its nginx is moved to LOCAL_PORT, so 127.0.0.1:LOCAL_PORT
+# is the same address for the bot's fetch and for the tunnel. Outside Docker it publishes
+# 127.0.0.1:LOCAL_PORT instead.
 # Every subprocess has a timeout; only start() raises (Unavailable).
 
 
-CONTAINER_PORT = 8080   # fixed by the image's nginx config
-HOST_PORT = 48080       # only used when the bot itself is not in a container
+CONTAINER_PORT = 8080   # the image's nginx default
+LOCAL_PORT = 48080      # where the bot reaches the page: a host port outside Docker, or the
+                        # page's own listen port when it shares the bot's network namespace
+                        # (8080 would collide with the target app's dev servers)
 LABEL = "codebot.privatebin"
 TUNNEL_HOST = "nokey@localhost.run"
 _TUNNEL_URL = re.compile(r"https://[a-z0-9][a-z0-9-]*\.lhr\.life\b")
@@ -231,6 +234,8 @@ def _port_busy(port: int) -> bool:
 
 
 def _alive(pid) -> bool:
+    """Our tunnel process is running. A pid from a previous run counts only if it is still
+    an ssh to localhost.run: after a restart pids are reused, and "dead" is the safe answer."""
     if not isinstance(pid, int) or pid <= 0:
         return False
     process = _processes.get(pid)
@@ -240,11 +245,19 @@ def _alive(pid) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
-    return True
+    return _is_tunnel(pid)
 
 
 def _is_tunnel(pid: int) -> bool:
-    """Only ever signal a pid that is still our ssh tunnel (pids get reused)."""
+    """Whether a pid is still our ssh tunnel (Linux /proc first; ps where /proc is absent)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return b"localhost.run" in handle.read()
+    except FileNotFoundError:
+        if os.path.isdir("/proc/self"):
+            return False  # Linux and no such process
+    except OSError:
+        return False
     try:
         command = _run(["ps", "-o", "command=", "-p", str(pid)], 5, check=False).stdout
     except Exception:  # noqa: BLE001
@@ -260,11 +273,14 @@ def start(instance_id: str, directory, *, ttl: int = 3600) -> dict:
         raise Unavailable("docker or ssh is not available where I run.")
     directory = os.fspath(directory)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    port = CONTAINER_PORT if _in_container() else HOST_PORT
+    port = LOCAL_PORT
     if _port_busy(port):
-        raise Unavailable(f"local port {port} is already in use.")
+        cleanup_stale(instance_id)  # a page left by a previous run is the usual culprit
+        time.sleep(1)
+        if _port_busy(port):
+            raise Unavailable(f"local port {port} is already in use.")
     network = (["--network", f"container:{socket.gethostname()}"] if _in_container()
-               else ["-p", f"127.0.0.1:{HOST_PORT}:{CONTAINER_PORT}"])
+               else ["-p", f"127.0.0.1:{LOCAL_PORT}:{CONTAINER_PORT}"])
     session = {"container_id": None, "tunnel_pid": None, "public_url": None,
                "local_url": f"http://127.0.0.1:{port}/", "expires_at": time.time() + ttl}
     try:
@@ -275,6 +291,8 @@ def start(instance_id: str, directory, *, ttl: int = 3600) -> dict:
         with open(conf, "w") as handle:
             handle.write(CONF.replace("{default}", "1hour" if ttl >= 3600 else "10min"))
         _run(["docker", "cp", conf, f"{session['container_id']}:/srv/cfg/conf.php"], 30)
+        if _in_container():
+            _listen_on(session["container_id"], directory, port)
         _run(["docker", "start", session["container_id"]], 30)
         deadline = time.time() + 30
         while not _port_busy(port):
@@ -311,6 +329,20 @@ def start(instance_id: str, directory, *, ttl: int = 3600) -> dict:
         raise Unavailable(f"the secure page could not be started ({type(error).__name__}).") from None
 
 
+def _listen_on(container_id: str, directory: str, port: int) -> None:
+    """Move the (not yet started) container's nginx from CONTAINER_PORT to `port`."""
+    site = os.path.join(directory, "site.conf")
+    _run(["docker", "cp", f"{container_id}:/etc/nginx/http.d/site.conf", site], 30)
+    with open(site) as handle:
+        original = handle.read()
+    moved = re.sub(rf"(listen\s+(?:\[::\]:)?){CONTAINER_PORT}\b", rf"\g<1>{port}", original)
+    if moved == original:
+        raise Unavailable("the secure page's web server could not be configured.")
+    with open(site, "w") as handle:
+        handle.write(moved)
+    _run(["docker", "cp", site, f"{container_id}:/etc/nginx/http.d/site.conf"], 30)
+
+
 def accepted_bases(session: dict | None, allowlist=()) -> dict[str, str]:
     """Public base -> fetch base for parse_link: our tunnel maps to the local container."""
     bases = {base_of(url): base_of(url) for url in allowlist if url.startswith("https://")}
@@ -330,7 +362,7 @@ def stop(session: dict | None) -> None:
         return
     pid = session.get("tunnel_pid")
     try:
-        if _alive(pid) and (pid in _processes or _is_tunnel(pid)):
+        if _alive(pid):
             os.killpg(pid, signal.SIGTERM) if pid in _processes else os.kill(pid, signal.SIGTERM)
             process = _processes.pop(pid, None)
             if process is not None:

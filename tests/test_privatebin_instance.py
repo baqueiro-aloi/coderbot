@@ -54,6 +54,9 @@ class Start(unittest.TestCase):
 
     def fake_run(self, args, **kwargs):
         self.calls.append(args)
+        if args[:2] == ["docker", "cp"] and args[2].endswith(":/etc/nginx/http.d/site.conf"):
+            with open(args[3], "w") as handle:  # copying the image's site.conf out
+                handle.write("server {\n    listen 8080 default_server;\n    listen [::]:8080 default_server;\n}\n")
         return completed(args, "cid123\n" if args[:2] == ["docker", "create"] else "")
 
     def busy(self, port):
@@ -81,7 +84,12 @@ class Start(unittest.TestCase):
         create = self.calls[0]
         self.assertIn("container:botcid", create)
         self.assertNotIn("-p", create)
-        self.assertEqual(session["local_url"], "http://127.0.0.1:8080/")
+        self.assertEqual(session["local_url"], "http://127.0.0.1:48080/")
+        with open(f"{self.dir}/site.conf") as handle:
+            site = handle.read()
+        self.assertIn("listen 48080 default_server;", site)
+        self.assertIn("listen [::]:48080 default_server;", site)
+        self.assertIn(["docker", "cp", f"{self.dir}/site.conf", "cid123:/etc/nginx/http.d/site.conf"], self.calls)
 
     def test_tunnel_without_url_times_out_and_cleans_up(self):
         FakeTunnel.banner = "Welcome to localhost.run!\n"
@@ -133,13 +141,20 @@ class StopAndCleanup(unittest.TestCase):
         self.assertIn("label=codebot.privatebin=bot-1", calls[0])
         self.assertEqual(calls[1], ["docker", "rm", "-f", "a1", "b2"])
 
-    def test_stop_never_signals_a_foreign_reused_pid(self):
-        with patch.object(privatebin, "_alive", return_value=True), \
-                patch.object(privatebin, "_is_tunnel", return_value=False), \
+    def test_a_reused_pid_is_neither_alive_nor_signalled(self):
+        with patch.object(privatebin, "_is_tunnel", return_value=False), \
                 patch.object(privatebin.os, "kill") as kill, \
                 patch.object(privatebin.subprocess, "run", return_value=completed([])):
+            self.assertFalse(privatebin.running({"public_url": "https://x.lhr.life/", "tunnel_pid": 1234,
+                                                 "expires_at": time.time() + 60}))
             privatebin.stop({"tunnel_pid": 1234})
-        kill.assert_not_called()
+        self.assertTrue(all(call.args[1] == 0 for call in kill.call_args_list))
+
+    def test_is_tunnel_reads_proc_cmdline_without_ps(self):
+        import os
+        if not os.path.isdir("/proc/self"):
+            self.skipTest("no /proc on this platform")
+        self.assertFalse(privatebin._is_tunnel(os.getpid()))
 
     def test_running_requires_live_tunnel_and_unexpired_session(self):
         session = {"public_url": "https://x.lhr.life/", "tunnel_pid": 1, "expires_at": time.time() + 60}

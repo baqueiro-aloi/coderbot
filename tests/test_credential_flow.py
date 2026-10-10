@@ -144,6 +144,50 @@ class Replies(Base):
         self.assertNotIn("sk_live_secret_value", json.dumps(state))
         self.assertEqual(redaction.redact("sk_live_secret_value"), "[REDACTED]")
 
+    def test_failed_resume_is_retried_on_the_next_poll_without_stranding_the_user(self):
+        state = self.waiting()
+        state["credential_request"]["session"] = dict(SESSION)
+        calls = []
+
+        def flaky(s, message):
+            calls.append(message)
+            if len(calls) == 1:
+                raise ConnectionResetError("transient")
+        with patch.object(main.privatebin, "fetch", return_value={"v": 2}), \
+                patch.object(main.privatebin, "decode", return_value="sk_live_secret_value"), \
+                patch.object(main.privatebin, "stop"), \
+                patch.object(main.gmail_client, "foreign_command", return_value=None), \
+                patch.object(main, "_queue_conversation", return_value=True) as queue, \
+                patch.object(main, "_answer_question", side_effect=flaky):
+            for _ in range(2):
+                captured = secret_store.capture("m1", f"here: {LINK}")
+                with patch.object(main.gmail_client, "poll_reply", return_value=("m1", captured)), \
+                        patch.object(main.gmail_client, "mark_processed") as processed:
+                    try:
+                        main.handle_wait(state)
+                    except ConnectionResetError:
+                        processed.assert_not_called()  # the message stays available
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        queue.assert_not_called()
+        self.assertNotIn("secure link not used", [c.args[1] for c in self.email.call_args_list])
+        self.assertNotIn("credential_request", state)
+
+    def test_a_new_request_from_the_resumed_turn_survives(self):
+        state = self.waiting()
+
+        def asks_again(s, message):
+            s["credential_request"] = {"env": "OTHER_KEY", "service": "x", "purpose": "y", "session": None}
+        with patch.object(main, "_answer_question", side_effect=asks_again):
+            main._credential_skip(state)
+        self.assertEqual(state["credential_request"]["env"], "OTHER_KEY")
+
+    def test_commands_keep_their_meaning_while_a_request_is_pending(self):
+        state = self.waiting()
+        for text in ("HOLD", "PAUSE", "ABORT", "STATUS", "retry", "CONTINUE"):
+            with self.subTest(text=text):
+                self.assertIsNone(main._credential_action(state, "m", text))
+
     def test_unusable_link_keeps_waiting_and_explains(self):
         state = self.waiting()
         queue, answer, processed, _ = self.reply(state, f"{LINK}")  # no session: host not accepted
