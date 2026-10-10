@@ -238,6 +238,9 @@ $e2e_note
 - Request focused controller-run checks by emitting a standalone line:
   CHECK_PLAN: {"version":1,"checks":[{"id":"focused","argv":["<tool>","<arg>"],"cwd":".","scope":"focused","inputs":["<affected path>"]}]}
   This requests real execution; it is not itself evidence that a check passed.
+  A check that calls a live third-party API lists the credential variables it needs in
+  "env_keys" and sets "optional": true (with "scope":"full" to keep it in the final
+  suite); when a credential is absent the controller reports it as skipped, not failed.
 - Coderbot retains integration authority: do not push, create a PR, merge, or archive.
 - Do not commit any evidence file (screenshot, recording, report) - those are sent through the configured channel, never
   committed to the repo (see the evidence contract above).

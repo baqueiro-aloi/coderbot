@@ -38,8 +38,20 @@ def execute_plan(plan, repo, store, task_id, *, workers=3):
         return [future.result() for future in futures]
 
 
+def check_environment():
+    """The environment checks run with (provisioned credentials are added here)."""
+    return dict(os.environ)
+
+
 def execute(check, repo, store, task_id, *, reuse=True):
     repo = Path(repo).resolve()
+    env = check_environment()
+    missing = check.missing_credentials(env) if check.optional else []
+    if missing:
+        detail = "missing credential " + ", ".join(missing)
+        log.info("check skipped: %s (%s)", check.id, detail)
+        return {"status": "skipped", "skipped": detail, "failures": {}, "exit_code": None,
+                "check": check.id, "reused": False}
     preparation_error = None
     if check.preparation:
         try:
@@ -48,7 +60,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
             preparation_error = error
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
-    environment = environment_identity(check.argv, cwd, env_keys=check.env_keys,
+    environment = environment_identity(check.argv, cwd, env_keys=check.env_keys, environ=env,
         tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id)},
         key_path=store.path.parent / "identity.key")
     from check_baseline import dependency_snapshot, dependency_inputs
@@ -56,7 +68,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
     identity = digest({"content": content, "environment": environment, "check": check.to_dict(),
                        "dependencies": dependencies, "version": 2})
     previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
-    if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown"):
+    if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown", "skipped"):
         log.info("check reused: %s status=%s report=%s", check.id,
                  previous["data"]["result"]["status"], previous["data"]["result"].get("report"))
         return {**previous["data"]["result"], "reused": True}
@@ -79,7 +91,7 @@ def execute(check, repo, store, task_id, *, reuse=True):
         if preparation_error:
             raise OSError("Check preparation failed: " + str(preparation_error))
         process = operations.run(check.argv, cwd=cwd, timeout=check.timeout,
-                                 exclusive=check.resources)
+                                 exclusive=check.resources, env=env)
         output = process.stdout + "\n" + process.stderr
         result = parse_output(output, process.returncode, check.reporter)
     except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:

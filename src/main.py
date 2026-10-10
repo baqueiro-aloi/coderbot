@@ -1454,7 +1454,8 @@ def _verify_requested_checks(state: dict, result) -> bool:
     """The agent's pass claim cannot override a controller-run unknown/failure."""
     if not check_plan.reported(result.output):
         return False
-    failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+    failed = [check for check in state.get("focused_check_results", [])
+              if check["status"] not in ("pass", "skipped")]
     if not failed:
         return False
     report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
@@ -1569,7 +1570,8 @@ def _complete_internal_review(state: dict, result) -> None:
     if handle_result(state, result, "INTERNAL_REVIEW"):
         return
     if check_plan.reported(result.output):
-        failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+        failed = [check for check in state.get("focused_check_results", [])
+                  if check["status"] not in ("pass", "skipped")]
         if failed:
             report = {"status": "fail", "checks": [dict(check, gate={"status": "fail",
                       "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}

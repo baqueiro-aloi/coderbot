@@ -38,7 +38,7 @@ def run(state, repo, store):
         if result["status"] == "not_run":
             gate = {"status": "fail", "preexisting": [], "regressions": [],
                     "reason": "0 tests executed: fix test discovery/selection or drop the check from CHECK_PLAN"}
-        elif result["status"] == "pass":
+        elif result["status"] in ("pass", "skipped"):
             gate = {"status": "pass", "preexisting": [], "regressions": []}
         elif result["status"] == "fail" and state.get("base_sha"):
             baseline = baseline_result(check, repo, state["base_sha"], store)
@@ -50,6 +50,6 @@ def run(state, repo, store):
         else:
             gate = {"status": "indeterminate", "preexisting": [], "regressions": []}
         outcomes.append({**result, "gate": gate})
-    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(r["gate"]["status"] == "pass" and r["status"] == "pass" for r in outcomes)
+    return {"snapshot": snapshot(repo), "status": "pass" if outcomes and all(r["gate"]["status"] == "pass" and r["status"] in ("pass", "skipped") for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)
             else "fail", "checks": outcomes}

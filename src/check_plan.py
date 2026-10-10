@@ -18,8 +18,12 @@ class Check:
     scope: str = "full"
     preparation: dict | None = None
     dependency_inputs: list[str] | None = None
+    # Optional checks (e.g. live calls to a third-party API) are skipped, not failed,
+    # when any of their env_keys has no value.
+    optional: bool = False
 
     def __post_init__(self):
+        self.optional = self.optional is True  # agent JSON may send "no"/"false" strings
         if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
             raise ValueError("Check requires id and nonempty argv strings")
         if self.timeout <= 0 or self.scope not in ("full", "focused"):
@@ -32,7 +36,14 @@ class Check:
             raise ValueError("Check dependency inputs must be nonempty strings")
 
     def to_dict(self):
-        return asdict(self)
+        value = asdict(self)
+        if not value["optional"]:
+            # Omitted when false so state written by this code still loads in older code.
+            value.pop("optional")
+        return value
+
+    def missing_credentials(self, environ) -> list[str]:
+        return [name for name in self.env_keys if not (environ.get(name) or "").strip()]
 
 
 def parse(value):
