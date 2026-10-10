@@ -4164,6 +4164,9 @@ def _git_quiet(*args: str) -> bool:
     except subprocess.TimeoutExpired:
         log.debug("git %s timed out after %ss", " ".join(args), config.SUBPROCESS_TIMEOUT_SECONDS)
         return False
+    except OSError as error:  # e.g. argument list too long; the docstring promises no raise
+        log.debug("git %s could not start: %s", " ".join(args[:3]), error)
+        return False
     if proc.returncode != 0:
         log.debug("git %s -> rc=%d: %s", " ".join(args), proc.returncode, proc.stderr.strip()[:200])
     return proc.returncode == 0
@@ -4194,11 +4197,15 @@ def _preserve_uncommitted(label: str) -> str | None:
     never prevents the reset: the next task must still start clean. Returns a note for
     the user, or None when there was nothing to preserve."""
     try:
-        keep = [p for p in _uncommitted_paths() if not _looks_like_evidence(p)]
+        paths = _uncommitted_paths()
+        keep = [p for p in paths if not _looks_like_evidence(p)]
         if not keep:
             return None
         title = f"codebot: {label}"
-        if _git_quiet("stash", "push", "--include-untracked", "-m", title, "--", *keep):
+        # Without evidence to exclude, stash everything with no pathspec: thousands of
+        # untracked paths on the command line could exceed ARG_MAX and lose them to clean.
+        pathspec = ["--", *keep] if len(keep) < len(paths) else []
+        if _git_quiet("stash", "push", "--include-untracked", "-m", title, *pathspec):
             return (f"uncommitted changes ({len(keep)} path(s)) were saved in git stash "
                     f"'{title}' before the reset; `git stash list` shows it")
         stamp = time.strftime("%Y%m%d-%H%M%S")

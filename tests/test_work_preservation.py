@@ -119,5 +119,29 @@ class SecretNames(unittest.TestCase):
             self.assertFalse(main._looks_like_secret(path), path)
 
 
+
+class ManyUntracked(Repo):
+    def test_many_untracked_files_without_evidence_use_no_pathspec(self):
+        for i in range(50):
+            (self.repo / f"f{i}.txt").write_text(str(i))
+        calls = []
+        real = main._git_quiet
+
+        def spy(*args):
+            calls.append(args)
+            return real(*args)
+
+        with patch.object(main, "_git_quiet", side_effect=spy):
+            main._reset_to_base_branch("many")
+        stash = next(c for c in calls if c[0] == "stash")
+        self.assertNotIn("--", stash)
+        self.assertTrue(self.clean())
+        self.assertIn("codebot: many", run(self.repo, "stash", "list").stdout)
+
+    def test_git_quiet_never_raises_on_oserror(self):
+        with patch.object(main.subprocess, "run", side_effect=OSError("Argument list too long")):
+            self.assertFalse(main._git_quiet("status"))
+
+
 if __name__ == "__main__":
     unittest.main()
