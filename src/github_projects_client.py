@@ -27,6 +27,11 @@ import urllib.request
 
 import config
 import ownership
+import safe_download
+
+# Hosts that may receive the GitHub token when fetching issue images.
+GITHUB_IMAGE_HOSTS = ("github.com", "api.github.com", "githubusercontent.com")
+MAX_IMAGES = 10
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -406,19 +411,22 @@ def _download_images(task: dict) -> list[str]:
         return []
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
     paths = []
-    for index, url in enumerate(urls):
-        ext = os.path.splitext(urllib.parse.urlparse(url).path)[1][:8] or ".png"
+    if len(urls) > MAX_IMAGES:
+        log.warning("issue #%s has %d images; downloading the first %d", task["number"], len(urls), MAX_IMAGES)
+    for index, url in enumerate(urls[:MAX_IMAGES]):
+        ext = re.sub(r"[^A-Za-z0-9.]", "", os.path.splitext(urllib.parse.urlparse(url).path)[1])[:8] or ".png"
         dest = IMAGES_DIR / f"issue{task['number']}-{index}{ext}"
         try:
+            # The token goes only to GitHub-owned hosts (never to "https://evil/github.png")
+            # and is dropped if GitHub redirects to a signed URL elsewhere.
+            data = safe_download.download(url, auth_hosts=GITHUB_IMAGE_HOSTS,
+                                          authorization=f"Bearer {token}" if token else None,
+                                          content_type_prefix="image/")
             IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-            request = urllib.request.Request(url, headers={"User-Agent": "codebot"})
-            if token and "github" in url:
-                request.add_header("Authorization", f"Bearer {token}")
-            with urllib.request.urlopen(request, timeout=60) as resp:  # noqa: S310
-                dest.write_bytes(resp.read())
+            dest.write_bytes(data)
             paths.append(str(dest))
-        except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
-            log.exception("could not download image %s for issue #%s", url, task["number"])
+        except Exception as error:  # noqa: BLE001 — a lost screenshot must not block the backlog
+            log.warning("could not download image %s for issue #%s: %s", url, task["number"], error)
     log.info("downloaded %d/%d image(s) for issue #%s", len(paths), len(urls), task["number"])
     return paths
 

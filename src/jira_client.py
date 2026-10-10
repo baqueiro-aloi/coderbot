@@ -15,6 +15,7 @@ from pathlib import Path
 
 import config
 import ownership
+import safe_download
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -126,12 +127,11 @@ def _download_images(issue: dict) -> list[str]:
         dest = IMAGES_DIR / f"{attachment.get('id', 'image')}-{name}"
         try:
             token = base64.b64encode(f"{config.JIRA_EMAIL}:{config.JIRA_API_TOKEN}".encode()).decode()
-            request = urllib.request.Request(url, headers={"Authorization": f"Basic {token}"})
-            with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
-                data = response.read(10 * 1024 * 1024 + 1)
-            if len(data) > 10 * 1024 * 1024:
-                log.warning("Jira image %s exceeds the 10 MB download limit", name)
-                continue
+            # Basic auth goes only to the configured Jira site; a redirect to a media CDN
+            # (signed URL) continues without it.
+            data = safe_download.download(
+                url, auth_hosts=(urllib.parse.urlparse(config.JIRA_URL).netloc,),
+                authorization=f"Basic {token}", timeout=_TIMEOUT, content_type_prefix="image/")
             IMAGES_DIR.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
             images.append(str(dest))

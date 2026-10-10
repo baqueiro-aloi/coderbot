@@ -7,6 +7,7 @@ under us — another instance claiming, the user typing — fails the write inst
 landing on shifted indexes; the caller re-reads and retries."""
 import logging
 import re
+import urllib.parse
 
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
@@ -14,6 +15,7 @@ from googleapiclient.errors import HttpError
 
 import config
 import ownership
+import safe_download
 from google_auth import load_credentials
 from task_text import PRIORITY_RE, normalize, priority_of  # noqa: F401 — re-exported
 
@@ -21,6 +23,7 @@ log = logging.getLogger(__name__)
 
 # Inline doc images are downloaded here so the working Claude session can Read them.
 IMAGES_DIR = config.DATA_DIR / "doc_images"
+IMAGE_HOSTS = ("googleusercontent.com", "google.com")  # inline image contentUri hosts
 
 # Per nesting level, when rendering a task's sub-bullets. Levels are used as the doc
 # reports them (it skips levels — a top-level bullet may have level-2 children), so the
@@ -199,14 +202,24 @@ def _download_images(document: dict, object_ids: list[str]) -> list[str]:
             continue
         dest = IMAGES_DIR / (re.sub(r"[^A-Za-z0-9_.-]", "_", oid) + ".png")
         try:
+            host = urllib.parse.urlparse(uri)
+            if host.scheme != "https" or not safe_download.host_allowed(host.hostname, IMAGE_HOSTS):
+                log.warning("inline object %s points outside Google (%s); skipping", oid, host.netloc)
+                continue
             if session is None:
                 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
                 session = AuthorizedSession(load_credentials())
-            resp = session.get(uri, timeout=60)
+            resp = session.get(uri, timeout=60, stream=True)
             resp.raise_for_status()
-            dest.write_bytes(resp.content)
+            length = resp.headers.get("Content-Length", "")
+            if length.isdigit() and int(length) > safe_download.MAX_BYTES:
+                raise ValueError(f"image is {length} bytes; limit is {safe_download.MAX_BYTES}")
+            content = resp.raw.read(safe_download.MAX_BYTES + 1, decode_content=True)
+            if len(content) > safe_download.MAX_BYTES:
+                raise ValueError(f"image exceeds the {safe_download.MAX_BYTES} byte limit")
+            dest.write_bytes(content)
             paths.append(str(dest))
-            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(resp.content))
+            log.debug("downloaded doc image %s -> %s (%d bytes)", oid, dest, len(content))
         except Exception:  # noqa: BLE001 — a lost screenshot must not block the backlog
             log.exception("could not download doc image %s", oid)
     if object_ids:
