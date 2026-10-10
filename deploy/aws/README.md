@@ -23,12 +23,12 @@ Everything durable lives on the agent's volume, mounted at `/mnt/coderbot`:
 
 | Path | Holds |
 |---|---|
-| `data/` | `state.json`, `instance_id`, `holds.json`, `processed_msgs.json`, `token.json`, transcripts, outbox |
+| `data/` | `state.json`, `instance_id`, `instance_fingerprint`, `holds.json`, `processed_msgs.json`, `slack_inbox.sqlite` (Slack mode), `token.json` (Google modes), transcripts, outbox |
 | `claude/` | the bot's `~/.claude`: `.credentials.json` and the session files `claude --resume` reads |
 | `repo/<target>` | the target repo working copy, including uncommitted agent work |
 | `coderbot/` | this repository at the pinned ref (the build context) |
 | `docker/` | Docker's data-root: image layers, build cache, the e2e stack's images |
-| `codebot.env`, `agent.env`, `claude.json` | the shared `.env`, the per-agent overrides, the `~/.claude.json` seed |
+| `codebot.env`, `agent.env`, `agent.local.env`, `claude.json` | shared `.env`, generated per-agent values, optional per-agent Slack tokens, Claude config seed |
 
 On a Spot notice (or a rebalance recommendation) the watcher on the instance stops
 the container, which makes `src/main.py` drop its in-flight tick and exit within
@@ -46,8 +46,8 @@ Boot-to-running is about a minute once the image cache exists.
 - A VPC with a public subnet (instances get a public IP and only make outbound
   connections; there is no NAT gateway). The default VPC works.
 - The files coderbot needs, produced once on your machine by `scripts/setup.sh`:
-  `.env` (with `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`), `data/token.json`,
-  `data/credentials.json`, `~/.claude/.credentials.json`, `~/.claude.json`.
+  `.env` (with `GH_TOKEN` and credentials for the chosen backlog/channel),
+  plus Google OAuth and Claude credentials if those integrations are selected.
 - `CODEBOT_INSTANCE` and `CODEBOT_REPO_PATH` in that `.env` are ignored: each agent
   gets its own from the stack.
 
@@ -82,8 +82,8 @@ Day two:
 | `deploy.sh shell NAME` | interactive shell on the instance (SSM, no SSH keys or open ports) |
 | `deploy.sh destroy NAME` | delete the stack; the volume is snapshotted first |
 
-To retire an agent that is mid-task, send it `ABORT <name>` by email first (see the
-main README) so it unclaims the task, then `destroy`.
+To retire an agent mid-task, issue `ABORT <name>` by email or reply `ABORT` in
+its Slack task thread so it unclaims the task, then `destroy`.
 
 ## Cost per agent
 
@@ -105,8 +105,16 @@ Roughly $25-35 per agent against $60+ on-demand for the same size.
   subnet's AZ. If Spot capacity for all five types dries up there, the agent is down
   until it returns. Escape hatches: `--on-demand-pct 100` (redeploys nothing else),
   or snapshot the volume and redeploy with `--snapshot` into another subnet.
-- **Shared credentials.** All agents use one `.env` (one Gmail account, one GitHub
-  token, one Claude login). Identity is the `CODEBOT_INSTANCE` override per stack.
+- **Shared credentials.** Agents may share the GitHub token and Gmail account
+  from `codebot.env`, but Slack requires **a distinct app and token pair per
+  agent**. Place `CODEBOT_SLACK_BOT_TOKEN=xoxb-...` and
+  `CODEBOT_SLACK_APP_TOKEN=xapp-...` in `/mnt/coderbot/agent.local.env` on each
+  agent's persistent volume (and optionally override channel/source there).
+  `boot.sh` refuses to start Slack mode without that per-agent file and merges
+  it into the generated `agent.env` after shared values on every boot. Never put
+  one shared Slack app token in the common `.env`. Identity is the
+  `CODEBOT_INSTANCE` override per stack, distinguished by each volume's
+  `data/instance_fingerprint`.
 - **The image is built on the instance.** The first boot of an agent takes several
   minutes; later boots reuse the build cache on the volume. There is no registry.
 - **Unclean stops.** A hard reclaim without the two-minute notice leaves the volume

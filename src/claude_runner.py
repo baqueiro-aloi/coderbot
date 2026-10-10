@@ -3,10 +3,14 @@ import json
 import logging
 import os
 import subprocess
+import signal
 import time
 from pathlib import Path
 
 import config
+import handoffs
+import turn_control
+import operations
 
 log = logging.getLogger(__name__)
 
@@ -25,18 +29,28 @@ be committed to the git repo, added to a branch, or pushed as part of a PR — t
 is for application and test code only, never for recorded proof. Whenever you produce
 evidence, or the user asks you to "attach" evidence, save the file(s) under
 {OUTBOX_DIR}/ and list each one's ABSOLUTE path on its own line starting with
-`ATTACH: ` in your response; codebot attaches them to the relevant email itself. This
+`ATTACH: ` in your response; codebot shares them in the task's conversation thread. This
 applies in every phase (implementing, addressing review feedback, answering a
 question) — not only when you use the NEED_USER_INPUT mechanism below.
+Questions, decisions, recommendations and context needed for a reply MUST also
+appear as readable prose in your response. Never make the user open ATTACH files
+or read raw JSON to discover what you are asking. Attach logs/specs/full technical
+reports as supporting material, not as a replacement for the conversation.
 """
 
 SENTINEL_CONTRACT = f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`
-followed by the full question and all context needed to answer it by email,
-then stop working. Otherwise finish the work and summarize what you did.
+followed by exactly one self-contained question. Put each numbered option on its
+own following line, then stop working and wait for that answer. Do not repeat the
+question in your preceding summary or ask another decision in the same turn.
+Otherwise finish the work and summarize what you did.
+Make the question self-contained: explain the decision, available options and
+important consequences in plain language. Do not emit only 'answer the attached
+question' or put the actionable request solely in an attachment.
 {EVIDENCE_CONTRACT}
+{handoffs.DECISION_INSTRUCTIONS}
 Each of your turns is a brand-new, one-shot headless process: nothing monitors
 this session between invocations. If you start a background process (including
 via the Bash tool's run_in_background), it is orphaned the moment this turn
@@ -146,8 +160,12 @@ def _restore_config() -> bool:
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=config.REPO_PATH, capture_output=True, text=True,
-                          timeout=config.AGENT_TIMEOUT_SECONDS)
+    env = dict(os.environ)
+    # Overrides inherited/project defaults, including headless Claude's manual default.
+    env["CAVEMAN_DEFAULT_MODE"] = (
+        "caveman" if config.USE_CAVEMAN and "--tools" not in cmd else "off")
+    return operations.run(cmd, cwd=config.REPO_PATH, timeout=config.AGENT_TIMEOUT_SECONDS,
+                          kind="agent", env=env)
 
 
 # Monotonic deadline until which _active_model() keeps returning the fallback model.
@@ -182,6 +200,7 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
     return "limit" in str(data.get("result", "")).lower()
 
 
+@operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
 def _invoke(args: list[str], prompt: str) -> ClaudeResult:
     global _fallback_until
     proc, model = _invoke_with_model(args, prompt, _active_model())
@@ -211,7 +230,14 @@ def _invoke_with_model(args: list[str], prompt: str,
            "--effort", config.CLAUDE_EFFORT,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
+           "--plugin-dir", str(config.OPENSPEC_SKILLS_DIR),
            "--dangerously-skip-permissions", "--output-format", "json"]
+    if "--tools" in args:
+        for _ in range(3):
+            index = cmd.index("--plugin-dir")
+            del cmd[index:index + 2]
+    elif config.USE_CAVEMAN:
+        cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
              " ".join(args) or "run", model, config.CLAUDE_EFFORT,
              len(prompt), _config_report())
@@ -246,6 +272,9 @@ def run(prompt: str, contract: bool = True) -> ClaudeResult:
     # the JSON contract in their own prompt — the sentinel contract would otherwise let
     # a classifier emit NEED_USER_INPUT instead of JSON and loop the reply forever.
     full = SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+    if not contract:
+        with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
+            return _invoke(["--tools", ""], full)
     return _invoke([], full)
 
 

@@ -23,6 +23,9 @@ class AgentLogTests(unittest.TestCase):
         patcher = patch.object(main, "TRANSCRIPT_DIR", self.dir / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
+        sender = patch.object(main.gmail_client, "send", return_value="test-thread")
+        sender.start()
+        self.addCleanup(sender.stop)
         self.state = {"slug": "add-widget", "branch": "codebot-a-add-widget",
                       "item": "Add a widget"}
 
@@ -57,7 +60,8 @@ class AgentLogTests(unittest.TestCase):
         self.assertIn("waiting for a reply", self.log_text())
 
         self.state["question_rounds"] = main.config.QUESTION_MAX_ROUNDS
-        main.handle_result(self.state, result("body", question="still?"), "IMPLEMENTING")
+        with patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread", "complete": True}):
+            main.handle_result(self.state, result("body", question="still?"), "IMPLEMENTING")
         self.assertIn("escalated to WAIT_STUCK", self.log_text())
 
     def test_write_failure_never_breaks_the_phase(self):

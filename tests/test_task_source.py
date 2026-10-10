@@ -36,9 +36,12 @@ class Dispatch(unittest.TestCase):
     def test_github(self):
         self.check("github", "github_projects_client")
 
+    def test_jira(self):
+        self.check("jira", "jira_client")
+
     def test_unknown_source_raises(self):
-        with patch.object(config, "TASK_SOURCE", "jira"):
-            with self.assertRaisesRegex(RuntimeError, "CODEBOT_TASK_SOURCE.*gdoc, github"):
+        with patch.object(config, "TASK_SOURCE", "trello"):
+            with self.assertRaisesRegex(RuntimeError, "CODEBOT_TASK_SOURCE.*gdoc, github, jira"):
                 task_source.list_pending_items()
 
     def test_normalize_is_shared(self):

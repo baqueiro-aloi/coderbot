@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(), "gmail_client": Mock()}):
@@ -175,22 +176,54 @@ class ThreadHelpers(unittest.TestCase):
 
 
 class MergeGate(unittest.TestCase):
+    def test_repair_handoff_refreshes_snapshot_and_next_merge_succeeds(self):
+        state = self.state()
+        state.update(state="PUSHING", reviewed_pr_snapshot="old", pr_threads=[],
+                     push_context={"continuation": "threads", "output": "Fixed"})
+        with patch.object(main, "_resolve_review_threads", return_value=0), \
+             patch.object(main, "content_snapshot", return_value="repaired"):
+            main._finish_address_pr_threads(state)
+            self.assertEqual(state["reviewed_pr_snapshot"], "repaired")
+            self.assertEqual(state["state"], "WAIT_MERGE")
+            email, finish, merge = self.run_merge(state, threads=[], reply="merge")
+        merge.assert_called_once()
+        finish.assert_called_once()
+
+    def test_changes_after_repair_handoff_still_block_merge(self):
+        state = self.state()
+        state["reviewed_pr_snapshot"] = "repaired"
+        with patch.object(main, "content_snapshot", return_value="changed-again"):
+            email, finish, merge = self.run_merge(state, threads=[], reply="merge")
+        merge.assert_not_called()
+        finish.assert_not_called()
+        self.assertIn("content changed", email.call_args.args[2])
+
+    def test_wait_log_describes_new_pending_replies_not_missing_history(self):
+        state = self.state()
+        state.update(thread_id="C123:1", last_email={"subject": "merge blocked"})
+        with patch.object(main.gmail_client, "poll_reply", return_value=None), \
+             patch.object(main.log, "debug") as log:
+            main.handle_wait(state)
+        self.assertIn("no new unprocessed replies", log.call_args.args[0])
+        self.assertEqual(log.call_args.args[-1], "merge blocked")
+
     def state(self):
         return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
                 "session_id": "sid", "pr_url": PR}
 
-    def run_merge(self, state, threads, force=None, mergeable="MERGEABLE"):
+    def run_merge(self, state, threads, force=None, mergeable="MERGEABLE", reply="merge if review is clear"):
         v = {"action": "merge"}
         if force is not None:
             v["force"] = force
         with patch.object(main.agent_runner, "run", return_value=verdict(**v)), \
+             patch.object(main, "trail"), \
              patch.object(main, "_pr_merge_state", return_value=("OPEN", mergeable)), \
              patch.object(main, "unresolved_review_threads", return_value=threads), \
              patch.object(main, "email") as email, \
              patch.object(main, "_finish_task") as finish, \
              patch.object(main.subprocess, "run",
                           return_value=subprocess.CompletedProcess([], 0, "", "")) as merge:
-            main.do_merge_reply(state, "merge")
+            main.do_merge_reply(state, reply)
         return email, finish, merge
 
     def test_failed_thread_query_blocks(self):
@@ -214,6 +247,14 @@ class MergeGate(unittest.TestCase):
         email, finish, merge = self.run_merge(self.state(), threads=[human()], force=True)
         merge.assert_called_once()
         finish.assert_called_once()
+
+    def test_plain_merge_and_merge_anyway_bypass_review_gate_without_classifier(self):
+        for reply in ("merge", "merge anyway", "MERGE!", "fusiona"):
+            with self.subTest(reply=reply):
+                email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
+                merge.assert_called_once()
+                finish.assert_called_once()
+                email.assert_not_called()
 
     def test_clean_pr_merges(self):
         email, finish, merge = self.run_merge(self.state(), threads=[])
@@ -298,7 +339,7 @@ class Conflicts(unittest.TestCase):
 
     def test_resolution_with_commit_queues_push_for_re_review(self):
         state = {"state": "RESOLVE_CONFLICTS", "branch": "b", "session_id": "sid", "pr_url": PR,
-                 "conflict_return": "WAIT_MERGE", "stale_replies": True}
+                 "conflict_return": "WAIT_MERGE", "stale_replies": True, "has_code_review": True}
         with patch.object(main, "git", side_effect=["head-1", "head-2"]), \
              patch.object(main.agent_runner, "resume", return_value=Mock(
                  session_id="sid", output="merged", question=None, attachments=[])), \
@@ -306,7 +347,7 @@ class Conflicts(unittest.TestCase):
             main.do_resolve_conflicts(state)
         self.assertEqual(state["state"], "PUSHING")
         self.assertEqual(state["push_context"]["continuation"], "conflicts")
-        with patch.object(main, "git"):
+        with patch.object(main, "git"), patch.object(main.final_checks, "run", return_value={"status": "pass"}):
             main.do_push(state)
         self.assertEqual(state["state"], "WAIT_REVIEW")
         self.assertTrue(state["await_new_run"])
@@ -326,7 +367,7 @@ class Conflicts(unittest.TestCase):
 
 class ReviewWait(unittest.TestCase):
     def state(self):
-        return {"state": "WAIT_REVIEW", "item": "t", "pr_url": PR, "review_since": 0,
+        return {"state": "WAIT_REVIEW", "item": "t", "pr_url": PR, "review_since": time.time(),
                 "e2e_specs": [], "await_new_run": True}
 
     def test_new_run_with_ocr_threads_enters_address_review(self):
@@ -379,7 +420,7 @@ class MergeWait(unittest.TestCase):
         with patch.object(main, "unresolved_review_threads", return_value=[human()]), \
              patch.object(main, "handle_wait") as wait:
             main.handle_merge_wait(state)
-        wait.assert_not_called()
+            wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
         self.assertEqual(state["pr_threads"][0]["id"], "H1")
 
@@ -396,7 +437,7 @@ class MergeWait(unittest.TestCase):
         with patch.object(main, "unresolved_review_threads", return_value=[human_thread()]), \
              patch.object(main, "handle_wait") as wait:
             main.handle_merge_wait(state)
-        wait.assert_not_called()
+            wait.assert_called_once()
         self.assertEqual(state["state"], "ADDRESS_PR_THREADS")
 
 

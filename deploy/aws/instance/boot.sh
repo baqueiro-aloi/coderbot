@@ -22,8 +22,6 @@ umask 077
 mkdir -p "$MNT/data" "$MNT/claude" "$MNT/repo"
 seed env                "$MNT/codebot.env"
 seed claude-credentials "$MNT/claude/.credentials.json"
-seed google-token       "$MNT/data/token.json"
-seed google-credentials "$MNT/data/credentials.json"
 seed claude-json        "$MNT/claude.json" || echo '{}' > "$MNT/claude.json"
 
 # The target repo checkout (the agent's working copy; uncommitted work lives here).
@@ -40,6 +38,34 @@ cat > "$MNT/agent.env" <<EOA
 CODEBOT_INSTANCE=$AGENT_NAME
 CODEBOT_REPO_PATH=$TARGET_DIR
 EOA
+# Per-agent secrets on the EBS volume are retained between boots and appended
+# AFTER shared values so two Slack instances never reuse one app/token pair.
+if [ -s "$MNT/agent.local.env" ]; then
+  chmod 600 "$MNT/agent.local.env"
+  cat "$MNT/agent.local.env" >> "$MNT/agent.env"
+fi
+# Last occurrence in the combined env wins, including per-agent overrides.
+setting() { grep -h "^$1=" "$MNT/codebot.env" "$MNT/agent.env" | tail -n1 | cut -d= -f2-; }
+source=$(setting CODEBOT_TASK_SOURCE)
+channel=$(setting CODEBOT_COMM_CHANNEL)
+upload=$(setting CODEBOT_EVIDENCE_UPLOAD)
+if [ "${channel:-email}" = slack ]; then
+  for setting in CODEBOT_SLACK_BOT_TOKEN CODEBOT_SLACK_APP_TOKEN; do
+    if [ ! -s "$MNT/agent.local.env" ] || ! grep -Eq "^${setting}=.+" "$MNT/agent.local.env"; then
+      echo "Slack mode requires $setting in $MNT/agent.local.env (unique per agent)" >&2
+      exit 1
+    fi
+  done
+fi
+chmod 600 "$MNT/agent.env"
+
+# Shared Google secrets may be placeholders in Jira+Slack without Drive. Check
+# the effective per-agent settings, not just the shared .env, before seeding.
+if [ "${source:-gdoc}" = gdoc ] || [ "${channel:-email}" = email ] || \
+   ! [[ "$upload" =~ ^(off|false|0|no)$ ]]; then
+  seed google-token       "$MNT/data/token.json"
+  seed google-credentials "$MNT/data/credentials.json"
+fi
 
 chown -R "$BOT_UID" "$MNT/data" "$MNT/claude" "$MNT/repo" "$MNT/coderbot"
 chown "$BOT_UID" "$MNT/codebot.env" "$MNT/agent.env" "$MNT/claude.json"

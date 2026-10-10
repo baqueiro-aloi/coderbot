@@ -32,7 +32,7 @@ have one. Every backend accepts an identity-less call and matches on text.
 import config
 from task_text import normalize  # noqa: F401 — part of the façade's surface
 
-SOURCES = ("gdoc", "github")
+SOURCES = ("gdoc", "github", "jira")
 
 
 def _impl():
@@ -42,6 +42,9 @@ def _impl():
     if config.TASK_SOURCE == "github":
         import github_projects_client
         return github_projects_client
+    if config.TASK_SOURCE == "jira":
+        import jira_client
+        return jira_client
     raise RuntimeError(f"unsupported CODEBOT_TASK_SOURCE: {config.TASK_SOURCE!r} "
                        f"(expected one of {', '.join(SOURCES)})")
 

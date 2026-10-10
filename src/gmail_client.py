@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import re
+from html import escape
 from email.message import EmailMessage
 from email.utils import parseaddr
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 from googleapiclient.discovery import build
 
 import config
+from command_text import COMMANDS, parse_command
 from google_auth import load_credentials
 
 try:
@@ -71,7 +73,8 @@ def _extract_body(payload: dict) -> str:
 
 
 def send(subject: str, body: str, thread_id: str | None = None,
-         attachments: list[Path] | None = None) -> str:
+         attachments: list[Path] | None = None, *, progress: Path | None = None,
+         delivery_id: str | None = None) -> str:
     """Send an email to the user; returns the Gmail thread id."""
     service = _gmail()
     msg = EmailMessage()
@@ -82,6 +85,8 @@ def send(subject: str, body: str, thread_id: str | None = None,
     msg["From"] = primary
     # Same account sends and receives; this header lets poll_reply skip our own mail.
     msg["X-Codebot"] = "1"
+    if delivery_id:
+        msg["Message-ID"] = f"<{delivery_id}@coderbot.local>"
     skipped = []
 
     if thread_id:
@@ -97,7 +102,6 @@ def send(subject: str, body: str, thread_id: str | None = None,
         # everything on this id). Only replies have it: a brand-new thread's id is
         # assigned by Gmail on send, after the body is fixed, so its first message can't
         # carry it — every later message in the thread does.
-        body = f"Thread: {thread_id}\n\n{body}"
     else:
         msg["Subject"] = subject
 
@@ -118,13 +122,25 @@ def send(subject: str, body: str, thread_id: str | None = None,
     # Attach an HTML alternative so Gmail renders Markdown instead of showing raw
     # '#', '*', '`' etc. Must be added before any attachment (multipart ordering).
     html = _markdown_to_html(body)
+    if progress is not None:
+        html = (html or f"<div>{escape(body).replace(chr(10), '<br>')}</div>")
+        html += ('<p><img src="cid:codebot-progress" alt="'
+                 + escape(progress.stem.replace('_', ' ').title(), quote=True)
+                 + ' progress diagram" style="max-width:100%;height:auto"></p>')
     if html:
         msg.add_alternative(html, subtype="html")
+        if progress is not None:
+            html_part = msg.get_body(preferencelist=("html",))
+            assert html_part is not None
+            html_part.add_related(progress.read_bytes(), maintype="image",
+                                  subtype="png", cid="<codebot-progress>",
+                                  filename=progress.name)
     for path in files:
-        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        from attachments import delivery_name
+        ctype = mimetypes.guess_type(delivery_name(path))[0] or "application/octet-stream"
         maintype, subtype = ctype.split("/", 1)
         log.debug("attaching %s (%s, %d bytes)", path.name, ctype, path.stat().st_size)
-        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
+        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=delivery_name(path))
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     payload = {"raw": raw}
@@ -134,6 +150,56 @@ def send(subject: str, body: str, thread_id: str | None = None,
     log.info("sent message id=%s thread=%s (%d attachment(s), %d bytes total)",
              sent["id"], sent["threadId"], len(files), total)
     return sent["threadId"]
+
+
+def attachment_limits():
+    return {"file": config.MAX_ATTACHMENT_BYTES - 65536, "mime": True}
+
+
+def send_envelope(envelope, receipts, confirm):
+    """Separate file messages make failed attachments independently retryable."""
+    thread = envelope.get("thread_id")
+    if receipts.get("body", {}).get("status") == "uncertain":
+        return thread
+    if receipts.get("body", {}).get("status") != "confirmed":
+        confirm("body", {"status": "uncertain"})
+        try:
+            body = envelope["body"]
+            for artifact in envelope["attachments"]:
+                body = body.replace(f": attached {artifact['filename']}",
+                                    f": delivery queued ({artifact['filename']})")
+            thread = send(envelope["subject"], body, thread, delivery_id=envelope["id"] + "-body")
+            confirm("body", {"status": "confirmed", "thread_id": thread})
+        except Exception as error:
+            confirm("body", {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                             "error": type(error).__name__})
+            return thread
+    else:
+        thread = receipts["body"].get("thread_id", thread)
+    for artifact in envelope["attachments"]:
+        key = artifact["id"]
+        if receipts.get(key, {}).get("status") in ("confirmed", "uncertain"):
+            continue
+        confirm(key, {"status": "uncertain"})
+        try:
+            thread = send(envelope["subject"], "Diagnostic/supporting file: " + artifact["filename"],
+                          thread, [Path(artifact["path"])], delivery_id=envelope["id"] + "-" + key)
+            confirm(key, {"status": "confirmed", "thread_id": thread})
+        except Exception as error:
+            confirm(key, {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
+                          "error": type(error).__name__})
+    return thread
+
+
+def reconcile_delivery(envelope, key, receipt):
+    identity = envelope["id"] + "-" + key
+    result = _gmail().users().messages().list(userId="me",
+        q=f"in:sent rfc822msgid:{identity}@coderbot.local", maxResults=1).execute()
+    messages = result.get("messages", [])
+    if messages:
+        return {"status": "confirmed", "thread_id": messages[0].get("threadId"),
+                "provider_ids": [messages[0]["id"]]}
+    return None
 
 
 def _processed_path():
@@ -164,32 +230,6 @@ def mark_processed(message_id: str) -> None:
         _save_processed(processed)
 
 
-COMMANDS = ("ABORT", "STATUS", "DONE", "HOLD", "PAUSE", "CONTINUE", "RESUME")
-# Canonical command per accepted spelling.
-_ALIASES = {"PAUSE": "HOLD", "RESUME": "CONTINUE"}
-# Trailing punctuation ("status ?", "STATUS!") is tolerated: users naturally add it,
-# and an unmatched command falls through to the reply classifiers as ordinary text.
-_CMD_RE = re.compile(r"^(ABORT|STATUS|DONE|HOLD|PAUSE)(?:\s+([\w.-]*[\w-]))?\s*[?!.]*\s*$",
-                     re.IGNORECASE)
-# CONTINUE/RESUME may carry a free-form note after the word ("continue, but use option
-# B"), which is handed to the resumed task. An optional instance target comes first.
-_CONTINUE_RE = re.compile(
-    r"^(CONTINUE|RESUME)\b(?:\s+(codebot[\w.-]*[\w-]))?\s*[:,.!-]*\s*(.*)$",
-    re.IGNORECASE | re.DOTALL)
-
-
-def parse_command(body: str) -> tuple[str, str, str] | None:
-    """(COMMAND, target, note) for a command-shaped body, else None. `target` is the
-    lower-cased instance name when the user named one ("" otherwise); `note` is the
-    free text after a CONTINUE ("" for every other command)."""
-    text = body.strip()
-    m = _CMD_RE.match(text)
-    if m:
-        return _ALIASES.get(m.group(1).upper(), m.group(1).upper()), (m.group(2) or "").lower(), ""
-    m = _CONTINUE_RE.match(text)
-    if m:
-        return "CONTINUE", (m.group(2) or "").lower(), m.group(3).strip()
-    return None
 # The leading "[<instance>]" tag every codebot subject starts with (after Re:/Fwd:).
 _THREAD_TAG_RE = re.compile(r"^\s*(?:(?:re|fwd?):\s*)*\[([a-z0-9-]+)\]", re.IGNORECASE)
 
@@ -261,11 +301,36 @@ def poll_command() -> tuple[str, str, str, bool, str] | None:
     instance name, and addressed to this instance (see command_for_me) so it can't fire by
     accident — and so a command for one instance is never executed by another.
     """
+    return _poll_command()
+
+
+def poll_status(thread_id: str | None = None) -> tuple[str, str] | None:
+    """Only look for status inquiries while the coding turn holds the main loop."""
+    found = _poll_command(only_status=True)
+    return (found[0], found[1]) if found else None
+
+
+def poll_kick(thread_id: str | None = None) -> tuple[str, str] | None:
+    """A targeted or task-thread KICK; never consume other mailbox commands."""
+    found = _poll_command(only_kick=True)
+    return (found[0], found[1]) if found else None
+
+
+def poll_verify(thread_id: str | None = None):
+    found = _poll_command(only_verify=True)
+    if found and (found[3] or found[1] == thread_id):
+        return found
+    return None
+
+
+def _poll_command(*, only_status: bool = False,
+                  only_kick: bool = False, only_verify: bool = False) -> tuple[str, str, str, bool, str] | None:
     service = _gmail()
     processed = _load_processed()
     listing = service.users().messages().list(
-        userId="me", q="(ABORT OR STATUS OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME) "
-                       "newer_than:2d -in:drafts", maxResults=25).execute()
+        userId="me", q=("STATUS " if only_status else "KICK " if only_kick else "VERIFY " if only_verify else
+                        "(ABORT OR STATUS OR KICK OR DONE OR HOLD OR PAUSE OR CONTINUE OR RESUME OR VERIFY) ")
+                       + "newer_than:2d -in:drafts", maxResults=25).execute()
     for meta in listing.get("messages", []):
         if meta["id"] in processed:
             continue
@@ -280,6 +345,12 @@ def poll_command() -> tuple[str, str, str, bool, str] | None:
             continue
         body = _strip_quoted(_extract_body(message.get("payload", {})))
         command = command_for_me(body, headers.get("subject", ""))
+        if only_status and command != "STATUS":
+            continue
+        if only_kick and command != "KICK":
+            continue
+        if only_verify and command != "VERIFY":
+            continue
         if command:
             _cmd, target, note = parse_command(body)
             log.warning("%s command received (msg %s, thread %s, targeted=%s)",

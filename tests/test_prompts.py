@@ -78,6 +78,13 @@ class PromptContractTests(unittest.TestCase):
             with self.subTest(prompt=name):
                 self.assertNotIn("subagent", getattr(prompts, name).lower())
 
+    def test_parallelism_forbids_nested_delegation_and_requires_direct_fallback(self):
+        instructions = " ".join(prompts.PARALLELISM.split())
+        self.assertIn("Only the primary agent may delegate", instructions)
+        self.assertIn("Include this restriction in every subagent brief", instructions)
+        self.assertIn("do not retry it or increase runtime limits", instructions)
+        self.assertIn("This fallback overrides all delegation requirements", instructions)
+
     def test_propose_creates_only_reviewable_openspec_artifacts(self):
         e2e_note = main._e2e_note({"has_e2e_harness": True, "e2e_kind": "playwright"})
         rendered = prompts.render(
@@ -169,12 +176,11 @@ class PromptContractTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "Run fresh, complete relevant verification commands in this phase; do not reuse "
-            "prior evidence.",
+            "Run focused checks for the affected behavior in this phase",
             rendered.replace("\n", " "),
         )
         self.assertIn(
-            "Strictly validate the active OpenSpec change and confirm all OpenSpec apply tasks "
+        "Strictly validate the active OpenSpec change and confirm all implementation tasks "
             "are complete.",
             rendered.replace("\n", " "),
         )
@@ -182,8 +188,8 @@ class PromptContractTests(unittest.TestCase):
         self.assertNotIn("Skip commands already run", rendered)
         # Pre-existing failures: confirmed against the base branch, never checked out in place.
         self.assertIn("A failing check never passes by being re-run or re-reported.", rendered)
-        self.assertIn("against `main` in a throwaway `git worktree`", rendered)
-        self.assertIn("never check out `main` in place", rendered)
+        self.assertIn("immutable base SHA `main`", rendered)
+        self.assertIn("isolated baseline worktree", rendered)
         self.assert_no_integration_authority(rendered)
         self.assertEqual(rendered.count(contract), 1)
         self.assertEqual(rendered.strip().splitlines()[-1], contract)

@@ -96,6 +96,15 @@ class ParseCommand(unittest.TestCase):
         self.assertIsNone(gmail_client.command_for_me("hold", "unrelated"))
         self.assertIsNone(gmail_client.command_for_me("continue", "unrelated"))
 
+    def test_kick_is_scoped_to_its_task_or_named_instance(self):
+        subj = f"Re: {config.SUBJECT_PREFIX} slug — status"
+        self.assertEqual(gmail_client.parse_command("kick?"), ("KICK", "", ""))
+        self.assertEqual(gmail_client.command_for_me("kick", subj), "KICK")
+        self.assertEqual(gmail_client.command_for_me(f"kick {config.INSTANCE_ID}", "unrelated"),
+                         "KICK")
+        self.assertIsNone(gmail_client.command_for_me("kick", "unrelated"))
+        self.assertIsNone(gmail_client.parse_command("kickoff"))
+
 
 class CommandScoping(unittest.TestCase):
     def test_done_is_a_command(self):
@@ -134,6 +143,41 @@ class CommandScoping(unittest.TestCase):
         self.assertIsNone(gmail_client.foreign_command(f"DONE {config.INSTANCE_ID}"))
         self.assertIsNone(gmail_client.foreign_command("ABORT"))
         self.assertIsNone(gmail_client.foreign_command("please abort that"))
+
+    def test_poll_status_skips_other_commands_without_marking_them_processed(self):
+        service = MagicMock()
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "abort"}, {"id": "status"}]}
+        abort, status = _msg("abort", "u@x.com", "ABORT"), _msg("status", "u@x.com", "status?")
+        abort["threadId"], status["threadId"] = "t", "t"
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = [abort, status]
+        with patch.object(gmail_client, "_gmail", return_value=service), \
+             patch.object(gmail_client, "_load_processed", return_value=[]), \
+             patch.object(gmail_client, "mark_processed") as processed, \
+             patch.object(gmail_client.config, "USER_EMAIL", "u@x.com"):
+            self.assertEqual(gmail_client.poll_status(), ("status", "t"))
+        processed.assert_not_called()
+        self.assertIn("STATUS", service.users.return_value.messages.return_value.list.call_args.kwargs["q"])
+
+    def test_poll_kick_skips_abort_and_filters_by_sender_and_task_thread(self):
+        service = MagicMock()
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "abort"}, {"id": "foreign"}, {"id": "kick"}]}
+        abort = _msg("abort", "u@x.com", "ABORT")
+        foreign = _msg("foreign", "attacker@x.com", "KICK")
+        kick = _msg("kick", "u@x.com", "kick?")
+        kick["payload"]["headers"].append({"name": "Subject",
+                                                "value": f"Re: {config.SUBJECT_PREFIX} task — status"})
+        kick["threadId"] = "task-thread"
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = [
+            abort, foreign, kick]
+        with patch.object(gmail_client, "_gmail", return_value=service), \
+             patch.object(gmail_client, "_load_processed", return_value=[]), \
+             patch.object(gmail_client, "mark_processed") as processed, \
+             patch.object(gmail_client.config, "USER_EMAIL", "u@x.com"):
+            self.assertEqual(gmail_client.poll_kick(), ("kick", "task-thread"))
+        processed.assert_not_called()
+        self.assertIn("KICK", service.users.return_value.messages.return_value.list.call_args.kwargs["q"])
 
 
 if __name__ == "__main__":

@@ -18,12 +18,70 @@ main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_exhausted_network_retry_logs_pause_instead_of_another_retry(self):
+        state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
+        with patch.object(main, "load_state", return_value=state), \
+             patch.object(main, "save_state"), patch.object(main, "_ensure_task_language"), \
+             patch.object(main, "_announce_state"), patch.object(main, "email"), \
+             patch.object(main, "check_commands", return_value=False), \
+             patch.object(main, "_dispatch_feedback", return_value=False), \
+             patch.object(main, "_receive_feedback"), patch.object(main, "_maybe_ping"), \
+             patch.object(main.diagnostics, "report"), patch.object(main.task_records, "apply_contacts"), \
+             patch.object(main.gmail_client, "retry_deliveries"), \
+             patch.object(main.gmail_client, "wait", side_effect=SystemExit("stop")) as wait, \
+             patch.object(main.config, "MAX_STATE_FAILURES", 1), \
+             patch.dict(main.PHASES, {"EXPLORING": MagicMock(side_effect=ConnectionError("fetch failed"))}), \
+             self.assertLogs(main.log, level="WARNING") as logs:
+            with self.assertRaisesRegex(SystemExit, "stop"):
+                main._run_loop()
+        self.assertEqual(state["state"], "WAIT_STUCK")
+        self.assertIn("automatic retries paused", "\n".join(logs.output))
+        self.assertNotIn("retrying in", "\n".join(logs.output))
+        wait.assert_called_once_with(main.config.POLL_INTERVAL_SECONDS)
+
+    def test_network_retry_delays_start_at_one_and_survive_restart(self):
+        state = {"state": "EXPLORING", "item": "task", "task_language": "English"}
+        clock = [100.0]
+        delays = []
+        def wait(seconds):
+            delays.append(seconds)
+            clock[0] += seconds
+        def run_failures(count):
+            with patch.object(main, "load_state", side_effect=lambda: dict(state)), \
+                 patch.object(main, "save_state", side_effect=lambda current: state.update(current)), \
+                 patch.object(main, "_ensure_task_language"), patch.object(main, "_announce_state"), \
+                 patch.object(main, "check_commands", return_value=False), \
+                 patch.object(main, "_dispatch_feedback", return_value=False), \
+                 patch.object(main, "_receive_feedback"), patch.object(main, "_maybe_ping"), \
+                 patch.object(main.diagnostics, "report"), patch.object(main.task_records, "apply_contacts"), \
+                 patch.object(main.gmail_client, "retry_deliveries"), \
+                 patch.object(main.gmail_client, "wait", side_effect=wait), \
+                 patch.object(main.time, "time", side_effect=lambda: clock[0]), \
+                 patch.object(main.config, "MAX_STATE_FAILURES", 10), \
+                 patch.object(main.config, "POLL_INTERVAL_SECONDS", 60), \
+                 patch.dict(main.PHASES, {"EXPLORING": MagicMock(side_effect=[
+                     *[ConnectionError("fetch failed") for _ in range(count)], SystemExit("stop")])}):
+                with self.assertRaisesRegex(SystemExit, "stop"):
+                    main._run_loop()
+        run_failures(2)
+        self.assertEqual(delays, [1, 2])
+        self.assertEqual(state["technical_retry"]["attempts"], 2)
+        # Restart before the persisted retry time; ordinary polling must not
+        # turn the remaining one second into a sixty-second wait.
+        clock[0] -= 1
+        run_failures(2)
+        self.assertEqual(delays, [1, 2, 1, 4, 8])
+
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         root = Path(self.temporary_directory.name)
         self.superpowers = root / "superpowers"
         self.bridge = root / "bridge"
+        self.openspec = root / "openspec-skills"
         for path in (
+            self.openspec / ".claude-plugin/plugin.json",
+            self.openspec / "skills/openspec-explore/SKILL.md",
+            self.openspec / "opencode/openspec-explore/SKILL.md",
             self.superpowers / ".claude-plugin/plugin.json",
             self.superpowers / "skills/using-superpowers/SKILL.md",
             self.superpowers / ".opencode/plugins/superpowers.js",
@@ -37,6 +95,7 @@ class RuntimeValidationTests(unittest.TestCase):
         self.path_patches = (
             patch.object(main.config, "SUPERPOWERS_PLUGIN_DIR", self.superpowers, create=True),
             patch.object(main.config, "BRIDGE_PLUGIN_DIR", self.bridge, create=True),
+            patch.object(main.config, "OPENSPEC_SKILLS_DIR", self.openspec, create=True),
         )
         for path_patch in self.path_patches:
             path_patch.start()
@@ -62,6 +121,8 @@ class RuntimeValidationTests(unittest.TestCase):
             "Superpowers skill tree": self.superpowers / "skills/using-superpowers/SKILL.md",
             "bridge manifest": self.bridge / ".claude-plugin/plugin.json",
             "bridge skill": self.bridge / "skills/coderbot-openspec-workflow/SKILL.md",
+            "OpenSpec skills manifest": self.openspec / ".claude-plugin/plugin.json",
+            "OpenSpec Claude skills": self.openspec / "skills/openspec-explore/SKILL.md",
         }
         with patch.object(main.config, "AGENT", "claude"):
             for label, path in components.items():
@@ -82,6 +143,7 @@ class RuntimeValidationTests(unittest.TestCase):
             "bridge skill": self.bridge / "skills/coderbot-openspec-workflow/SKILL.md",
             "bridge OpenCode package": self.bridge / "package.json",
             "bridge OpenCode entrypoint": self.bridge / ".opencode/plugins/coderbot-openspec.js",
+            "OpenSpec OpenCode skills": self.openspec / "opencode/openspec-explore/SKILL.md",
         }
         with patch.object(main.config, "AGENT", "opencode"):
             for label, path in components.items():
@@ -140,12 +202,14 @@ class RuntimeValidationTests(unittest.TestCase):
 
     def test_main_loop_does_not_count_transient_network_errors_as_state_failures(self):
         import ssl
-        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1"}
+        state = {"state": "WAIT_REPLY", "item": "task", "thread_id": "t1",
+                 "task_language": "English"}
         patches = self._main_env(DOC_ID="doc") + [
             patch.object(main.task_source, "validate"),
             patch.object(main.task_source, "describe", return_value="doc"),
             patch.object(main, "load_state", return_value=state),
             patch.object(main, "save_state"),
+            patch.object(main.diagnostics, "report"),
             patch.object(main.time, "sleep"),
             patch.object(main, "handle_wait", side_effect=[
                 ssl.SSLEOFError("EOF occurred in violation of protocol"),

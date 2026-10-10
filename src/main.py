@@ -1,9 +1,14 @@
 """Codebot orchestrator: works the Google Doc backlog one task at a time,
 communicating with the user exclusively by email."""
 import fcntl
+import copy
 import json
+import hashlib
+import tempfile
+import shutil
 import logging
 import re
+import secrets
 import signal
 import socket
 import ssl
@@ -15,26 +20,60 @@ from datetime import date
 from pathlib import Path
 
 import agent_runner
+from agent_errors import AgentContentFilterError
+import activity
+import phase_checkpoint
+import task_records
+import repo_provenance
+import diagnostics
+import feedback
+import parallel_conversation
+import replanning
+import recovery
+import verification_ledger
+import verification_recovery
+import review_intent
+import operations
+import check_plan
+import checks
+import final_checks
+import check_repair
+from execution_identity import snapshot as content_snapshot, digest
+import delivery_checkpoint
+import evidence_delivery
+import message_templates
+import performance
+import architecture_report
 import config
 import drive_client
 import evidence
+import handoffs
+import milestones
+import task_phases
+import proposal_package
 import task_source
-import gmail_client
+import turn_control
+import conversation as gmail_client
+import progress
 import prompts
+from command_text import parse_command
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
                      format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# Keep the noisy Google HTTP client at WARNING so our own DEBUG stays readable.
-for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3"):
+# Suppress SDK HTTP dumps (including full Slack message bodies) while keeping
+# codebot's own DEBUG and SDK warnings visible.
+for noisy in ("googleapiclient", "google", "google_auth_httplib2", "urllib3", "slack_sdk"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("codebot")
+progress.install()
 
 
 # ---------------------------------------------------------------- state
 
 def load_state() -> dict:
     if config.STATE_PATH.exists():
-        return json.loads(config.STATE_PATH.read_text())
+        state = json.loads(config.STATE_PATH.read_text())
+        return task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
     return {"state": "IDLE"}
 
 
@@ -42,6 +81,29 @@ def save_state(state: dict) -> None:
     tmp = config.STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(config.STATE_PATH)
+    global _conversation_state
+    with _status_command_lock:
+        _conversation_state = copy.deepcopy(state)
+    if state.get("conversation_flow_id"):
+        store = phase_checkpoint.store()
+        row = store.get("conversation", state["conversation_flow_id"])
+        if row and row["task_id"] == store.task_identity(state, config.REPO_PATH):
+            store.update("conversation", row, flow_applied=True)
+
+
+def _ensure_task_language(state: dict) -> None:
+    """Classify once from the source ticket, not from the conversation or agent output."""
+    if not state.get("item") or state.get("task_language"):
+        return
+    result = agent_runner.run(prompts.render(
+        prompts.TASK_LANGUAGE, item=state["item"], detail=state.get("item_detail", "")),
+        contract=False)
+    language = parse_json_reply(result.output).get("language")
+    if not isinstance(language, str) or not re.fullmatch(r"[A-Za-z][A-Za-z -]{1,48}", language):
+        raise ValueError(f"invalid task language: {language!r}")
+    state["task_language"] = language.strip()
+    save_state(state)
+    log.info("task language from backlog item: %s", language)
 
 
 # ---------------------------------------------------------------- helpers
@@ -61,22 +123,176 @@ def subject(state: dict, phase: str) -> str:
     return f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — {phase}"
 
 
+def _localized(state: dict, message: str) -> str:
+    language = state.get("task_language", "English")
+    static = message_templates.translate(message, language)
+    if static is not None:
+        return static
+    if language.casefold() == "english" or not message.strip():
+        return message
+    try:
+        with operations.budget(30):
+            result = agent_runner.run(prompts.render(
+                prompts.LOCALIZE_MESSAGE, language=language, message=message), contract=False)
+    except (RuntimeError, ConnectionError, TimeoutError, subprocess.TimeoutExpired):
+        return message
+    text = result.output.strip()
+    if not text:
+        raise ValueError("empty localized message")
+    return text
+
+
+def _send_localized(state: dict, subj: str, body: str, thread_id: str) -> None:
+    gmail_client.send(_localized(state, subj), _localized(state, body), thread_id)
+
+
+def _localized_pair(state, phase, body):
+    if state.get("task_language", "English").casefold() == "english":
+        return phase, body
+    static_phase = message_templates.translate(phase, state["task_language"])
+    static_body = message_templates.translate(body, state["task_language"])
+    if static_phase is not None and static_body is not None:
+        return static_phase, static_body
+    if phase == "service unavailable":
+        return (message_templates.translate(phase, state.get("task_language", "English")) or phase,
+                message_templates.operational("unavailable", state.get("task_language", "English")))
+    cache = state.setdefault("localized_messages", {})
+    key = hashlib.sha256((phase + "\0" + body).encode()).hexdigest()
+    if key in cache:
+        return tuple(cache[key])
+    # One text-only utility handles both fields; reuse its output for trail.
+    try:
+        with operations.budget(30):
+            result = agent_runner.run("Translate subject and body to " + state["task_language"]
+                + '. Return ONLY JSON with keys subject and body. Preserve commands, URLs and code.\n'
+                + json.dumps({"subject": phase, "body": body}, ensure_ascii=False), contract=False)
+        value = parse_json_reply(result.output)
+        pair = (value["subject"], value["body"])
+        if not all(isinstance(text, str) and text.strip() for text in pair):
+            raise ValueError('Invalid localized message fields')
+    except (RuntimeError, ConnectionError, ValueError, KeyError, TimeoutError, subprocess.TimeoutExpired):
+        log.warning('localization unavailable; delivering original report without retrying coding work')
+        pair = (message_templates.translate(phase, state['task_language']) or phase, body)
+    cache[key] = list(pair)
+    if len(cache) > 30:
+        cache.pop(next(iter(cache)))
+    return pair
+
+
+def _language_state_for_thread(state: dict, thread_id: str | None) -> dict:
+    if thread_id == state.get("thread_id"):
+        return state
+    return next((h.get("saved") or {} for h in _load_holds()
+                 if h.get("thread_id") == thread_id), state)
+
+
+def _reply_here() -> str:
+    return ("Reply in this Slack thread to continue." if config.COMM_CHANNEL == "slack"
+            else "Reply to this email to continue.")
+
+
+def _contact_name() -> str:
+    return "Slack message" if config.COMM_CHANNEL == "slack" else "email"
+
+
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
-          new_thread: bool = False) -> None:
-    thread_id = None if new_thread else state.get("thread_id")
+          new_thread: bool = False, *, milestone: str | None = None,
+          visible_question: str | None = None, localized: bool = False) -> None:
+    thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
+    fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
+    show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
+    decision_text = "" if milestone and " · " in body else handoffs.remember_decision(state, phase, visible_question)
+    if decision_text:
+        if visible_question and state.get("pending_decision", {}).get("agent_question"):
+            body = handoffs.without_question(body, visible_question)
+        body = f"{decision_text}\n\n{body}"
+    elif card := ("" if milestone and " · " in body else handoffs.decision_card(state, phase)):
+        body = f"{card}\n\n{body}"
+    import message_content
+    conversation_body, technical = message_content.split(body)
+    if len(body) > 1600 or len(body.splitlines()) > 12 or technical:
+        report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+            config.DATA_DIR, phase, detail=body)
+        attachments = [*(attachments or []), report]
+        body = conversation_body or "Technical results are in the attached report."
+        # Length is not a reason to hide conversational text. Slack handles its
+        # own message limits; email keeps a full plain-text/HTML body.
+        if visible_question and not decision_text and visible_question not in body:
+            question_body, _ = message_content.split(visible_question)
+            if question_body and question_body not in body:
+                body += "\n\n" + question_body
+        body += "\n\nSupporting details: " + report.name
+    if decision_text and decision_text not in body:
+        body = decision_text + "\n\n" + body
+    # Translate the fixed FSM copy too, not only the agent's OpenSpec/report output.
+    # The one-shot localizer never resumes or changes the task's coding session.
+    if state.get("task_language") and not localized:
+        phase, body = _localized_pair(state, phase, body)
+    body = diagnostics.redact(body)
     subj = subject(state, phase)
-    log.info("emailing %r (thread=%s, %d attachment(s), %d body chars)",
+    log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
-    state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments)
+    if attachments:
+        delivery = gmail_client.deliver(state, subj, body, thread_id, attachments)
+        state["thread_id"] = delivery["thread_id"] or thread_id
+        state["last_delivery"] = delivery
+    else:
+        kwargs = {"progress": milestones.image(show_progress)} if show_progress else {}
+        state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments, **kwargs)
+        state.pop("last_delivery", None)
+    if milestone:
+        # Artifact delivery has its own receipts; share the banner in the same
+        # thread without changing or bypassing the artifact delivery contract.
+        if attachments and show_progress:
+            gmail_client.send(subject(state, milestones.label(milestone)),
+                              _localized(state, milestones.label(milestone)), state["thread_id"],
+                              progress=milestones.image(milestone))
+        state["banner_stage"] = milestone
+        state["banner_state"] = {"approval": "WAIT_APPROVAL", "pr_review": "WAIT_MERGE",
+                                 "merged": "IDLE"}.get(milestone, state["state"])
+    if fresh_stage:
+        milestones.mark(state, fresh_stage)
+        save_state(state)
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
     # is therefore waiting on) if the original email was lost or unclear.
     state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
     _note_contact(state)
     names = [Path(a).name for a in (attachments or [])]
-    trail(state, phase, body + (f"\n\nAttachments (emailed): {', '.join(names)}" if names else ""))
+    activity = body + (f"\n\nFiles (delivery receipts tracked separately): {', '.join(names)}" if names else "")
+    if state.get("task_language"):
+        trail(state, phase, activity, localized=True)
+    else:
+        trail(state, phase, activity)
 
 
-def trail(state: dict, headline: str, body: str = "") -> None:
+def announce_milestone(state: dict, stage: str, body: str) -> None:
+    """Announce each substate as text; illustrate only visible stage changes."""
+    if state.get("banner_state") != state["state"] or state.get("banner_stage") != stage:
+        previous_email = state.get("last_email")
+        email(state, milestones.label(stage), body, milestone=stage)
+        if previous_email is not None:
+            state["last_email"] = previous_email
+        state["banner_state"] = state["state"]
+        save_state(state)
+
+
+def _announce_state(state: dict) -> None:
+    """Recover pending state banners without replaying the completed phase."""
+    if not state.get("item") or state["state"] == "IDLE" or state.get("banner_state") == state["state"]:
+        return
+    try:
+        stage = milestones.state_stage(state)
+        body = f"{milestones.label(stage)} · {state['state']}"
+        if state["state"] == "IMPLEMENTING" and state.get("implementation_feedback"):
+            body += ("\n\nVerification found approved work still incomplete. "
+                     "I'm returning to implementation to finish it; no new approval is needed.\n\n"
+                     + state["implementation_feedback"])
+        announce_milestone(state, stage, body)
+    except Exception:  # A notification failure must not rerun coding work.
+        log.exception("could not send state banner for %s; will retry next tick", state["state"])
+
+
+def trail(state: dict, headline: str, body: str = "", *, localized: bool = False) -> None:
     """Append a note to the task's activity trail on the backlog item (issue comment,
     doc comment thread...). Every user-facing email and every silent phase transition
     is noted, so the item doubles as the task's log. Best-effort by design: a tracker
@@ -87,6 +303,8 @@ def trail(state: dict, headline: str, body: str = "") -> None:
     if body:
         message += f"\n\n{body}"
     try:
+        if state.get("task_language") and not localized:
+            message = _localized(state, message)
         ref = task_source.note_activity(state["item"], state.get("item_id"), message,
                                         state.get("trail_ref"))
         if isinstance(ref, str) and ref:
@@ -157,10 +375,15 @@ def _archive_transcript(state: dict, target: Path) -> None:
     archive must not fail over the log."""
     source = _transcript_path(state)
     try:
+        destination = target / TRANSCRIPT_NAME
+        if destination.exists():
+            log.info("preserving existing archived agent log for %s", state.get("slug"))
+            return
         if not source.is_file():
             log.info("no agent log to archive for %s", state.get("slug"))
             return
-        (target / TRANSCRIPT_NAME).write_text(source.read_text())
+        with destination.open("x") as output:
+            output.write(source.read_text())
         log.info("archived agent log (%d bytes) to %s/%s",
                  source.stat().st_size, target.name, TRANSCRIPT_NAME)
     except OSError:
@@ -180,6 +403,14 @@ def handle_result(state: dict, result, phase: str) -> bool:
     keeps asking (e.g. "what should I work on next?") ping-pongs with the user forever.
     """
     state["session_id"] = result.session_id
+    requested = check_plan.reported(result.output)
+    if requested:
+        database = phase_checkpoint.store()
+        task_id = database.task_identity(state, config.REPO_PATH)
+        outcomes = checks.execute_plan(requested, config.REPO_PATH, database, task_id)
+        state["focused_check_results"] = outcomes
+        state["reported_check_plan"] = [check.to_dict() for check in requested]
+    state.pop("kick_pending", None)
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
                               f"Session: `{result.session_id}`\n\n{result.output.strip()}\n")
@@ -203,22 +434,22 @@ def handle_result(state: dict, result, phase: str) -> bool:
         _enter_stuck(state, RESUMABLE_STATE.get(phase, phase), detail)
         return True
     attachments = [Path(p) for p in result.attachments if Path(p).exists()]
-    log.info("[%s] coding agent asked a question (%d validated attachment(s)); emailing user",
-             phase, len(attachments))
+    log.info("[%s] coding agent asked a question (%d validated attachment(s)); sending via %s",
+             phase, len(attachments), config.COMM_CHANNEL)
     # The agent often puts the substance (a design to approve, options it weighed) ABOVE
     # the sentinel line and only the ask after it; the user needs both to answer.
     preamble = getattr(result, "preamble", "") or ""
     body = f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n"
     if preamble:
         body += f"{preamble}\n\n---\n\n"
-    body += f"{question}\n\nReply to this email to continue."
-    email(state, f"question during {phase}", body, attachments)
+    body += f"{question}\n\n{_reply_here()}"
+    email(state, f"question during {phase}", body, attachments, visible_question=question)
     # Kept so the WAIT_REPLY classifier can judge the reply IN CONTEXT — "yes, that part
     # is done, move on" answers a sub-step question; without the question it reads like
     # a whole-task completion order.
-    _transcript_note(state, f"emailed this question to the user "
+    _transcript_note(state, f"sent this question to the user via {config.COMM_CHANNEL} "
                             f"({len(attachments)} attachment(s)); waiting for a reply")
-    state["pending_question"] = question[:2000]
+    state["pending_question"] = question
     state["return_state"] = phase
     state["state"] = "WAIT_REPLY"
     return True
@@ -269,7 +500,7 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     if reason:
         return None, reason
     required = {"status", "commands", "openspec", "tasks"}
-    if not required <= set(value) or set(value) - required - {"preexisting"}:
+    if not required <= set(value) or set(value) - required - {"preexisting", "deferred"}:
         return None, "quality gate has unexpected or missing fields"
     if value.get("status") != "pass":
         return None, "quality gate status is not pass" + _failing_summary(value.get("commands"))
@@ -283,7 +514,10 @@ def parse_quality_gate(output: str) -> tuple[dict | None, str | None]:
     if value.get("openspec") != "pass":
         return None, "OpenSpec validation did not pass"
     match = re.fullmatch(r"(\d+)/(\d+)", value.get("tasks", ""))
-    if not match or int(match.group(1)) != int(match.group(2)):
+    deferred = value.get("deferred", 0)
+    if type(deferred) is not int or deferred < 0:
+        return None, "invalid deferred task count"
+    if not match or int(match.group(1)) + deferred != int(match.group(2)):
         return None, "OpenSpec tasks are incomplete"
     return value, None
 
@@ -354,6 +588,9 @@ def _collect_attachments(result, e2e_specs: list[str],
     Claude's own sandboxed tool calls didn't hit. Deduped by resolved path in case both
     sources happen to reference the same file."""
     agent_files = [Path(p) for p in result.attachments]
+    videos = [p for p in agent_files if p.suffix.lower() in (".webm", ".mp4")]
+    approved = evidence.supplied_artifacts(videos, content_snapshot(config.REPO_PATH)) if videos else []
+    agent_files = [p for p in agent_files if p not in videos or p in approved]
     evidence_files = evidence.record_evidence(e2e_specs, e2e_kind)
     agent_videos = [file for file in agent_files if file.suffix.lower() == ".webm"]
     if agent_videos:
@@ -379,19 +616,17 @@ def _offload_evidence_video(state: dict, attachments: list[Path]) -> tuple[list[
     returns (remaining attachments, link text or None). Only .mp4 files move — a
     Newman report or an agent screenshot stays attached — and an mp4 whose upload
     failed stays too, so gmail_client attaches it exactly as before (size cap and all).
-    Named by branch + timestamp: data/evidence.mp4 is overwritten every round, the
-    branch carries the instance name, and a re-finalize must not collide."""
+    Publication is content-addressed and access-verified by the common service."""
     if not config.EVIDENCE_UPLOAD:
         return attachments, None
     remaining, links = [], []
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    stem = state.get("branch") or state.get("slug") or "evidence"
     for path in attachments:
         if path.suffix.lower() != ".mp4":
             remaining.append(path)
             continue
-        suffix = f"-{len(links) + 1}" if links else ""
-        link = drive_client.upload_evidence(path, f"{stem}-{stamp}{suffix}.mp4")
+        published = evidence_delivery.publish(phase_checkpoint.store(), state, config.REPO_PATH, path)
+        state["evidence_delivery"] = published
+        link = published.get("url") if published.get("status") == "complete" else None
         if link:
             links.append(link)
         else:
@@ -400,6 +635,37 @@ def _offload_evidence_video(state: dict, attachments: list[Path]) -> tuple[list[
         return remaining, None
     state["evidence_url"] = links[0]
     return remaining, "\n".join(links)
+
+
+def _sync_pr_video(state: dict, video_url: str) -> None:
+    """Replace only the bot-owned evidence section, preserving human PR edits."""
+    pr_url = _https_url(state["pr_url"])
+    urls = [_https_url(url) for url in video_url.splitlines() if url.strip()]
+    section = ("<!-- coderbot:video:start -->\n## Demo video\n\n"
+               + "\n".join(f"- [Video]({url})" for url in urls)
+               + "\n<!-- coderbot:video:end -->")
+    current = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    pattern = r"<!-- coderbot:video:start -->.*?<!-- coderbot:video:end -->"
+    updated = (re.sub(pattern, lambda _: section, current, flags=re.DOTALL)
+               if re.search(pattern, current, re.DOTALL) else current.rstrip() + "\n\n" + section)
+    if updated != current:
+        _run_checked(["gh", "pr", "edit", pr_url, "--body", updated])
+    state["pr_summary"] = updated
+    verified = json.loads(_run_checked(["gh", "pr", "view", pr_url, "--json", "body"]))["body"]
+    if section not in verified:
+        raise RuntimeError("PR evidence section could not be verified after update")
+
+
+def _notify_evidence(state, phase, body, files=()):
+    """Use durable provider receipts even for link-only evidence notifications."""
+    import message_delivery
+    database = phase_checkpoint.store()
+    result = message_delivery.deliver(database, state, config.REPO_PATH, config.DATA_DIR,
+        gmail_client._backend(), subject(state, phase), body, state.get("thread_id"), files)
+    state["thread_id"] = result["thread_id"] or state.get("thread_id")
+    state["last_delivery"] = result
+    if not result["complete"]:
+        raise RuntimeError("Evidence notification remains pending provider confirmation")
 
 
 # ---------------------------------------------------------------- capability detection
@@ -510,7 +776,7 @@ _EVIDENCE_CONTRACT = (
 
 _DEMO_TEST_CONTRACT = (
     "\n- ONE of those tests must be a demo test whose title contains the tag `@evidence`. "
-    "Codebot records ONLY this test as the video evidence emailed to the user, so it must "
+    "Codebot records ONLY this test as the video evidence shared with the user, so it must "
     "show THIS feature working, on its own, as a watchable walkthrough:\n"
     "  - Navigate to where the feature lives and exercise it end-to-end in one continuous flow.\n"
     "  - Before and after each key interaction, make sure the relevant UI is actually visible "
@@ -561,11 +827,19 @@ def do_pick(state: dict) -> None:
     # Only tracked, uncommitted changes matter — untracked files (e.g. host-side
     # git-ignored config not excluded inside the container) don't block a checkout.
     if git("status", "--porcelain", "--untracked-files=no"):
-        email(state, "blocked: dirty working tree",
-              "The repo working tree has uncommitted changes; codebot will not start a "
-              "new task. Clean it up and reply to this email to retry.", new_thread=True)
+        if config.COMM_CHANNEL == "slack":
+            if not state.get("dirty_notified"):
+                gmail_client.announce(
+                    f"[{config.INSTANCE_ID}] The working tree in {config.REPO_PATH} is dirty. "
+                    "I will recheck it automatically and start the next task once clean.")
+                state["dirty_notified"] = True
+        else:
+            email(state, "blocked: dirty working tree",
+                  "The repo working tree has uncommitted changes; codebot will not start a "
+                  "new task. Clean it up and reply to this email to retry.", new_thread=True)
         state["state"] = "WAIT_CLEAN"
         return
+    state.pop("dirty_notified", None)
     # Sync to the base branch before detecting target-repo capabilities and seeding
     # any self-healing item, so both reflect its actual current state rather than
     # whatever branch was last checked out.
@@ -593,10 +867,13 @@ def do_pick(state: dict) -> None:
         items = mine
     else:
         items = prioritize_items(items)
-    result = agent_runner.run(prompts.render(
-        prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)),
-        contract=False)
-    choice = parse_json_reply(result.output)
+    if len(items) == 1:
+        slug = re.sub(r"[^a-z0-9]+", "-", items[0]["text"].casefold()).strip("-")[:60]
+        choice = {"item": items[0]["text"], "slug": slug or "task"}
+    else:
+        result = agent_runner.run(prompts.render(
+            prompts.PICK, project=config.PROJECT_NAME, items=render_items(items)), contract=False)
+        choice = parse_json_reply(result.output)
     if not choice.get("item") or not choice.get("slug"):
         raise ValueError(f"PICK output missing item/slug: {choice!r}")
     chosen = next((i for i in items
@@ -619,6 +896,7 @@ def do_pick(state: dict) -> None:
     state.update(item=chosen["text"], item_detail=chosen["detail"],
                  item_images=chosen.get("images", []),
                  item_id=chosen.get("id") or None, item_url=chosen.get("url") or None,
+                 item_key=chosen.get("key") or None,
                  slug=choice["slug"], thread_id=None)
     # Flat prefix (no slash): a "codebot/<slug>" branch would collide with the
     # existing "codebot" branch in git's ref namespace (file-vs-directory, exit 128).
@@ -629,9 +907,26 @@ def do_pick(state: dict) -> None:
     state["branch"] = branch
     # The branch's starting point: later phases measure overreach against it.
     state["base_sha"] = git("rev-parse", "HEAD")
+    task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
+    repo_provenance.record(phase_checkpoint.store(), state, config.REPO_PATH, initial=True)
     state["state"] = "EXPLORING"
+    _ensure_task_language(state)
+    agent_runner.set_task_language(state["task_language"])
+    if config.COMM_CHANNEL == "slack":
+        # Checkpoint the correlation nonce before the network call; retry can
+        # reconcile a root Slack accepted just before a process crash.
+        state["thread_nonce"] = secrets.token_hex(12)
+        if state["task_language"].casefold() != "english":
+            intro = f"*{config.INSTANCE_ID}* picked: {state['item']}"
+            if state.get("item_url"):
+                intro += f"\nSource: {state['item_url']}"
+            state["thread_intro"] = _localized(state, intro)
+        save_state(state)
+        state["thread_id"] = gmail_client.open_thread(state)
+        save_state(state)
     log.info("picked %r -> %s", choice["item"], branch)
     trail(state, f"Picked this item; working on branch {branch}", choice.get("reason", ""))
+    announce_milestone(state, "exploring", "I'm exploring the codebase.")
 
 
 def prioritize_items(items: list[dict]) -> list[dict]:
@@ -674,6 +969,9 @@ def render_images(paths: list[str]) -> str:
 
 
 def do_explore(state: dict) -> None:
+    # Picking persists EXPLORING before sending the notice. Recover a missing
+    # notice on restart/retry, and record delivery before beginning agent work.
+    announce_milestone(state, "exploring", "I'm exploring the codebase.")
     result = agent_runner.run(prompts.render(
         prompts.EXPLORE, project=config.PROJECT_NAME, branch=state["branch"], item=state["item"],
         detail=state.get("item_detail", ""),
@@ -682,6 +980,7 @@ def do_explore(state: dict) -> None:
         return
     _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
+    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
 
 
 def _undo_premature_work(state: dict, phase: str) -> str:
@@ -769,21 +1068,67 @@ def do_propose(state: dict) -> None:
     if handle_result(state, result, "PROPOSING"):
         return
     note = _undo_premature_work(state, "PROPOSING")
-    email(state, "proposal for review",
-          f"Task: {state['item']}\n\n{result.output}\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or requested changes.")
+    _send_proposal_review(state, result.output, note)
+
+
+def _send_proposal_review(state: dict, output: str, note: str = "", *,
+                          revised: bool = False, feedback: str = "") -> None:
+    """One review handoff for normal, revised, and question-continuation paths."""
+    try:
+        bundle, files = proposal_package.prepare(
+            config.DATA_DIR, config.REPO_PATH, _validated_slug(state["slug"]),
+            state.get("branch") or state["slug"],
+            max(0, config.MAX_ATTACHMENT_BYTES - 65536))
+        snapshot = proposal_package.previous(state.get("proposal_snapshot")) if revised else None
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        _enter_stuck(state, "PROPOSING", f"The complete OpenSpec review package is unavailable: "
+                     f"{error}. I cannot ask you to approve a partial proposal.")
+        return
+    key = proposal_package.fingerprint(files)
+    feedback_key = f"{revised}:{feedback}:{key}"
+    if state.get("proposal_sent_key") == feedback_key or state.get("reviewed_proposal") == key:
+        state["state"] = "WAIT_APPROVAL"
+        return
+    summary = ""
+    if state.get("replan", {}).get("original_archive"):
+        summary = (f"Complementary revision of {state['replan']['original_archive']}. "
+                    "Existing implementation and PR are retained.\n")
+    changes = proposal_package.changes(snapshot, files).splitlines() if revised else []
+    digest = ("What changed since your last review:\n" + "\n".join(line[:180] for line in changes[:3])
+              + ("\nFurther changes are in the attached proposal." if len(changes) > 3 else "")
+              + "\n\n") if revised else ""
+    body = ("The complete OpenSpec proposal is attached; implementation remains paused.\n"
+            f"Task: {state['item']}\n\n{digest}{summary}"
+            + (f"{note[:300]}\n" if note else "")
+            )
+    email(state, "revised proposal" if revised else "proposal for review", body, [bundle],
+          milestone="approval")
+    if state.get("last_delivery", {}).get("complete") is False:
+        state["proposal_delivery_pending"] = True
+    else:
+        state.pop("proposal_delivery_pending", None)
+    state["proposal_snapshot"] = str(proposal_package.save_snapshot(
+        config.DATA_DIR, state.get("branch") or state["slug"], files))
+    state["proposal_sent_key"] = feedback_key
+    state["reviewed_proposal"] = key
     state["state"] = "WAIT_APPROVAL"
+    save_state(state)
 
 
 def do_approval_reply(state: dict, reply: str) -> None:
     # Never let the autonomous working session self-declare approval. Classify the
     # user's own words with a fresh, dedicated session (like do_merge_reply) and only
     # advance on an explicit go-ahead; anything else keeps us waiting for real approval.
-    verdict = parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply),
-                         contract=False).output)
+    explicit = reply.strip().casefold().rstrip(".! ")
+    verdict = ({"action": "approve"} if explicit in ("approve", "approved", "aprobado", "aprobar", "implementa")
+               else parse_json_reply(agent_runner.run(prompts.render(prompts.CLASSIFY_APPROVAL_REPLY, reply=reply)
+                          + handoffs.classification_context(state),
+                         contract=False).output))
     action = verdict.get("action")
     log.info("classified approval reply as action=%r", action)
+    if action == "wait":
+        email(state, "approval deferred", "Work is preserved. Implementation remains paused until your explicit approval.")
+        return
     if action not in ("approve", "changes", "abort", "complete"):
         email(state, "clarification needed",
               f"I could not tell whether your reply approves the proposal, requests "
@@ -798,8 +1143,24 @@ def do_approval_reply(state: dict, reply: str) -> None:
                      reset_repo=True)
         return
     if action == "approve":
+        if state.get("proposal_delivery_pending"):
+            gmail_client.retry_deliveries(state)
+            if state.get("proposal_delivery_pending"):
+                email(state, "proposal delivery pending", "The complete proposal package is still pending delivery. "
+                      "Please approve once you have received the full package.")
+                return
+        _, current_files = proposal_package.prepare(config.DATA_DIR, config.REPO_PATH,
+            _validated_slug(state["slug"]), state.get("branch") or state["slug"],
+            max(0, config.MAX_ATTACHMENT_BYTES - 65536))
+        current = proposal_package.fingerprint(current_files)
+        if state.get("reviewed_proposal") and current != state["reviewed_proposal"]:
+            _send_proposal_review(state, "The proposal changed; please review this version.", revised=True)
+            return
         trail(state, "Proposal approved by the user", reply)
-        state["state"] = "IMPLEMENTING"
+        replanning.approve(state, current)
+        state["approved_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
+        state.pop("verified_task_inventory", None)
+        announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
     # changes: revise the proposal in the working session and go back to waiting.
     result = agent_runner.resume(
@@ -807,30 +1168,90 @@ def do_approval_reply(state: dict, reply: str) -> None:
         prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"]))
     if handle_result(state, result, "PROPOSING"):
         return
-    note = _undo_premature_work(state, "PROPOSING")
-    email(state, "revised proposal", result.output + "\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or further changes.")
-    state["state"] = "WAIT_APPROVAL"
+    note = "" if state.get("replan") else _undo_premature_work(state, "PROPOSING")
+    _send_proposal_review(state, result.output, note, revised=True,
+                          feedback=verdict.get("feedback", ""))
 
 
 def do_implement(state: dict) -> None:
+    if _scope_drift(state):
+        return
+    feedback = state.get("implementation_feedback", "")
     result = agent_runner.resume(
         state["session_id"],
-        prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
+        f"Implementation continuation: {state.get('implementation_turn', 0)}\n" + feedback + "\n\n" + prompts.render(prompts.IMPLEMENT, slug=state["slug"], branch=state["branch"],
                        e2e_note=_e2e_note(state), e2e_report_note=_e2e_report_note(state)))
     if handle_result(state, result, "IMPLEMENTING"):
         return
+    _complete_implementation(state, result)
+
+
+def _complete_implementation(state: dict, result) -> None:
+    """A completed agent turn is not a completed plan. Both entry paths use this gate."""
+    if _scope_drift(state):
+        return
     if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
         return
-    state["e2e_specs"] = evidence.reported_specs(result.output)
+    state["implementation_summary"] = "\n".join(
+        line for line in result.output.splitlines() if not line.startswith("E2E_SPEC:"))[:1800]
+    state["e2e_specs"] = list(dict.fromkeys([
+        *state.get("e2e_specs", []), *evidence.reported_specs(result.output)]))
+    state["implementation_attachments"] = list(dict.fromkeys([
+        *state.get("implementation_attachments", []),
+        *[str(path) for path in getattr(result, "attachments", []) if Path(path).is_file()]]))
     log.info("implementation reported %d e2e spec(s): %s",
              len(state["e2e_specs"]), state["e2e_specs"])
     if not state["e2e_specs"] and state.get("has_e2e_harness"):
         log.warning("no E2E_SPEC lines in implementation output — feature may lack tests")
+    try:
+        slug = _validated_slug(state.get("slug"))
+        instructions = json.loads(_run_checked([
+            "openspec", "instructions", "apply", "--change", slug, "--json"]))
+        plan = task_phases.validate_progress(config.REPO_PATH, slug, instructions)
+        if plan["final_checks"] and not config.DETERMINISTIC_CHECKS:
+            raise ValueError("Pending controller final-suite tasks require deterministic checks")
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        _enter_stuck(state, "IMPLEMENTING", "Cannot confirm implementation completion: " + str(error))
+        return
+    if plan.get("approval"):
+        _verification_blocked(state, "approval", "\n".join(plan["approval"]))
+        return
+    if plan["implementation"]:
+        progress = {"pending": plan["implementation"], "complete": plan["complete"],
+                    "snapshot": content_snapshot(config.REPO_PATH)}
+        previous = state.get("implementation_progress")
+        advanced = (previous is None or plan["complete"] > previous["complete"]
+                    or progress["pending"] != previous["pending"]
+                    or progress["snapshot"] != previous["snapshot"])
+        state["implementation_no_progress"] = 0 if advanced else state.get("implementation_no_progress", 0) + 1
+        state["implementation_progress"] = progress
+        state["implementation_feedback"] = (
+            "Continue the approved implementation; the plan is NOT complete. Reuse valid work and evidence.\n"
+            f"Checked tasks: {plan['complete']}/{plan['total']}. Pending implementation tasks:\n"
+            + "\n".join(plan["implementation"]))
+        state["state"] = "IMPLEMENTING"
+        state["implementation_turn"] = state.get("implementation_turn", 0) + 1
+        save_state(state)
+        if state["implementation_no_progress"] >= config.QUALITY_GATE_MAX_ROUNDS:
+            state["implementation_stall_round"] = config.QUALITY_GATE_MAX_ROUNDS - 1
+            _gate_failed(state, "IMPLEMENTING", "implementation_stall_round",
+                         "Repeated implementation turns made no observable progress",
+                         state["implementation_feedback"],
+                         [Path(path) for path in state["implementation_attachments"]])
+            return
+        log.info("implementation partial: %d/%d checked; %d task(s) still pending; continuing turn %d",
+                 plan["complete"], plan["total"], len(plan["implementation"]), state["implementation_turn"])
+        return
+    state["implementation_ready"] = plan
+    state["verified_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
     state["e2e_round"] = 0
+    state.pop("implementation_feedback", None)
+    state.pop("implementation_no_progress", None)
     state["verify_round"] = 0
+    state.pop("e2e_passed", None)
     state["state"] = "VERIFYING"
     trail(state, "Implementation complete; verifying")
+    announce_milestone(state, "verifying", "Implementation is complete; I'm running checks and review.")
 
 
 GATE_REPORT_MAX_CHARS = 3000
@@ -886,7 +1307,10 @@ def _gate_report(output: str, marker: str) -> str:
     return "\n\n".join(parts)[:GATE_REPORT_MAX_CHARS + GATE_NOTES_MAX_CHARS]
 
 
-def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "") -> None:
+def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str = "",
+                 attachments: list[Path] | None = None) -> None:
+    diagnostic = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+        config.DATA_DIR, phase, detail=f"{reason}\n\n{report}")
     state[counter] = state.get(counter, 0) + 1
     # Fed back into the next round's prompt (and the stuck email): a retry that repeats
     # the identical prompt just gets the identical failing report again.
@@ -900,12 +1324,21 @@ def _gate_failed(state: dict, phase: str, counter: str, reason: str, report: str
     body = (f"Task: {state['item']}\n\nThe {label} gate has failed {state[counter]} times. "
             f"Latest reason: {reason}\n\n")
     if report:
-        body += f"{report}\n\n"
+        body += f"Reported results:\n{report[:1200]}\n\nFull details are in the diagnostic file: {diagnostic.name}\n\n"
     body += ("Reply with guidance to continue — e.g. tell the agent to fix a failure, or that a "
              "failure is pre-existing on the base branch (it will confirm that there and "
              "report it as pre-existing).")
-    email(state, f"{label} stuck - needs your help", body)
+    files = [diagnostic, *(path for path in (attachments or []) if path.is_file())]
+    decision = (f"The {label} gate is blocked: {reason}.\n\n"
+                + (f"Reported results:\n{report[:1200]}\n\n" if report else "")
+                + "Should I return to implementation to complete or repair the pending work, "
+                "or investigate whether this is pre-existing on the base branch? "
+                "Reply with guidance; full results and supporting files are attached.")
+    email(state, f"{label} stuck - needs your help", body, files, visible_question=decision)
+    state["pending_question"] = decision
     state["return_state"] = phase
+    if state.get("pending_decision"):
+        state["pending_decision"]["origin"] = phase
     state["state"] = "WAIT_REPLY"
 
 
@@ -920,22 +1353,127 @@ def _gate_feedback(state: dict, counter: str) -> str:
 
 
 def _verify_prompt(state: dict) -> str:
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    reconciliation = task_phases.inspect(config.REPO_PATH, state["slug"])["verification"] if path.is_file() else []
     return (_gate_feedback(state, "verify_round")
-            + prompts.render(prompts.VERIFY, slug=state["slug"], base=config.BASE_BRANCH))
+            + ("Reconcile these approved verification tasks in this turn; they are not "
+               "new implementation or approval requests:\n"
+               + prompts.fenced("pending verification tasks", "\n".join(reconciliation)) + "\n"
+               if reconciliation else "")
+            + ("User requested verification of the existing work, not new planning. "
+               "Preserve the current implementation and inspect the cited commit before "
+               "doing any further work. Reuse valid existing results.\n"
+               + prompts.fenced_authoritative("verification guidance", state["verification_guidance"]) + "\n"
+               if state.get("verification_guidance") else "")
+            + prompts.render(prompts.VERIFY, slug=state["slug"], base=state.get("base_sha") or config.BASE_BRANCH))
 
 
 def _internal_review_prompt(state: dict) -> str:
     return (_gate_feedback(state, "review_gate_round")
+            + (prompts.fenced_authoritative("verification scope", state["verification_guidance"]) + "\n"
+               if state.get("verification_guidance") else "")
             + prompts.render(prompts.INTERNAL_REVIEW, slug=state["slug"]))
 
 
+def _verification_blocked(state: dict, kind: str, detail: str) -> None:
+    """A scope/administrative blocker is a decision, not another coding attempt."""
+    guidance = ("Repair the execution environment and request VERIFY again; these results "
+                 "do not establish missing implementation." if kind == "check infrastructure" else
+                "Provide or obtain the specific missing evidence identified above, then "
+                "request VERIFY again. No new spec approval is required; I will not "
+                "credit unverified results or restart implementation."
+                if kind == "verification evidence" else
+                "Reconcile the checklist or explicitly approve a scope change; "
+                "I will not restart planning or implementation automatically.")
+    question = ("Verification is blocked by " + kind + ":\n" + detail + "\n\n"
+                "The existing implementation is preserved. " + guidance)
+    state["verification_blocker"] = {"kind": kind, "detail": detail}
+    state["pending_question"] = question
+    state["return_state"] = "VERIFYING"
+    state["state"] = "WAIT_REPLY"
+    save_state(state)
+    email(state, "Verification blocked", question, visible_question=question)
+
+
+def _scope_drift(state: dict) -> bool:
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if not path.is_file():
+        return False
+    actual = task_phases.inventory(config.REPO_PATH, state["slug"])
+    expected = state.get("verified_task_inventory", state.get("approved_task_inventory"))
+    if expected is not None and actual != expected:
+        added = [task for task in actual if task not in expected]
+        removed = [task for task in expected if task not in actual]
+        _verification_blocked(state, "scope drift", "Added/changed tasks:\n" + "\n".join(added)
+                              + "\nRemoved/changed tasks:\n" + "\n".join(removed))
+        return True
+    return False
+
+
+def _verify_preflight(state: dict) -> bool:
+    if _scope_drift(state):
+        return True
+    path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if not path.is_file():
+        return False  # Normal strict validation handles a missing change.
+    pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+    if pending["approval"]:
+        _verification_blocked(state, "approval", "\n".join(pending["approval"]))
+        return True
+    if state.get("verification_guidance") and pending["implementation"]:
+        _verification_blocked(state, "unfinished or unclassified tasks", "\n".join(pending["implementation"]))
+        return True
+    state.pop("verification_blocker", None)
+    return False
+
+
+def _verify_requested_checks(state: dict, result) -> bool:
+    """The agent's pass claim cannot override a controller-run unknown/failure."""
+    if not check_plan.reported(result.output):
+        return False
+    failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+    if not failed:
+        return False
+    report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
+              if check["status"] in ("unknown", "infrastructure", "interrupted") else "fail",
+              "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
+    _begin_check_repair(state, report, resume="VERIFYING")
+    return True
+
+
 def _complete_verify(state: dict, result) -> None:
+    if _verify_preflight(state):
+        return
     if handle_result(state, result, "VERIFYING"):
         return
+    if _verify_requested_checks(state, result):
+        return
+    task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if task_path.is_file():
+        pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+        if pending["verification"]:
+            detail = ("Unresolved verification tasks:\n" + "\n".join(pending["verification"])
+                      + "\n\nVerifier findings (missing evidence or results):\n"
+                      + _gate_report(result.output, "QUALITY_GATE"))
+            _verification_blocked(state, "verification evidence", detail)
+            return
+        if pending["implementation"]:
+            state["implementation_return_round"] = state.get("implementation_return_round", 0) + 1
+            if state["implementation_return_round"] > config.QUALITY_GATE_MAX_ROUNDS:
+                _gate_failed(state, "VERIFYING", "verify_round", "Implementation remains incomplete",
+                             "\n".join(pending["implementation"]),
+                             [Path(path) for path in getattr(result, "attachments", [])])
+                return
+            state["implementation_feedback"] = "Complete these approved implementation tasks before verification:\n" + "\n".join(pending["implementation"])
+            state["state"] = "IMPLEMENTING"
+            trail(state, "Verification returned to implementation: approved tasks remain incomplete",
+                  state["implementation_feedback"])
+            return
     parsed, reason = parse_quality_gate(result.output)
     if parsed is None:
         _gate_failed(state, "VERIFYING", "verify_round", reason,
-                     _gate_report(result.output, "QUALITY_GATE"))
+                     _gate_report(result.output, "QUALITY_GATE"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     try:
         slug = _validated_slug(state.get("slug"))
@@ -944,46 +1482,97 @@ def _complete_verify(state: dict, result) -> None:
             "openspec", "instructions", "apply", "--change", slug, "--json",
         ]))
         progress = instructions.get("progress") if isinstance(instructions, dict) else None
-        if not isinstance(progress, dict) or instructions.get("state") != "all_done":
+        if task_path.is_file():
+            task_phases.validate_progress(config.REPO_PATH, slug, instructions)
+        deferred = parsed.get("deferred", 0)
+        if deferred:
+            if not config.DETERMINISTIC_CHECKS:
+                raise ValueError("Deferred final-suite tasks require deterministic controller checks")
+            owned = task_phases.inspect(config.REPO_PATH, slug)
+            if owned["implementation"] or len(owned["final_checks"]) != deferred:
+                raise ValueError("Deferred tasks must be explicitly owned by codebot final checks")
+        if not isinstance(progress, dict) or instructions.get("state") not in (("all_done", "ready") if deferred else ("all_done",)):
             raise ValueError("OpenSpec apply state is not all_done")
         total = progress.get("total")
         complete = progress.get("complete")
         remaining = progress.get("remaining")
         if any(type(value) is not int for value in (total, complete, remaining)) or \
-                remaining != 0 or complete != total:
+                 remaining != deferred or complete + deferred != total:
             raise ValueError("OpenSpec apply progress is incomplete")
+        if parsed["tasks"] != f"{complete}/{total}":
+            raise ValueError("Agent task counts do not match the controller-validated checklist")
     except Exception as error:
         _gate_failed(state, "VERIFYING", "verify_round", str(error),
-                     _gate_report(result.output, "QUALITY_GATE"))
+                     _gate_report(result.output, "QUALITY_GATE"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     state.pop("verify_round", None)
     state.pop("verify_round_feedback", None)
+    state["quality_report"] = parsed
+    state["quality_snapshot"] = content_snapshot(config.REPO_PATH)
+    state["quality_controller_validated"] = True
+    evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
+    _advance_verified(state)
+
+
+def _advance_verified(state: dict) -> None:
     state["review_gate_round"] = 0
-    state["state"] = "INTERNAL_REVIEW"
-    trail(state, "Verification passed; running internal review")
+    reviewed = state.get("internal_review_report", {})
+    reusable = (reviewed.get("status") == "pass" and reviewed.get("critical") == 0
+                and reviewed.get("important") == 0
+                and state.get("reviewed_snapshot") == state["quality_snapshot"])
+    state["state"] = "E2E" if reusable else "INTERNAL_REVIEW"
+    trail(state, "Verification passed; " + ("reusing content-bound internal review" if reusable else "running internal review"))
 
 
 def do_verify(state: dict) -> None:
+    if _verify_preflight(state):
+        return
+    task_path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    reconciliation = task_phases.inspect(config.REPO_PATH, state["slug"])["verification"] if task_path.is_file() else []
+    if not reconciliation and state.get("quality_controller_validated") and state.get("quality_report") \
+            and state.get("quality_snapshot") == content_snapshot(config.REPO_PATH):
+        report, _ = parse_quality_gate("QUALITY_GATE: " + json.dumps(state["quality_report"]))
+        if report:
+            _advance_verified(state)
+            return
     result = agent_runner.resume(state["session_id"], _verify_prompt(state))
     _complete_verify(state, result)
 
 
 def _complete_internal_review(state: dict, result) -> None:
+    if _scope_drift(state):
+        return
     if handle_result(state, result, "INTERNAL_REVIEW"):
         return
+    if check_plan.reported(result.output):
+        failed = [check for check in state.get("focused_check_results", []) if check["status"] != "pass"]
+        if failed:
+            report = {"status": "fail", "checks": [dict(check, gate={"status": "fail",
+                      "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
+            _begin_check_repair(state, report, resume="INTERNAL_REVIEW")
+            return
     parsed, reason = parse_internal_review(result.output)
     if parsed is None:
         _gate_failed(state, "INTERNAL_REVIEW", "review_gate_round", reason,
-                     _gate_report(result.output, "INTERNAL_REVIEW"))
+                     _gate_report(result.output, "INTERNAL_REVIEW"),
+                     [Path(path) for path in getattr(result, "attachments", [])])
         return
     state.pop("review_gate_round", None)
     state.pop("review_gate_round_feedback", None)
-    state["state"] = "E2E" if state.get("has_e2e_harness") else "ARCHIVING"
+    state["internal_review_report"] = parsed
+    state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
+    evidence_delivery.register_verified(state, config.REPO_PATH, getattr(result, "attachments", []))
+    state["state"] = "E2E"  # Final unit/lint/build checks also apply without a UI harness.
     trail(state, "Internal review passed; " +
           ("running the e2e suite" if state.get("has_e2e_harness") else "archiving the change"))
+    if state["state"] == "ARCHIVING":
+        announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
 
 
 def do_internal_review(state: dict) -> None:
+    if _scope_drift(state):
+        return
     result = agent_runner.resume(state["session_id"], _internal_review_prompt(state))
     _complete_internal_review(state, result)
 
@@ -998,11 +1587,35 @@ def _finish_e2e_repair(state: dict) -> None:
     if _tracked_snapshot() != before:
         state["verify_round"] = 0
         state["state"] = "VERIFYING"
+        state.pop("e2e_passed", None)
     else:
         state["state"] = "E2E"
 
 
 def do_e2e(state: dict) -> None:
+    if _scope_drift(state):
+        return
+    if config.DETERMINISTIC_CHECKS:
+        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+        state["final_check_report"] = report
+        save_state(state)
+        if report["status"] != "pass":
+            _begin_check_repair(state, report, resume="E2E")
+            return
+        state.pop("check_repair", None)
+        state.pop("final_repair_round", None)
+        state.pop("final_check_round", None)
+        state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
+            w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
+        if state.get("quality_report", {}).get("deferred"):
+            _commit_final_check_tasks(state)
+        if state.pop("feedback_delivery_pending", False) and state.get("archive_path"):
+            _queue_push(state, "feedback", "Requested corrections verified.",
+                        feedback=state.get("pending_feedback", ""))
+            return
+        state["state"] = "ARCHIVING"
+        announce_milestone(state, "archiving", "Final checks passed; I'm archiving the change.")
+        return
     if "e2e_repair_head" in state and "e2e_repair_status" in state:
         _finish_e2e_repair(state)
         if state["state"] != "E2E":
@@ -1010,8 +1623,13 @@ def do_e2e(state: dict) -> None:
     if not state.get("has_e2e_harness"):
         log.info("no e2e harness detected for this task; skipping the e2e gate")
         state["state"] = "ARCHIVING"
+        announce_milestone(state, "archiving", "Checks passed; I'm archiving the OpenSpec change.")
         return
     log.info("running e2e suite (e2e/run.sh)")
+    if any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", [])):
+        state["e2e_passed"] = False
+        state["state"] = "ARCHIVING"
+        return
     passed, output = evidence.run_suite()
     if not passed:
         state["e2e_round"] = state.get("e2e_round", 0) + 1
@@ -1026,10 +1644,12 @@ def do_e2e(state: dict) -> None:
                   f"Task: {state['item']}\n\nThe e2e suite has failed {config.E2E_MAX_ROUNDS} "
                   "times in a row and I could not fix it myself (this is often caused by "
                   "something outside the code, e.g. a stuck process/port left over from a "
-                  f"prior run). Latest failure output:\n\n{output[-3000:]}\n\n"
+                   "prior run). Diagnostic output is attached.\n\n"
                   "Please investigate, then reply with guidance (or tell me what to try) "
-                  "to continue.")
+                   "to continue.", [diagnostics.report(phase_checkpoint.store(), state,
+                   config.REPO_PATH, config.DATA_DIR, "E2E", detail=output)])
             state["return_state"] = "E2E"
+            state["pending_question"] = handoffs.render_decision(state["pending_decision"]) if state.get("pending_decision") else "How should I repair the failed E2E suite?"
             state["state"] = "WAIT_REPLY"
             return
         state["e2e_repair_head"], state["e2e_repair_status"] = _tracked_snapshot()
@@ -1041,8 +1661,132 @@ def do_e2e(state: dict) -> None:
         return  # loop re-enters E2E and re-runs the suite
     log.info("e2e suite PASSED")
     state["e2e_round"] = 0
+    state["e2e_passed"] = True
     state["state"] = "ARCHIVING"
     trail(state, "e2e suite passed; archiving the change")
+    announce_milestone(state, "archiving", "The e2e suite passed; I'm archiving the OpenSpec change.")
+
+
+def _begin_check_repair(state: dict, report: dict, *, resume: str) -> None:
+    """Every unresolved final result gets diagnosis and repair, not blind retries."""
+    previous = state.get("check_repair", {})
+    attempt = previous.get("attempt", 0) + 1
+    state["check_repair"] = {"attempt": attempt, "resume": resume,
+        "checks": check_repair.unresolved(report), "before": content_snapshot(config.REPO_PATH),
+        "previous": previous.get("findings", ""), "guidance": previous.get("guidance", "")}
+    if previous.get("evidence"):
+        state["check_repair"]["evidence"] = True
+    state["state"] = "REPAIR_CHECKS"
+    save_state(state)
+    if attempt > config.QUALITY_GATE_MAX_ROUNDS:
+        question = (check_repair.summary(report) + "\n\nBounded automatic repair attempts "
+                    "did not produce a controller-verified pass. Last diagnosis:\n"
+                    + (previous.get("findings") or "No successful repair diagnosis was recorded.")
+                    + "\n1. Continue diagnosis and implement a different fix (Recommended)"
+                    "\n2. Provide additional evidence or the missing external prerequisite; include details after ':'"
+                    "\n3. Keep waiting and preserve work; do not waive checks"
+                    "\nReply with the option number; include any new evidence with option 2.")
+        state["pending_question"] = question
+        state["return_state"] = "REPAIR_CHECKS"
+        state["state"] = "WAIT_REPLY"
+        save_state(state)
+        files = [Path(item["report"]) for item in state["check_repair"]["checks"]
+                 if item.get("report") and Path(item["report"]).is_file()]
+        email(state, "final check recovery decision", question, files, visible_question=question)
+        return
+    email(state, "repairing final checks", check_repair.summary(report) +
+          "\nI am diagnosing the logs and implementing a fix. Work is preserved; "
+          "no user action is needed. Unaffected valid checks will be reused.")
+
+
+def do_repair_checks(state: dict) -> None:
+    if not state.get("archive_path") and _scope_drift(state):
+        return
+    context = state.get("check_repair")
+    if not isinstance(context, dict):
+        raise RuntimeError("Final-check repair context is missing")
+    if context["attempt"] > config.QUALITY_GATE_MAX_ROUNDS:
+        _begin_check_repair(state, {"checks": context["checks"]}, resume=context["resume"])
+        return
+    result = agent_runner.resume(state["session_id"], check_repair.prompt(state, context))
+    if handle_result(state, result, "REPAIR_CHECKS"):
+        return
+    # The diagnosis and evidence are part of the conversation, not only logs.
+    email(state, "final check repair findings", result.output.strip() or "Repair turn finished; controller verification is next.",
+          [Path(p) for p in result.attachments if Path(p).is_file()])
+    if state.get("last_delivery", {}).get("complete") is False:
+        raise RuntimeError("Repair findings delivery is incomplete")
+    _complete_check_repair(state, result)
+
+
+def _complete_check_repair(state: dict, result) -> None:
+    context = state["check_repair"]
+    if not state.get("archive_path") and _scope_drift(state):
+        return
+    context["findings"] = result.output.strip()[-5000:]
+    _, status = _tracked_snapshot()
+    if status:
+        # Never push/archive a repair turn with uncommitted tracked changes.
+        context["previous"] = context["findings"] + "\nRepair is incomplete: commit only intended tracked repairs; preserve unrelated work.\n" + status
+        context["attempt"] += 1
+        state["state"] = "REPAIR_CHECKS"
+        save_state(state)
+        return
+    checks.invalidate_environment(phase_checkpoint.store(), config.REPO_PATH,
+                                  [item["check"] for item in context["checks"] if item.get("check")])
+    # A clean Git tree is not an environment repair. Re-execute affected checks
+    # even when only the ignored venv/service state changed, and never trust prose.
+    changed = context["before"] != content_snapshot(config.REPO_PATH)
+    for key in ("e2e_passed", "final_check_report", "final_check_round", "post_review_check_round"):
+        state.pop(key, None)
+    if changed or context["checks"]:
+        for key in ("quality_report", "quality_snapshot", "quality_controller_validated",
+                    "internal_review_report", "reviewed_snapshot"):
+            state.pop(key, None)
+    active = not state.get("archive_path") and (config.REPO_PATH / "openspec/changes" / state["slug"]).is_dir()
+    if context.get("evidence"):
+        state["state"] = "EVIDENCE_REVIEW" if changed else "PUSHING"
+        save_state(state)
+        trail(state, "Evidence repair returned to controller verification", context["findings"])
+        return
+    state["state"] = "VERIFYING" if changed and active else context["resume"]
+    if state["state"] == "VERIFYING":
+        state["verify_round"] = 0
+    if context["resume"] in ("VERIFYING", "INTERNAL_REVIEW"):
+        state.pop("focused_check_results", None)
+    save_state(state)
+    trail(state, "Check repair returned to controller verification", context["findings"])
+
+
+def _commit_final_check_tasks(state: dict) -> None:
+    """Commit only the controller's checkbox delta, including after interruption."""
+    if state.get("final_check_report", {}).get("status") != "pass":
+        raise RuntimeError("Final tasks require a passing controller report")
+    slug = _validated_slug(state["slug"])
+    relative = f"openspec/changes/{slug}/tasks.md"
+    path = config.REPO_PATH / relative
+    committed = git("show", "HEAD:" + relative)
+    expected = task_phases.completed_final_checks_text(committed)
+    # git() strips trailing whitespace; compare using the same normalization.
+    if path.read_text().strip() not in (committed, expected.strip()):
+        raise RuntimeError("Final-task completion found unrelated tasks.md edits; preserve them before retrying")
+    staged = git("diff", "--cached", "--name-only")
+    if staged and (staged != relative or git("show", ":" + relative) != expected.strip()):
+        raise RuntimeError("Final-task completion found unrelated staged edits")
+    if git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)" + relative):
+        raise RuntimeError("Final-task completion requires other tracked files to be committed")
+    if committed == expected.strip():
+        return  # Already committed: restart must not regenerate the same delta.
+    database = phase_checkpoint.store()
+    before = repo_provenance.inspect(config.REPO_PATH)
+    task_phases.complete_final_checks(config.REPO_PATH, slug)
+    after = repo_provenance.inspect(config.REPO_PATH)
+    repo_provenance.record_turn(database, state, config.REPO_PATH, before, after)
+    database.record("provenance", state, config.REPO_PATH, "final-tasks:" + after["fingerprint"],
+                    {"kind": "controller-final-task-completion", "files": after["files"],
+                     "verification_snapshot": state.get("final_check_report", {}).get("snapshot")}, status="complete")
+    git("add", "--", relative)
+    git("commit", "-m", "chore: complete controller final checks", "--", relative)
 
 
 def _run_checked(command: list[str]) -> str:
@@ -1119,6 +1863,8 @@ def _archive_target(state: dict) -> Path:
 
 
 def _archive_failed(state: dict, error: Exception) -> None:
+    path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+                              config.DATA_DIR, "ARCHIVING", error=error)
     state["archive_error"] = str(error)
     state["archive_round"] = state.get("archive_round", 0) + 1
     log.warning("archive failed (round %d/%d): %s", state["archive_round"],
@@ -1126,10 +1872,16 @@ def _archive_failed(state: dict, error: Exception) -> None:
     if state["archive_round"] < config.ARCHIVE_MAX_ROUNDS:
         state["state"] = "ARCHIVING"
         return
+    if state.get("session_id") and state.get("execution_task_id"):
+        recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
+                       "Archive condition requires repair: " + str(error), "ARCHIVING")
+        save_state(state)
+        return
     email(state, "OpenSpec archival stuck - needs your help",
           f"Task: {state['item']}\n\nArchival failed {state['archive_round']} times. "
-          f"Latest error: {error}\n\nReply with guidance to retry.")
+          f"{diagnostics.summary(error)}\n\nReply with guidance to retry.", [path])
     state["return_state"] = "ARCHIVING"
+    state["pending_question"] = handoffs.render_decision(state["pending_decision"]) if state.get("pending_decision") else "How should I repair the failed archival step?"
     state["state"] = "WAIT_REPLY"
 
 
@@ -1158,6 +1910,18 @@ def _unrelated_archive_changes(state: dict, status: str) -> list[str]:
     return unrelated
 
 
+def _archive_commit_paths(state: dict, status: str) -> tuple[str, ...]:
+    """Keep deleted tracked paths, omit paths already removed from Git on restart."""
+    roots = ("openspec/specs", f"openspec/changes/{state['slug']}", state["archive_path"])
+    changed = []
+    for line in status.splitlines():
+        match = re.match(r"^ ?[A-Z?!]{1,2} (.*)$", line)
+        rest = match.group(1) if match else line
+        changed.extend(path.strip().strip('"') for path in rest.split(" -> "))
+    return tuple(root for root in roots if (config.REPO_PATH / root).exists() or
+                 any(path == root or path.startswith(root + "/") for path in changed))
+
+
 def _validate_archived_change(target: Path) -> None:
     """Strict-validate only the change we just archived.
 
@@ -1166,8 +1930,13 @@ def _validate_archived_change(target: Path) -> None:
     future task forever. Parse the JSON report and fail only on our own change.
     """
     command = ["openspec", "validate", "--archived", "--strict", "--no-interactive", "--json"]
-    proc = subprocess.run(command, cwd=config.REPO_PATH, capture_output=True, text=True,
-                          timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
+    with tempfile.TemporaryDirectory(prefix="codebot-archive-validation-") as scratch:
+        root = Path(scratch)
+        destination = root / "openspec/changes/archive" / target.name
+        destination.parent.mkdir(parents=True)
+        shutil.copytree(target, destination)
+        proc = subprocess.run(command, cwd=root, capture_output=True, text=True,
+                              timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     try:
         items = json.loads(proc.stdout)["items"]
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
@@ -1200,7 +1969,10 @@ def do_archive(state: dict) -> None:
             raise RuntimeError("active change and expected archive both exist")
         if active.exists():
             if git("status", "--porcelain", "--untracked-files=no"):
-                raise RuntimeError("tracked working tree must be clean before archival")
+                recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
+                               "Pending tracked changes before archival", "ARCHIVING")
+                save_state(state)
+                return
             if git("status", "--porcelain", "--untracked-files=all", "--", "openspec/"):
                 raise RuntimeError("OpenSpec tree must be clean before archival")
             _run_checked(["openspec", "archive", state["slug"], "-y", "--json"])
@@ -1221,8 +1993,7 @@ def do_archive(state: dict) -> None:
             raise RuntimeError("archival produced unrelated tracked changes: "
                                + ", ".join(unrelated[:10]))
         if status:
-            paths = ("openspec/specs", f"openspec/changes/{state['slug']}",
-                     state["archive_path"])
+            paths = _archive_commit_paths(state, status)
             git("add", "-A", "--", *paths)
             git("commit", "-m", "chore: archive OpenSpec change", "--", *paths)
         state.pop("archive_round", None)
@@ -1310,7 +2081,42 @@ def _pr_title(state: dict) -> str:
     return title
 
 
+def _pr_publication(state: dict) -> dict:
+    value = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json",
+                                     "state,headRefName,headRefOid,baseRefName,isCrossRepository"]))
+    branch = state.get("remote_branch") or state["branch"]
+    if (not isinstance(value, dict) or value.get("state") != "OPEN" or
+            value.get("headRefName") != branch or value.get("baseRefName") != config.BASE_BRANCH or
+            value.get("isCrossRepository") is not False or
+            not isinstance(value.get("headRefOid"), str) or
+            not re.fullmatch(r"[0-9a-f]{40}", value["headRefOid"])):
+        raise RuntimeError("PR publication target is not the expected open same-repository branch")
+    return value
+
+
+def _verify_pr_publication(state: dict) -> None:
+    head = git("rev-parse", "HEAD")
+    published = _pr_publication(state)
+    if published["headRefOid"] != head:
+        raise RuntimeError("PR head does not match local HEAD; publication is not confirmed")
+    state["delivered_sha"] = head
+    log.info("PR publication confirmed: %s head=%s", state["pr_url"], head)
+
+
+def _publish_existing_pr(state: dict) -> None:
+    # Validate before publishing: a stale URL must never target another branch,
+    # a fork, closed PR or different base. Push without force preserves remote work.
+    _pr_publication(state)
+    branch = state.get("remote_branch") or state["branch"]
+    _run_checked(["git", "check-ref-format", "refs/heads/" + branch])
+    if git("status", "--porcelain", "--untracked-files=no"):
+        raise RuntimeError("PR publication requires committed tracked changes")
+    git("push", "origin", "HEAD:refs/heads/" + branch)
+
+
 def do_open_pr(state: dict) -> None:
+    if _conversation_delivery_blocked(state):
+        return
     if not state.get("archive_path"):
         state["verify_round"] = 0
         state.pop("review_gate_round", None)
@@ -1333,11 +2139,15 @@ def do_open_pr(state: dict) -> None:
         _resume_archiving(state, "archive is not committed in HEAD")
         return
     body = f"Implements: {state['item']}\n\nOpenSpec archive: `{reference}`"
-    if state.get("item_url"):
+    if config.TASK_SOURCE == "jira" and state.get("item_url"):
+        key = state.get("item_key") or state["item_url"].rstrip("/").rsplit("/", 1)[-1]
+        body += f"\n\nCloses {key}\nJira: {state['item_url']}"
+    elif state.get("item_url"):
         # A GitHub issue backs the item: let the merge close it.
         body += f"\n\nCloses {state['item_url']}"
     if state.get("pr_url"):
         state["pr_url"] = _https_url(state["pr_url"])
+        _publish_existing_pr(state)
     else:
         git("push", "-u", "origin", state["branch"])
         listed = _run_checked([
@@ -1361,7 +2171,11 @@ def do_open_pr(state: dict) -> None:
                 "--title", _pr_title(state), "--body", body,
             ])
             state["pr_url"] = _https_url(output)
+    _verify_pr_publication(state)
     state["pr_summary"] = body
+    if state.get("evidence_url"):
+        _sync_pr_video(state, state["evidence_url"])
+    _publish_progress(state)
     log.info("PR opened: %s", state["pr_url"])
     trail(state, f"PR opened: {state['pr_url']}", body)
     try:
@@ -1370,6 +2184,7 @@ def do_open_pr(state: dict) -> None:
         task_source.note_pr(state["item"], state.get("item_id"), state["pr_url"])
     except Exception:  # noqa: BLE001
         log.exception("could not link the PR on the backlog item")
+    _notify_architecture(state)
     if not state.get("has_code_review"):
         log.info("no Code Review workflow detected for this task; finalizing without a review wait")
         finalize_pr(state)
@@ -1380,6 +2195,59 @@ def do_open_pr(state: dict) -> None:
     state["review_run_link"] = None            # link of the last Code Review run we processed
     state["review_comment_watermark"] = ""     # only comments created after this are "new"
     _enter_review_wait(state)
+
+
+def _notify_architecture(state: dict, *, update: bool = False) -> None:
+    """Report actual high-impact decisions; never gate automated review or merging."""
+    if not state.get("base_sha") or not state.get("archive_path"):
+        log.warning("architecture report unavailable: task base/archive missing")
+        return
+    try:
+        context = architecture_report.collect(config.REPO_PATH, state["base_sha"],
+                                              state["archive_path"])
+        previous = state.get("architecture_report")
+        if isinstance(previous, dict) and previous.get("head") == context["head"]:
+            return
+        prompt = prompts.render(
+            prompts.ARCHITECTURE_REPORT, paths="\n".join(context["paths"]),
+            plan=context["planned"], patch=context["diff"],
+            complete=str(context["complete"]).lower())
+        for attempt in range(2):
+            reply = agent_runner.run(prompt, contract=False)
+            try:
+                decisions = architecture_report.parse(reply.output, context["paths"])
+                break
+            except ValueError as error:
+                if attempt:
+                    raise
+                log.warning("architecture report validation failed; retrying once: %s", error)
+                prompt += ("\nThe previous response failed validation: " + str(error) +
+                           "\nGenerate a fresh report following the schema and exact changed "
+                           "paths above. Do not invent evidence to satisfy validation.\n")
+        delta = architecture_report.changed(previous.get("decisions") if isinstance(previous, dict)
+                                            else None, decisions)
+        if not decisions:
+            state["architecture_report"] = {"head": context["head"], "decisions": []}
+            save_state(state)
+            return
+        if update and previous and not delta:
+            state["architecture_report"] = {"head": context["head"], "decisions": decisions}
+            save_state(state)
+            return
+        body = architecture_report.format_report(state["pr_url"], context["head"],
+                                                  delta if update and previous else decisions,
+                                                  update=update and bool(previous),
+                                                  complete=context["complete"])
+        report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+                                    config.DATA_DIR, "ARCHITECTURE", detail=body)
+        title = "; ".join(decision.get("title", "") for decision in (delta if update and previous else decisions)[:3])
+        label = "Architecture update" if update and previous else "Architecture findings"
+        email(state, "architectural decisions", f"{label}: {title}\nPR: {state['pr_url']}\n"
+              "Informational; review continues. Impacts and evidence are in the attached report.", [report])
+        state["architecture_report"] = {"head": context["head"], "decisions": decisions}
+        save_state(state)
+    except Exception:  # noqa: BLE001 — informational notice cannot stop PR flow
+        log.exception("could not prepare or send informational architecture report")
 
 
 # ---------------------------------------------------------------- automated review
@@ -1479,25 +2347,128 @@ def _render_review_threads(state: dict, key: str = "review_threads") -> str:
     return rendered
 
 
+def _begin_evidence_repair(state: dict, *, note: str = "") -> None:
+    state.setdefault("push_context", {"continuation": "evidence", "note": note})
+    state["evidence_recovery_round"] = state.get("evidence_recovery_round", 0) + 1
+    previous = state.setdefault("check_repair", {})
+    previous["evidence"] = True
+    previous["attempt"] = max(previous.get("attempt", 0), state["evidence_recovery_round"] - 1)
+    report = {"checks": [{"check": "e2e", "status": "fail",
+        "gate": {"status": "fail", "reason": "Complete playable evidence is required before PR delivery"},
+        "recording_diagnostics": evidence_delivery.recovery_details(config.REPO_PATH)}]}
+    _begin_check_repair(state, report, resume="PUSHING")
+
+
+def _complete_evidence_review(state: dict, result) -> None:
+    if handle_result(state, result, "EVIDENCE_REVIEW"):
+        return
+    parsed, reason = parse_internal_review(result.output)
+    if parsed is None:
+        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round", reason,
+                     _gate_report(result.output, "INTERNAL_REVIEW"))
+        return
+    if _tracked_snapshot()[1]:
+        _gate_failed(state, "EVIDENCE_REVIEW", "review_gate_round",
+                     "Evidence review repairs must be committed", result.output)
+        return
+    state.pop("review_gate_round", None)
+    state["internal_review_report"] = parsed
+    state["reviewed_snapshot"] = content_snapshot(config.REPO_PATH)
+    state["state"] = "PUSHING"
+    save_state(state)
+
+
+def do_evidence_review(state: dict) -> None:
+    result = agent_runner.resume(state["session_id"],
+        _gate_feedback(state, "review_gate_round") + prompts.ENVIRONMENT +
+        "\nReview the evidence recovery changes with a fresh reviewer. Inspect the current "
+        "approved task and archived specs without restoring/rearchiving them. Fix and commit "
+        "findings; preserve scope, validators and unrelated work. Do not push or merge. "
+        "Run focused diagnostics and end with INTERNAL_REVIEW: {\"status\":\"pass\","
+        "\"critical\":0,\"important\":0,\"tests\":[\"command: result\"]}. "
+        "Only report pass when the review is clean. Controller final checks run next.\n")
+    _complete_evidence_review(state, result)
+
+
 def finalize_pr(state: dict, note: str = "") -> None:
     """Record evidence and email the (now review-clean) PR, then wait for the user."""
-    evidence_files = evidence.record_evidence(state.get("e2e_specs", []), state.get("e2e_kind"))
+    database = phase_checkpoint.store()
+    task_id = database.task_identity(state, config.REPO_PATH)
+    identity = state["pr_url"] + ":" + content_snapshot(config.REPO_PATH)
+    try:
+        manifests = config.DATA_DIR / "outbox/evidence"
+        adopted = None
+        if manifests.exists() and any(manifests.rglob("verified-delivery.json")):
+            existing_body = json.loads(_run_checked(["gh", "pr", "view", state["pr_url"], "--json", "body"]))["body"]
+            adopted = evidence_delivery.reconcile(state, config.REPO_PATH, existing_body)
+    except Exception:
+        log.exception("existing evidence could not be reconciled; not duplicating capture/publication")
+        email(state, "evidence reconciliation pending",
+              "Existing video delivery could not be verified just now. No new recording or upload was started; retry reconciliation.")
+        return
+    recorded = [] if adopted else evidence_delivery.review_files(database, state, config.REPO_PATH, identity=identity)
+    evidence_files = [Path(p) for p in recorded]
+    if state.get("has_e2e_harness") and not adopted and not evidence_files:
+        _begin_evidence_repair(state, note=note)
+        return
     log.info("recorded %d evidence file(s) to attach", len(evidence_files))
-    evidence_files, video_url = _offload_evidence_video(state, evidence_files)
-    body = f"Task: {state['item']}\nPR: {state['pr_url']}\n\n{state.get('pr_summary', '')}\n\n"
+    def upload():
+        files, url = _offload_evidence_video(state, evidence_files)
+        return {"files": [str(p) for p in files], "url": url}
+    upload_key = identity + ":" + digest([config.DRIVE_FOLDER_ID, config.DRIVE_SHARE_MODE, config.DRIVE_REVIEWERS])
+    uploaded = {"files": [], "url": adopted["url"]} if adopted else delivery_checkpoint.step(database, task_id, upload_key, "UPLOAD", upload,
+        validate=lambda result: bool(result.get("url")))
+    evidence_files, video_url = [Path(p) for p in uploaded["files"]], uploaded["url"]
+    if video_url:
+        # UPLOAD may be replayed after restart, bypassing its state mutation.
+        state["evidence_url"] = video_url.splitlines()[0]
+        save_state(state)
+        _publish_progress(state)
+        if not adopted:
+            evidence_delivery.sync(database, state, config.REPO_PATH, video_url, _sync_pr_video)
+    # Match Gmail's attachment cap before indexing evidence as available. The sender
+    # can still explain an omitted file, but the cover must not claim it was attached.
+    deliverable, omitted, size = [], [], 0
+    for path in evidence_files:
+        if not path.is_file() or (config.COMM_CHANNEL == "email" and
+                                  size + path.stat().st_size > config.MAX_ATTACHMENT_BYTES):
+            omitted.append(path)
+            continue
+        deliverable.append(path)
+        size += path.stat().st_size
+    evidence_files = deliverable
+    if state.get("has_e2e_harness") and not video_url and not any(
+            p.suffix.lower() in (".mp4", ".html") for p in evidence_files):
+        _begin_evidence_repair(state, note=note)
+        return
+    detailed = diagnostics.report(database, state, config.REPO_PATH, config.DATA_DIR,
+        "VERIFICATION", detail=verification_ledger.report_details(state))
+    state["verification_diagnostic"] = str(detailed)
+    evidence_files.append(detailed)
+    body = (f"Review cover: {state.get('pr_title') or state['item'][:140]}\n"
+            f"Task: {state['item']}\nPR: {state['pr_url']}\n"
+            + (f"Source: {state['item_url']}\n" if state.get("item_url") else "")
+            + "What changed: Current implementation and verification are documented in the PR.\n"
+            + f"{handoffs.concise_verification(state)}\n"
+            + (f"Video: {video_url}\n" if video_url else "")
+            + "Files: " + ", ".join(path.name for path in evidence_files) + "\n")
+    if omitted:
+        body += "Evidence unavailable (missing or over attachment limit): " + ", ".join(
+            path.name for path in omitted) + "\n\n"
     if note:
         body += note + "\n\n"
-    if video_url:
-        # In the body (not a separate note) so email() mirrors it to the activity
-        # trail: the issue comment / doc thread gets the same link.
-        body += f"Evidence: a Playwright video demonstrating the feature.\nVideo: {video_url}\n"
-    elif evidence_files:
+    if not video_url and any(path.suffix in (".mp4", ".webm", ".html") for path in evidence_files):
         attachment_desc = ("a Newman run report (html)" if state.get("e2e_kind") == "newman"
-                            else "a Playwright video (mp4)")
-        body += f"Attached: {attachment_desc} demonstrating the feature.\n"
-    elif state.get("has_e2e_harness"):
-        body += ("Note: no e2e evidence could be captured for this PR (the spec/collection may "
-                 "have skipped itself when re-run bare, or none matched — see codebot logs).\n")
+                            else "a Playwright video (mp4)" if any(p.suffix.lower() == ".mp4" for p in evidence_files)
+                            else "a Playwright source video (webm); MP4 conversion pending")
+        body += f"Evidence: {attachment_desc} queued for delivery.\n"
+        if state.get("evidence_delivery", {}).get("status") != "complete":
+            outcome = state.get("evidence_delivery", {})
+            if outcome:
+                body += f"Drive delivery pending at {outcome.get('stage')}: {outcome.get('error', outcome.get('status'))}.\n"
+    elif not video_url and state.get("has_e2e_harness"):
+        body += ("Note: no approved e2e evidence is available for delivery. Capture, validation "
+                 "or conversion may be pending; see evidence diagnostics and codebot logs.\n")
     # Surface unresolved threads early — inline comments can land after the review run
     # finishes, and the merge gate re-checks before merging.
     threads = unresolved_review_threads(state["pr_url"])
@@ -1505,13 +2476,16 @@ def finalize_pr(state: dict, note: str = "") -> None:
         body += ("Note: I could not check the PR's review threads just now; "
                  "I will re-check before any merge.\n\n")
     elif threads:
+        counts = {kind: sum(review_intent.provenance(t) == kind for t in threads)
+                  for kind in ("human", "automated", "unknown")}
+        body += "Reviewer provenance: " + ", ".join(f"{count} {kind}" for kind, count in counts.items() if count) + ".\n"
         human = [t for t in threads if not _is_ocr_thread(t)]
         ocr = [t for t in threads if _is_ocr_thread(t)]
         if human:
-            body += (f"Heads up: the PR has {len(human)} unresolved review comment(s) "
-                     "from human reviewers; I'll address them while waiting, and I will "
+            body += (f"Heads up: the PR has {len(human)} unresolved review comment(s); "
+                     "I'll address them while waiting, and I will "
                      "not merge until they are resolved (or you say 'merge anyway'):\n\n"
-                     f"{format_unresolved_threads(human)}\n\n")
+                     "Details are on the PR.\n\n")
         if ocr:
             body += (f"Note: {len(ocr)} automated (OCR) review comment(s) are still "
                      "unresolved; I'll address them automatically — fixing or resolving "
@@ -1521,7 +2495,17 @@ def finalize_pr(state: dict, note: str = "") -> None:
     # be executed against the new one. Set them aside and say so.
     if state.pop("stale_replies", None) and state.get("thread_id"):
         try:
-            drained = gmail_client.drain_thread(state["thread_id"])
+            drained = 0
+            for _ in range(100):
+                message = gmail_client.poll_reply(state["thread_id"])
+                if not message:
+                    break
+                message_id, text = message
+                if re.fullmatch(r"(?i)\s*merge(?: anyway)?[.! ]*", text):
+                    drained += 1
+                else:
+                    feedback.receive(database, state, config.REPO_PATH, message_id, text)
+                gmail_client.mark_processed(message_id)
         except Exception:  # noqa: BLE001 — a gmail hiccup must not block the finalize
             log.exception("could not check the thread for stale replies")
             drained = 0
@@ -1531,13 +2515,20 @@ def finalize_pr(state: dict, note: str = "") -> None:
                      "were set aside — please re-send your instruction against the updated "
                      "PR.\n\n")
     body += "Reply with change requests, or tell me to merge."
-    email(state, "PR ready for review", body, evidence_files)
+    notification_identity = identity + ":" + digest([video_url, [str(p) for p in evidence_files]])
+    evidence_delivery.notification(database, state, config.REPO_PATH, notification_identity,
+        lambda: email(state, "PR ready for review", body, evidence_files, milestone="pr_review"))
     # pr_summary is kept (until the task ends) so a later re-finalize — e.g. after a
     # conflict resolution — doesn't email an empty summary.
     for key in ("review_since", "review_round", "review_run_link", "review_threads",
                 "await_new_run"):
         state.pop(key, None)
     state["state"] = "WAIT_MERGE"
+    state["reviewed_pr_snapshot"] = content_snapshot(config.REPO_PATH)
+    state.pop("evidence_recovery_round", None)
+    for row in database.list("feedback", task_id, status="verifying"):
+        if state.get("last_delivery", {}).get("complete") is not False:
+            database.update("feedback", row, status="complete", outcome="verified delivery")
 
 
 def handle_review_wait(state: dict) -> None:
@@ -1547,6 +2538,9 @@ def handle_review_wait(state: dict) -> None:
     Unresolved threads — not "comments newer than a watermark" — are the work queue:
     a thread the worker skipped, or one posted after a run was processed, stays in the
     queue instead of silently accumulating until merge time."""
+    if time.time() - state.get("review_since", time.time()) > config.REVIEW_WAIT_TIMEOUT_SECONDS:
+        finalize_pr(state, note="Automated review wait exhausted its deadline; review status is not established.")
+        return
     check = code_review_check(state["pr_url"])
     bucket = check.get("bucket") if check else None
     same_run = check is not None and check.get("link") == state.get("review_run_link")
@@ -1599,17 +2593,18 @@ def handle_review_wait(state: dict) -> None:
 
 def do_address_review(state: dict) -> None:
     threads = state.get("review_threads", [])
-    state["review_round"] = state.get("review_round", 0) + 1
-    log.info("addressing %d review thread(s), round %d", len(threads), state["review_round"])
+    round = state.get("review_round", 0) + 1
+    log.info("addressing %d review thread(s), round %d", len(threads), round)
     trail(state, f"Addressing {len(threads)} automated review thread(s), round "
-                 f"{state['review_round']}")
+                 f"{round}")
     head_before = git("rev-parse", state["branch"])
     result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.ADDRESS_REVIEW, threads=_render_review_threads(state),
-                       branch=state["branch"]))
+                       branch=state["branch"]) + review_intent.RULES)
     if handle_result(state, result, "ADDRESS_REVIEW"):
         return
+    state["review_round"] = round
     _finish_address_review(state, result, head_before)
 
 
@@ -1706,7 +2701,8 @@ def check_pr_status(state: dict) -> bool:
         log.info("PR %s was merged on GitHub outside codebot; finishing the task",
                  state["pr_url"])
         trail(state, f"PR merged on GitHub: {state['pr_url']}")
-        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False)
+        _finish_task(state, "The PR was merged on GitHub (not by me).", reset_repo=False,
+                     merged=True)
         return True
     if pr_state == "CLOSED":
         log.warning("PR %s was closed without merging; asking the user", state["pr_url"])
@@ -1803,7 +2799,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line
-              comments(first: 100) { nodes { author { login } body databaseId createdAt } } } } } } }"""
+              comments(first: 100) { nodes { author { login __typename } body databaseId createdAt } } } } } } }"""
     threads: list[dict] = []
     cursor = None
     while True:
@@ -1835,6 +2831,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                 continue
             comments = [{
                 "author": (c.get("author") or {}).get("login", "?"),
+                "author_type": (c.get("author") or {}).get("__typename", ""),
                 "body": c.get("body", ""),
                 "comment_id": c.get("databaseId"),
                 "created_at": c.get("createdAt"),
@@ -1849,6 +2846,7 @@ def unresolved_review_threads(pr_url: str) -> list[dict] | None:
                 "line": node.get("line"),
                 "outdated": bool(node.get("isOutdated")),
                 "author": first.get("author", "?"),
+                "author_type": first.get("author_type", ""),
                 "body": first.get("body", ""),
                 "comments": comments,
                 "bot_login": bot_login,
@@ -2019,9 +3017,13 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 
 def do_merge_reply(state: dict, reply: str) -> None:
-    result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply),
-                              contract=False)
-    verdict = parse_json_reply(result.output)
+    if re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*", reply):
+        verdict = {"action": "merge", "force": True}
+    else:
+        result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
+                                  + handoffs.classification_context(state),
+                                  contract=False)
+        verdict = parse_json_reply(result.output)
     action = verdict.get("action")
     log.info("classified PR reply as action=%r force=%r", action, verdict.get("force"))
     if action not in ("merge", "changes", "abort", "complete"):
@@ -2041,6 +3043,12 @@ def do_merge_reply(state: dict, reply: str) -> None:
                                 f"slate.\n\nPR: {pr_url}")
         return
     if action == "changes":
+        if state.get("execution_task_id"):
+            row = feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH,
+                "pr-feedback-" + hashlib.sha256(reply.encode()).hexdigest(), verdict.get("feedback") or reply)
+            _dispatch_feedback(state)
+            return
+        state["pending_feedback"] = verdict.get("feedback", "")
         r = agent_runner.resume(
             state["session_id"],
             prompts.render(prompts.APPLY_PR_FEEDBACK, feedback=verdict.get("feedback", ""), branch=state["branch"]))
@@ -2051,9 +3059,19 @@ def do_merge_reply(state: dict, reply: str) -> None:
             return
         attachments = _collect_attachments(r, state.get("e2e_specs", []), state.get("e2e_kind"))
         attachments += [a for a in extra_attachments if a.resolve() not in {p.resolve() for p in attachments}]
-        _queue_push(state, "feedback", r.output, attachments)
+        _queue_push(state, "feedback", r.output, attachments,
+                    feedback=state.get("pending_feedback", ""))
         return
     # merge
+    if state.get("replan") and not state.get("approved_proposal"):
+        email(state, "merge blocked", "The revised proposal requires approval before merge.")
+        return
+    if _conversation_delivery_blocked(state):
+        return
+    if state.get("reviewed_pr_snapshot") and content_snapshot(config.REPO_PATH) != state["reviewed_pr_snapshot"]:
+        email(state, "merge blocked", "The PR content changed since your review. Review the updated PR before merging.")
+        state.pop("reviewed_pr_snapshot", None)
+        return
     pr_state, mergeable = _pr_merge_state(state["pr_url"])
     log.info("PR state=%s mergeable=%s before merge", pr_state, mergeable)
     if pr_state is None:
@@ -2076,9 +3094,9 @@ def do_merge_reply(state: dict, reply: str) -> None:
                       f"`{config.BASE_BRANCH}` has changed and this PR now conflicts with "
                       f"it, so I can't merge it yet.\nPR: {state['pr_url']}\n\n"
                       "I'm resolving the conflicts now. If any conflict has genuinely "
-                      "different reasonable resolutions I'll email you the alternatives; "
+                      "different reasonable resolutions I'll send you the alternatives; "
                       "otherwise the automated review re-runs on the resolved branch and "
-                      "I'll email when it's clean — reply 'merge' then.")
+                      "I'll message you when it's clean — reply 'merge' then.")
             return
         # Review-thread gate: inline review threads may appear at any time, including
         # after the "PR ready" email (handle_merge_wait addresses them proactively, but
@@ -2100,7 +3118,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                 email(state, "merge blocked — unresolved review comments",
                       f"I did not merge: the PR has {len(threads)} unresolved review "
                       f"thread(s).\nPR: {state['pr_url']}\n\n"
-                      f"{format_unresolved_threads(threads)}\n\n"
+                       "The unresolved findings are listed on the PR.\n\n"
                       "Options: reply with change requests and I'll address them; resolve "
                       "the threads on GitHub and reply 'merge' again; or reply 'merge "
                       "anyway' to merge despite them.")
@@ -2122,7 +3140,7 @@ def do_merge_reply(state: dict, reply: str) -> None:
                   "the branch and reply 'merge' to retry.")
             return  # stay in WAIT_MERGE
         trail(state, f"PR merged: {state['pr_url']}")
-    _finish_task(state, "PR merged.", reset_repo=False)
+    _finish_task(state, "PR merged.", reset_repo=False, merged=True)
 
 
 def _finish_address_pr_threads(state: dict) -> None:
@@ -2136,31 +3154,36 @@ def _finish_address_pr_threads(state: dict) -> None:
     if resolved + answered < len(threads):
         log.warning("%d/%d review thread(s) still unresolved after the round",
                     len(threads) - resolved - answered, len(threads))
+    # The repaired content has passed the push gates and is now the PR presented
+    # for review. Do not compare the user's next merge against the pre-repair PR.
+    state["reviewed_pr_snapshot"] = content_snapshot(config.REPO_PATH)
     state["state"] = "WAIT_MERGE"
 
 
 def do_address_pr_threads(state: dict) -> None:
     threads = state.get("pr_threads", [])
-    state["pr_thread_round"] = state.get("pr_thread_round", 0) + 1
-    log.info("addressing %d unresolved review thread(s), round %d", len(threads), state["pr_thread_round"])
+    round = state.get("pr_thread_round", 0) + 1
+    log.info("addressing %d unresolved review thread(s), round %d", len(threads), round)
     result = agent_runner.resume(
         state["session_id"],
         prompts.render(prompts.ADDRESS_PR_THREADS,
                        threads=_render_review_threads(state, key="pr_threads"),
-                       branch=state["branch"]))
+                       branch=state["branch"]) + review_intent.RULES)
     if handle_result(state, result, "ADDRESS_PR_THREADS"):
         return
+    state["pr_thread_round"] = round
     if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
     _queue_push(state, "threads", result.output)
 
 
 def _queue_push(state: dict, continuation: str, output: str = "",
-                attachments: list[Path] | None = None) -> None:
+                attachments: list[Path] | None = None, *, feedback: str = "") -> None:
     state["push_context"] = {
         "continuation": continuation,
         "output": str(output),
         "attachments": [str(path) for path in attachments or []],
+        "feedback": feedback,
     }
     state["state"] = "PUSHING"
     save_state(state)
@@ -2171,10 +3194,21 @@ def do_push(state: dict) -> None:
     if not isinstance(context, dict):
         raise RuntimeError("PUSHING state is missing push_context")
     continuation = context.get("continuation")
-    if continuation not in ("review", "feedback", "threads", "conflicts"):
+    if continuation not in ("review", "feedback", "threads", "conflicts", "evidence"):
         raise RuntimeError(f"invalid push continuation: {continuation!r}")
 
-    git("push", "origin", state["branch"])
+    if config.DETERMINISTIC_CHECKS or state.get("check_repair", {}).get("evidence") or continuation == "evidence":
+        report = final_checks.run(state, config.REPO_PATH, phase_checkpoint.store())
+        state["final_check_report"] = report
+        save_state(state)
+        if report["status"] != "pass":
+            _begin_check_repair(state, report, resume="PUSHING")
+            return
+        state.pop("check_repair", None)
+    git("push", "origin", ("HEAD:refs/heads/" + state["remote_branch"])
+        if state.get("remote_branch") else state["branch"])
+    state["delivered_sha"] = git("rev-parse", "HEAD")
+    _notify_architecture(state, update=True)
     if continuation == "review":
         # The fix is on GitHub now: reply on + resolve the threads the worker declared
         # handled, then wait for the re-review the push triggers.
@@ -2183,15 +3217,48 @@ def do_push(state: dict) -> None:
         state.pop("review_comments", None)
         _enter_review_wait(state)
     elif continuation == "conflicts":
-        _enter_review_wait(state)  # the resolved branch needs its re-review
+        if state.get("has_code_review"):
+            _enter_review_wait(state)
+        else:
+            finalize_pr(state)
+    elif continuation == "evidence":
+        # A failed new recording may queue another repair; retain its new context.
+        state.pop("push_context", None)
+        if state.get("has_code_review"):
+            _enter_review_wait(state)
+        else:
+            finalize_pr(state, note=context.get("note", ""))
+        return
     elif continuation == "feedback":
+        recorded = evidence_delivery.review_files(phase_checkpoint.store(), state, config.REPO_PATH) if state.get("has_e2e_harness") else []
+        if state.get("has_e2e_harness") and not recorded:
+            _begin_evidence_repair(state)
+            return
         attachments = [Path(path) for path in context.get("attachments", [])]
+        attachments.extend(path for path in recorded if path not in attachments)
         attachments, video_url = _offload_evidence_video(state, attachments)
-        body = f"Applied your feedback.\nPR: {state['pr_url']}\n\n{context.get('output', '')}"
+        if video_url:
+            _publish_progress(state)
+            store = phase_checkpoint.store()
+            evidence_delivery.sync(store, state, config.REPO_PATH, video_url, _sync_pr_video)
+        body = (f"PR updated: {state['pr_url']}\n\n"
+                f"Requested: {context.get('feedback') or '(see earlier message)'}\n\n"
+                f"Changed (implementation report): {context.get('output', '')}\n\n"
+                + handoffs.evidence_index(attachments, video_url))
+        body += "\n\n" + handoffs.concise_verification(state)
+        detailed = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH, config.DATA_DIR,
+            "FEEDBACK_VERIFICATION", detail=verification_ledger.report_details(state))
+        attachments.append(detailed)
         if video_url:
             body += f"\n\nVideo: {video_url}"
-        email(state, "PR updated", body, attachments)
+        store = phase_checkpoint.store()
+        evidence_delivery.notification(store, state, config.REPO_PATH,
+            digest([state["pr_url"], str(state.get("delivered_sha")), video_url, body]),
+            lambda: email(state, "PR updated", body, attachments))
+        state.pop("pending_feedback", None)
         state["state"] = "WAIT_MERGE"
+        state["reviewed_pr_snapshot"] = (state.get("final_check_report") or {}).get("snapshot")
+        state.pop("evidence_recovery_round", None)
     else:
         _finish_address_pr_threads(state)
     state.pop("push_context", None)
@@ -2212,6 +3279,11 @@ PING_KEYS = ("last_contact", "ping_count", "last_ping_at")
 USER_SIDE_WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN"}
 
 _PHASE_ACTIVITY = {
+    "EVIDENCE_REVIEW": "reviewing and fixing evidence recovery changes before controller checks and recording",
+    "REPAIR_CHECKS": "diagnosing failing checks and implementing repairs before controller verification",
+    "RECOVERING": "diagnosing and repairing a task-owned repository condition",
+    "REPLANNING": "revising the proposal to incorporate material feedback",
+    "APPLY_FEEDBACK": "applying the requested localized corrections",
     "EXPLORING": "exploring the codebase to understand the task before writing a proposal",
     "PROPOSING": "writing the OpenSpec proposal (design, specs, tasks) for your review",
     "IMPLEMENTING": "implementing the approved proposal on branch {branch}",
@@ -2260,6 +3332,13 @@ def _ping_interval(count: int) -> int:
 
 
 def _ping_due(state: dict, now: float) -> bool:
+    if state.get("state") not in USER_SIDE_WAITS:
+        return False
+    decision = hashlib.sha256(json.dumps([state.get("state"), state.get("reviewed_proposal"),
+        state.get("pending_question"), state.get("stuck_return"), state.get("pr_url")]).encode()).hexdigest()
+    if state.get("reminded_decision") == decision:
+        return False
+    state["pending_decision_id"] = decision
     if (not config.PING_SCHEDULE_SECONDS or state.get("state") == "IDLE"
             or not state.get("thread_id")):
         return False
@@ -2271,13 +3350,16 @@ def _ping_due(state: dict, now: float) -> bool:
         # clock now rather than pinging on the spot.
         state["last_contact"] = now
         return False
-    return now - anchor >= _ping_interval(state.get("ping_count", 0))
+    return now - anchor >= 86400
 
 
 def _expected_from_user(state: dict) -> str:
     """What the current wait needs from the user, spelled out in full: a check-in must
     stand on its own, never "see my earlier email"."""
     st = state["state"]
+    decision = state.get("pending_decision")
+    if isinstance(decision, dict) and decision.get("wait_state") == st:
+        return handoffs.render_decision(decision)
     if st == "WAIT_APPROVAL":
         return ("your decision on the proposal I sent for this task. Reply with an explicit "
                 "approval to start implementing, with the changes you want made to the "
@@ -2293,7 +3375,7 @@ def _expected_from_user(state: dict) -> str:
                      "reply 'merge anyway' to merge regardless.")
         return text
     if st == "WAIT_REPLY":
-        question = state.get("pending_question") or "(question not recorded; see my last email below)"
+        question = state.get("pending_question") or "(question not recorded; see my last message below)"
         return (f"your answer to the question I asked during {state.get('return_state', '?')}:"
                 f"\n\n{question}")
     if st == "WAIT_STUCK":
@@ -2308,7 +3390,7 @@ def _expected_from_user(state: dict) -> str:
         return (f"a clean working tree in {config.REPO_PATH}: it has uncommitted changes to "
                 "tracked files and I won't start a task on top of them. Commit, stash or "
                 "discard them, then reply to this thread (any text) and I'll retry.")
-    return "your reply to my last email (quoted below)."
+    return "your reply to my last message (quoted below)."
 
 
 def _review_wait_status(state: dict, now: float) -> str:
@@ -2319,10 +3401,10 @@ def _review_wait_status(state: dict, now: float) -> str:
         remaining = config.REVIEW_WAIT_TIMEOUT_SECONDS - (now - since)
         line = f"Waiting since {_fmt_ts(since)} ({_fmt_dur(now - since)} so far)"
         if remaining > 0:
-            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll email "
+            line += (f"; if it hasn't finished in another {_fmt_dur(remaining)} I'll message "
                      "you the PR without it.")
         else:
-            line += "; that is past my wait limit, so I'm about to email you the PR without it."
+            line += "; that is past my wait limit, so I'm about to message you the PR without it."
         lines.append(line)
     try:
         check = code_review_check(pr_url)
@@ -2341,7 +3423,7 @@ def _review_wait_status(state: dict, now: float) -> str:
         lines.append(f"Automated review round {state['review_round']} of at most "
                      f"{config.REVIEW_MAX_ROUNDS}.")
     lines.append("When it finishes I'll fix or answer any unresolved review threads, then "
-                 "email you the PR.")
+                 "send you the PR.")
     return "\n".join(lines)
 
 
@@ -2361,34 +3443,30 @@ def _bot_side_activity(state: dict, now: float) -> str:
 
 
 def _ping_body(state: dict, now: float, count: int) -> str:
-    st = state["state"]
-    last_contact = state.get("last_contact")
-    if last_contact is None:
-        last_contact = now
-    lines = [f"Task: {state.get('item', '-')}", f"State: {st}",
-             f"This thread has been quiet for {_fmt_dur(now - last_contact)} (last real email "
-             f"sent or received: {_fmt_ts(last_contact)}), so here is where things stand.", ""]
-    if st in USER_SIDE_WAITS:
-        lines.append("The ball is in your court: I'm waiting for " + _expected_from_user(state))
-        lines += ["", "Nothing has changed on my side since my last email."]
-        last = state.get("last_email")
-        if last:
-            lines += ["", f"--- For reference, my last email ({_fmt_ts(last['sent_at'])}) ---",
-                      f"Subject: {last['subject']}", "", last["body"]]
+    spanish = state.get("task_language", "English").casefold() == "spanish"
+    if state.get("pending_reply_delivery"):
+        return ("La respuesta está preparada; estoy reintentando solo la entrega de archivos. No necesito una decisión ni volveré a ejecutar al agente."
+                 if spanish else "The reply is ready; I am retrying file delivery only. No decision is needed and the agent will not run again.")
+    if state["state"] == "WAIT_APPROVAL":
+        return ("Aprobación pendiente: revisa la propuesta ya enviada y responde con aprobación o cambios. La implementación sigue pausada."
+                if spanish else "Approval pending: review the proposal already sent and reply with approval or changes. Implementation remains paused.")
+    decision = state.get("pending_decision")
+    if isinstance(decision, dict) and decision.get("wait_state") == state["state"]:
+        return handoffs.render_decision(decision)
+    question = state.get("pending_question")
+    if state["state"] == "WAIT_APPROVAL":
+        action = "Revisa la propuesta y responde con aprobación o cambios." if spanish else "Review the proposal and reply with approval or changes."
+    elif state["state"] == "WAIT_MERGE":
+        action = ("Revisa el PR y responde con cambios o 'merge'. " if spanish else
+                  "Review the PR and reply with changes or 'merge'. ") + state.get("pr_url", "")
+        if state.get("pr_thread_notified"):
+            action += "\n" + ("Hay comentarios pendientes; indica cómo resolverlos." if spanish else
+                                "Review comments remain; give guidance on their resolution.")
+    elif question:
+        action = str(question)[:500]
     else:
-        lines.append("The ball is in my court; nothing is needed from you right now.")
-        lines.append(_bot_side_activity(state, now))
-        failed = state.get("failures", {}).get(st, 0)
-        if failed:
-            lines.append(f"Heads up: the last {failed} attempt(s) at this step failed and I'm "
-                         f"retrying; after {config.MAX_STATE_FAILURES} in a row I'll stop and "
-                         "ask for your help.")
-        lines.append("I'll email you as soon as I need something from you or have a result "
-                     "to show.")
-    lines += ["", f"(Check-in {count}. Unless something happens on this thread, the next one "
-                  f"comes in about {_fmt_dur(_ping_interval(count))}. Reply STATUS for a full "
-                  "snapshot, HOLD to park this task, or ABORT to drop it.)"]
-    return "\n".join(lines)
+        action = "Responde con instrucciones para resolver el bloqueo o 'retry'." if spanish else "Reply with instructions to resolve the blocker or 'retry'."
+    return ("Decisión pendiente: " if spanish else "Decision pending: ") + action
 
 
 def _maybe_ping(state: dict) -> None:
@@ -2400,9 +3478,10 @@ def _maybe_ping(state: dict) -> None:
             return
         count = state.get("ping_count", 0) + 1
         body = _ping_body(state, now, count)
-        gmail_client.send(subject(state, "check-in"), body, state["thread_id"])
+        _send_localized(state, subject(state, "check-in"), body, state["thread_id"])
         state["ping_count"] = count
         state["last_ping_at"] = now
+        state["reminded_decision"] = state["pending_decision_id"]
         log.info("sent silence check-in #%d in %s (thread quiet for %s)", count, state["state"],
                  _fmt_dur(now - state.get("last_contact", now)))
     except Exception:  # noqa: BLE001
@@ -2412,6 +3491,11 @@ def _maybe_ping(state: dict) -> None:
 # ---------------------------------------------------------------- loop
 
 PHASES = {
+    "RECOVERING": lambda state: do_recover(state),
+    "REPAIR_CHECKS": do_repair_checks,
+    "EVIDENCE_REVIEW": do_evidence_review,
+    "REPLANNING": lambda state: do_replan(state),
+    "APPLY_FEEDBACK": lambda state: do_apply_feedback(state),
     "IDLE": do_pick,
     "EXPLORING": do_explore,
     "PROPOSING": do_propose,
@@ -2434,12 +3518,24 @@ PHASES = {
 WAITS = {"WAIT_APPROVAL", "WAIT_MERGE", "WAIT_REPLY", "WAIT_CLEAN", "WAIT_REVIEW", "WAIT_STUCK"}
 
 
+def check_clean_checkout(state: dict) -> None:
+    """Slack's pre-task block retries itself; email keeps waiting for a reply."""
+    if not git("status", "--porcelain", "--untracked-files=no"):
+        state.pop("dirty_notified", None)
+        state["state"] = "IDLE"
+
+
 def handle_wait(state: dict) -> None:
     polled = gmail_client.poll_reply(state["thread_id"]) if state.get("thread_id") else None
     if polled is None:
-        log.debug("%s: no reply yet on thread %s", state["state"], state.get("thread_id"))
+        log.debug("%s: no new unprocessed replies on thread %s; last notification=%r",
+                  state["state"], state.get("thread_id"),
+                  (state.get("last_email") or {}).get("subject"))
         return
     msg_id, reply = polled
+    if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
+        gmail_client.mark_processed(msg_id)
+        return
     target = gmail_client.foreign_command(reply)
     if target:
         # A command addressed to ANOTHER instance, replied on our thread. That
@@ -2450,17 +3546,60 @@ def handle_wait(state: dict) -> None:
         return
     log.info("reply received in %s: %r", state["state"], reply[:200])
     _note_contact(state)
-    _handle_reply(state, reply)
-    # Consume the reply only now that handling finished without raising. If it threw
-    # (e.g. a transient claude failure), the message stays unprocessed so the next tick
-    # re-reads and re-handles it instead of silently dropping the user's reply.
+    if _queue_conversation(state, msg_id, reply):
+        return
+    if state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(token in reply.casefold()
+            for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
+        verification_ledger.waiver(state, reply, "e2e:general", content_snapshot(config.REPO_PATH))
+    reply_phase = state["state"]
+    try:
+        _dispatch_wait_reply(state, msg_id, reply)
+    except AgentContentFilterError:
+        state["state"] = reply_phase
+        _content_filter_stop(state, reply_phase)
+    if config.COMM_CHANNEL == "slack":
+        # Persist the state transition before clearing the durable inbox entry.
+        # If the process dies between those writes, restart skips reapplying it.
+        state["slack_last_handled_id"] = msg_id
+        save_state(state)
+    # Consume only successful replies or content-filter rejections. Transient
+    # failures still leave the message available for a later attempt.
     gmail_client.mark_processed(msg_id)
+
+
+def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
+    selection = handoffs.selected_reply(state, reply)
+    if selection is not None:
+        if selection.get("error") or selection.get("wait"):
+            message = selection.get("error") or "Work is preserved. I will keep waiting; no action was authorized."
+            email(state, "decision selection", message + "\n\n" + handoffs.render_decision(state["pending_decision"]))
+            return
+        # Bare choices have an exact controller meaning. Prose must still pass
+        # scope assessment in post-planning question/recovery waits, while the
+        # approval and PR handlers already classify the complete reply themselves.
+        if (not selection.get("prose") or state["state"] not in ("WAIT_REPLY", "WAIT_STUCK")
+                or state.get("return_state") in ("EXPLORING", "PROPOSING")):
+            _handle_reply(state, selection["reply"])
+            return
+    if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
+            state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
+            r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
+        database = phase_checkpoint.store()
+        row = feedback.receive(database, state, config.REPO_PATH, msg_id, reply)
+        if state.get("feedback_question_id"):
+            database.update("feedback", row, question_reply_to=state["feedback_question_id"])
+        _dispatch_feedback(state)
+    else:
+        _handle_reply(state, reply)
 
 
 def handle_merge_wait(state: dict) -> None:
     """Every WAIT_MERGE poll: check the open PR for unresolved review threads (e.g. a
     human reviewer's) and address them, so live feedback gets fixed before the user
     even says 'merge'. Falls through to the normal inbox check either way."""
+    handle_wait(state)
+    if state["state"] != "WAIT_MERGE":
+        return
     threads = unresolved_review_threads(state["pr_url"])
     if threads is not None:
         # A human thread the bot already answered (without a code change) is left open
@@ -2478,17 +3617,501 @@ def handle_merge_wait(state: dict) -> None:
     elif state.get("pr_thread_round", 0) >= config.PR_THREAD_MAX_ROUNDS:
         log.warning("review-thread round limit (%d) reached with %d open thread(s); "
                     "leaving them for the user", config.PR_THREAD_MAX_ROUNDS, len(threads))
+        report = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH, config.DATA_DIR,
+            "PR_REVIEW", detail=format_unresolved_threads(threads))
+        summary = agent_runner.run("Read remaining review findings. Do not use tools or change code. "
+            "Give at most three prioritized blockers, impact, recommendation and the precise "
+            "decision needed. Do not suggest an unexplained merge bypass.\n" + format_unresolved_threads(threads),
+            contract=False).output
         email(state, "unresolved review threads need your help",
               f"There are still {len(threads)} unresolved review conversation(s) on the PR "
               f"after {config.PR_THREAD_MAX_ROUNDS} round(s) of fixes.\nPR: {state['pr_url']}"
-              "\n\nPlease resolve them yourself, or reply 'merge' to merge anyway.")
+              f"\n{summary}\nReply with guidance on the remaining findings; use 'merge anyway' only "
+              "to explicitly merge despite them.", [report])
         state["pr_thread_notified"] = True
     else:
         state["pr_threads"] = threads
         state["state"] = "ADDRESS_PR_THREADS"
         log.info("PR has %d new unresolved review thread(s); addressing before merge", len(threads))
         return
-    handle_wait(state)
+
+
+def _receive_feedback(state: dict) -> bool:
+    if not state.get("thread_id") or not state.get("item"):
+        return False
+    polled = gmail_client.poll_reply(state["thread_id"])
+    if not polled:
+        return False
+    message_id, text = polled
+    if parse_command(text):
+        return False  # command loop retains ownership, especially ABORT/HOLD/STATUS
+    if gmail_client.foreign_command(text):
+        gmail_client.mark_processed(message_id)
+        return False
+    if _queue_conversation(state, message_id, text):
+        return True
+    row = feedback.receive(phase_checkpoint.store(), state, config.REPO_PATH, message_id, text)
+    if row is None:
+        raise RuntimeError("Feedback receipt could not be recorded")
+    if not row["data"].get("acknowledged"):
+        gmail_client.send(subject(state, "feedback received"),
+            message_templates.operational("received", state.get("task_language", "English")),
+            state["thread_id"])
+        phase_checkpoint.store().update("feedback", row, acknowledged=True)
+    task_records.contact(phase_checkpoint.store(), state, config.REPO_PATH,
+                         message_id, state["thread_id"])
+    gmail_client.mark_processed(message_id)
+    return True
+
+
+def _dispatch_feedback(state: dict) -> bool:
+    database = phase_checkpoint.store()
+    parallel_conversation.transfer_changes(database, state, config.REPO_PATH)
+    parallel_conversation.sync_inputs(database, state, config.REPO_PATH)
+    rows = feedback.pending(database, state, config.REPO_PATH)
+    if not rows:
+        return False
+    row = rows[0]
+    original_phase = state["state"]
+    try:
+        return _apply_received_feedback(state, database, row)
+    except AgentContentFilterError:
+        state["state"] = original_phase
+        database.update("feedback", row, status="blocked", outcome="content-filter")
+        _content_filter_stop(state, original_phase)
+        return True
+
+
+def _apply_received_feedback(state: dict, database, row: dict) -> bool:
+    text = row["data"]["text"]
+    original_phase = state["state"]
+    lateral_change = bool(row["data"].get("conversation_input_id"))
+    phase = (state.get("return_state") if original_phase == "WAIT_REPLY" else original_phase)
+    # A PR already exists, but a supplementary proposal can still be awaiting
+    # approval. Classify delivery without interpreting it as that approval.
+    if original_phase == "WAIT_APPROVAL" and state.get("pr_url") and not row["data"].get("assessment"):
+        classified = agent_runner.run("Classify only whether this entire message requests evidence delivery "
+            "without product changes or approval. No tools. Return JSON {\"delivery_only\":true|false}. "
+            "Mixed product changes, approval replies and ambiguous messages are false.\n" + prompts.fenced("message", text), contract=False)
+        if parse_json_reply(classified.output).get("delivery_only") is True:
+            row = database.update("feedback", row, assessment=feedback.validate({"action": "delivery",
+                "answer": "Deliver existing evidence", "reason": "Delivery does not approve the proposal",
+                "references": "Authorized user request: " + text}))
+    delivery_only = row["data"].get("assessment", {}).get("action") == "delivery"
+    if lateral_change and (phase in ("EXPLORING", "PROPOSING") or
+                           original_phase == "WAIT_APPROVAL" and not state.get("approved_proposal")) and not delivery_only:
+        # A lateral requirement is not an answer to the working question. Update
+        # initial planning with phase guardrails, preserving an unanswered wait.
+        saved_wait = {key: copy.deepcopy(state[key]) for key in
+                      ("state", "pending_question", "pending_decision", "return_state", "question_rounds")
+                      if key in state}
+        planning_phase = phase if phase in ("EXPLORING", "PROPOSING") else "PROPOSING"
+        result = agent_runner.resume(state["session_id"],
+            "Incorporate this newly received requirement into initial planning only. "
+            "It does NOT answer any existing question or authorize implementation. "
+            "Preserve existing unanswered decisions. Do not edit application code, commit, push or merge.\n"
+            + prompts.PHASE_RULES.get(planning_phase, "") + prompts.fenced("user requirement", text))
+        state["session_id"] = result.session_id
+        if original_phase == "WAIT_REPLY":
+            state.update(saved_wait)
+            email(state, "planning context incorporated", result.output)
+        elif original_phase == "WAIT_APPROVAL":
+            _send_proposal_review(state, result.output, revised=True, feedback=text)
+        elif handle_result(state, result, planning_phase):
+            pass
+        else:
+            email(state, "planning context incorporated", result.output)
+        save_state(state)
+        database.update("feedback", row, status="complete", outcome="initial planning updated")
+        return True
+    if phase in ("EXPLORING", "PROPOSING"):
+        # These phases are still defining the initial requirements. There is no
+        # approved contract to investigate or replan, even when an answer changes
+        # a suggested option or arrived through the active-turn feedback queue.
+        if original_phase == "WAIT_REPLY":
+            _handle_reply(state, text)
+        else:
+            state["return_state"] = phase
+            state["state"] = "WAIT_REPLY"
+            save_state(state)
+            do_question_reply(state, text)
+        database.update("feedback", row, status="complete", outcome=state["state"])
+        return True
+    interrupted_wait = None
+    if lateral_change and state["state"] in ("WAIT_STUCK", "WAIT_REPLY", "WAIT_APPROVAL", "WAIT_CLEAN"):
+        state["state"] = state.get("stuck_return") or state.get("return_state") or "VERIFYING"
+        interrupted_wait = original_phase
+    elif state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and state.get("return_state") != "FEEDBACK_QUESTION":
+        # Explicit recovery commands/answers keep their existing continuation;
+        # a newly asserted feature requirement must be investigated as feedback.
+        intent = agent_runner.run("Classify this authorized message without tools. Return ONLY JSON "
+            'with kind "answer", "delivery" or "product_feedback". Requests solely to capture, '
+            'convert or publish evidence, or add its Drive link to the PR, are delivery, '
+            'not product_feedback or an answer authorizing implementation/merge. A missing feature, new requirement or '
+            "design objection is product_feedback even if phrased as a question. An answer "
+            "to the pending question or retry/repair guidance is answer. Selecting, "
+            "explaining or qualifying an offered alternative is an answer even if "
+            "it starts with '3. <explanation>', unless the complete reply adds or "
+            "changes requirements outside the approved scope; that remains product_feedback.\n"
+            + handoffs.classification_context(state)
+            + prompts.fenced("pending question", state.get("pending_question") or state.get("stuck_error", ""))
+            + prompts.fenced("message", text), contract=False)
+        kind = parse_json_reply(intent.output).get("kind")
+        if kind not in ("answer", "product_feedback", "delivery"):
+            raise ValueError("Invalid waiting feedback intent")
+        if kind in ("product_feedback", "delivery"):
+            state["state"] = state.get("stuck_return") or state.get("return_state") or "VERIFYING"
+            interrupted_wait = original_phase
+        if kind == "delivery":
+            row = database.update("feedback", row, assessment={"action": "delivery",
+                "answer": "Deliver requested evidence", "reason": "Controller delivery operation",
+                "references": "Authorized user request: " + text})
+    if row["data"].get("question_reply_to"):
+        question = database.get("feedback", row["data"]["question_reply_to"])
+        if question:
+            row = database.update("feedback", row, text=question["data"]["text"] +
+                "\nUser clarification: " + text)
+            if row is None:
+                raise RuntimeError("Feedback clarification could not be saved")
+    if state["state"] in USER_SIDE_WAITS and row["data"].get("phase") not in USER_SIDE_WAITS:
+        interrupted_wait = state["state"]
+        state["state"] = row["data"].get("phase", "VERIFYING")
+    if state["state"] in ("WAIT_STUCK", "WAIT_REPLY") and any(
+            token in text.casefold() for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
+        verification_ledger.waiver(state, text, "e2e:general", content_snapshot(config.REPO_PATH))
+    if state["state"] in ("WAIT_APPROVAL", "WAIT_REPLY", "WAIT_STUCK", "WAIT_CLEAN") and not (
+            row["data"].get("assessment", {}).get("action") == "delivery"):
+        if state.get("return_state") == "FEEDBACK_QUESTION":
+            state.pop("pending_question", None)
+            state.pop("return_state", None)
+            state["state"] = state.pop("feedback_question_origin", "VERIFYING")
+        else:
+            _handle_reply(state, row["data"]["text"])
+            database.update("feedback", row, status="complete", outcome=state["state"])
+            return True
+    assessment = row["data"].get("assessment")
+    if not assessment:
+        database.update("feedback", row, status="investigating")
+        try:
+            result = agent_runner.run(feedback.investigation(state, row))
+            assessment = feedback.validate(parse_json_reply(result.output))
+        except Exception:
+            state["state"] = original_phase
+            raise
+        row = database.update("feedback", row, assessment=assessment)
+        if row is None:
+            raise RuntimeError("Feedback assessment could not be saved")
+    if assessment["action"] == "delivery":
+        # Delivery is controller work, never an application implementation phase.
+        # Preserve the pending decision and resume it after success or a retryable failure.
+        try:
+            outcome = evidence_delivery.deliver(database, state, config.REPO_PATH,
+                sync_pr=_sync_pr_video, notify=_notify_evidence, operations=assessment.get("operations"),
+                read_pr=lambda s: json.loads(_run_checked(["gh", "pr", "view", s["pr_url"], "--json", "body"]))["body"])
+            if outcome["status"] != "complete":
+                if (state.get("pr_url") and state.get("has_e2e_harness") and
+                        original_phase == "WAIT_MERGE" and
+                        outcome.get("stage") in ("capture/validation", "conversion", "video")):
+                    database.update("feedback", row, status="pending", delivery_error=str(outcome),
+                                    retry_after=time.time() + 60)
+                    _begin_evidence_repair(state)
+                    return True
+                raise RuntimeError(f"Evidence delivery pending at {outcome['stage']}: {outcome.get('error', outcome['status'])}")
+        except Exception as exc:
+            database.update("feedback", row, status="pending", delivery_error=str(exc), retry_after=time.time() + 60)
+            if not row["data"].get("delivery_error"):
+                detail = str(exc) + "\nNo product replanning or merge is authorized."
+                if "access" in str(exc):
+                    detail += ("\nConfirm the destination folder and its existing access settings. "
+                               "Codebot will not create or modify permissions; do not send credentials here.")
+                email(state, "evidence delivery pending", detail)
+        else:
+            database.update("feedback", row, status="complete", outcome="evidence delivered")
+        state["state"] = original_phase
+        save_state(state)
+        return True
+    if assessment.get("delivery_operations") and not row["data"].get("delivery_requirement_id"):
+        delivery_assessment = feedback.validate({"action": "delivery", "answer": "Complete requested evidence delivery",
+            "reason": "Delivery requirement retained separately from product feedback",
+            "references": assessment["references"], "operations": assessment["delivery_operations"]})
+        retained = feedback.receive(database, state, config.REPO_PATH, "delivery:" + row["id"], text)
+        database.update("feedback", retained, status="pending", assessment=delivery_assessment,
+                        after_product_feedback=row["id"], requires_product_completion=True)
+        row = database.update("feedback", row, delivery_requirement_id=retained["id"])
+    if not row["data"].get("assessment_delivered"):
+        try:
+            if lateral_change and assessment["action"] == "question":
+                # Do not let email's decision decorator overwrite the working
+                # pending_decision for a clarification owned by lateral chat.
+                import message_delivery
+                message_delivery.deliver(database, state, config.REPO_PATH, config.DATA_DIR,
+                    gmail_client._backend(), subject(state, "request clarification"),
+                    assessment["answer"] + "\n" + assessment["reason"] + "\nRequest: " +
+                    row["data"]["conversation_input_id"], state.get("thread_id"),
+                    identity="request-clarification:" + row["id"])
+            else:
+                answer, files = feedback.attachments(assessment)
+                email(state, "feedback investigated", answer + "\n" + assessment["reason"], files,
+                      visible_question=assessment["answer"] if assessment["action"] == "question" else None)
+                if files and state.get("last_delivery", {}).get("complete") is False:
+                    raise RuntimeError("Feedback evidence attachment delivery remains incomplete")
+        except Exception:
+            state["state"] = original_phase
+            raise
+        row = database.update("feedback", row, assessment_delivered=True)
+        if row is None:
+            raise RuntimeError("Feedback delivery checkpoint failed")
+    if assessment["action"] == "replan":
+        replanning.begin(state, row)
+        save_state(state)
+        database.update("feedback", row, status="planning")
+    elif assessment["action"] == "correction":
+        state["pending_feedback"] = row["data"]["text"]
+        state["feedback_origin"] = state["state"]
+        state["state"] = "APPLY_FEEDBACK"
+        state["active_feedback_id"] = row["id"]
+        save_state(state)
+        database.update("feedback", row, status="repairing")
+    elif assessment["action"] == "question":
+        if lateral_change:
+            request = database.get("conversation_input", row["data"]["conversation_input_id"])
+            database.update("conversation_input", request, status="clarifying", question=assessment["answer"])
+            database.update("feedback", row, status="waiting")
+            state["state"] = original_phase
+            save_state(state)
+            return True
+        state["feedback_question_origin"] = state["state"]
+        state["feedback_question_id"] = row["id"]
+        state["pending_question"] = assessment["answer"]
+        state["return_state"] = "FEEDBACK_QUESTION"
+        if state.get("pending_decision"):
+            state["pending_decision"]["origin"] = "FEEDBACK_QUESTION"
+        state["state"] = "WAIT_REPLY"
+        save_state(state)
+        database.update("feedback", row, status="waiting")
+    else:
+        if interrupted_wait:
+            state["state"] = interrupted_wait
+        database.update("feedback", row, status="complete", outcome="answered")
+    if row["data"].get("question_reply_to"):
+        question = database.get("feedback", row["data"]["question_reply_to"])
+        if question:
+            database.update("feedback", question, status="complete", outcome="clarification incorporated")
+        state.pop("feedback_question_id", None)
+    return True
+
+
+def do_replan(state: dict) -> None:
+    prompt = replanning.prompt(state, config.REPO_PATH)
+    save_state(state)
+    result = agent_runner.resume(state["session_id"], prompt)
+    if handle_result(state, result, "REPLANNING"):
+        return
+    _send_proposal_review(state, result.output, revised=True, feedback=state["replan"]["feedback"])
+    row = phase_checkpoint.store().get("feedback", state["replan"]["feedback_id"])
+    if row is None:
+        raise RuntimeError("Replanning feedback is missing")
+    phase_checkpoint.store().update("feedback", row, status="planning" if state.get("proposal_delivery_pending") else "complete",
+                                    outcome="revised proposal delivery queued")
+
+
+def _continue_replanning(state, result):
+    archive = state.get("replan", {}).get("original_archive")
+    if archive:
+        # The historical archive is immutable; the complementary artifacts carry
+        # the new decisions. Detect an agent accidentally editing historical files.
+        if git("status", "--porcelain", "--untracked-files=all", "--", archive):
+            raise RuntimeError("Replanning modified the historical archive; preserve it and repair the complementary change")
+    _run_checked(["openspec", "validate", state["slug"], "--strict", "--no-interactive"])
+    _send_proposal_review(state, result.output, revised=True, feedback=state["replan"]["feedback"])
+    database = phase_checkpoint.store()
+    row = database.get("feedback", state["replan"]["feedback_id"])
+    if row:
+        database.update("feedback", row, status="planning" if state.get("proposal_delivery_pending") else "complete",
+                        outcome="revised proposal delivery queued")
+
+
+def do_recover(state: dict) -> None:
+    database = phase_checkpoint.store()
+    row = database.get("recovery", state["recovery_id"])
+    if not row:
+        raise RuntimeError("Recovery context is missing")
+    current = repo_provenance.inspect(config.REPO_PATH)
+    if "before" not in row["data"]:
+        row = database.update("recovery", row, before=current, reason=row["data"].get("detail", "Legacy blocked repository"), attempts=0)
+        if row is None:
+            raise RuntimeError("Legacy recovery migration failed")
+    owned, protected = recovery.ownership(database, state, config.REPO_PATH, current)
+    if row["data"].get("isolated"):
+        owned = row["data"].get("owned", [])
+    elif protected and not row["data"].get("attribution_checked"):
+        result = agent_runner.run(recovery.attribution_prompt(state, current))
+        value = parse_json_reply(result.output)
+        attributed = recovery.validate_attribution(value, current)
+        owned = sorted(set(owned) | set(attributed))
+        protected = [path for path in protected if path not in attributed]
+        row = database.update("recovery", row, attribution_checked=True, owned=owned,
+                              protected=protected, attribution_evidence=value["evidence"])
+        if row is None:
+            raise RuntimeError("Recovery attribution could not be saved")
+    elif row["data"].get("attribution_checked"):
+        owned = row["data"].get("owned", owned)
+        protected = row["data"].get("protected", protected)
+    if protected and not row["data"].get("isolated"):
+        workspace = recovery.isolate(state, config.REPO_PATH, config.DATA_DIR, owned)
+        config.REPO_PATH = workspace
+        repo_provenance.inspect(workspace)
+        state["state"] = "RECOVERING"
+        database.update("recovery", row, isolated=True, protected=protected,
+                        owned=owned, status="running", merge_heads=state.get("isolated_merge_heads", []))
+        save_state(state)
+        return
+    if not current["files"] and not current["operations"]:
+        merge_heads = row["data"].get("merge_heads", [])
+        if merge_heads and not row["data"].get("merge_completed"):
+            attempts = row["data"].get("attempts", 0) + 1
+            if attempts > config.MAX_STATE_FAILURES:
+                _enter_stuck(state, "RECOVERING", "Preserved merge needs a concrete conflict resolution; diagnostics are attached.")
+                return
+            row = database.update("recovery", row, attempts=attempts)
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
+                "\nComplete the equivalent preserved merge with these heads: " + json.dumps(merge_heads))
+            if handle_result(state, result, "RECOVERING"):
+                return
+            for head in merge_heads:
+                _run_checked(["git", "merge-base", "--is-ancestor", head, "HEAD"])
+            database.update("recovery", row, merge_completed=True)
+            _complete_recovery(state, result)
+            return
+        if row["data"].get("reason", "").startswith("Archive condition requires repair"):
+            attempts = row["data"].get("attempts", 0) + 1
+            if attempts > config.MAX_STATE_FAILURES:
+                _enter_stuck(state, "RECOVERING", "Archive repair did not resolve its condition; diagnostic guidance is needed.")
+                return
+            row = database.update("recovery", row, attempts=attempts)
+            if row is None:
+                raise RuntimeError("Archive recovery update failed")
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state))
+            if handle_result(state, result, "RECOVERING"):
+                return
+            _complete_recovery(state, result)
+            return
+        if row["data"].get("repair_checks") and row["data"]["repair_checks"].get("status") != "pass":
+            attempts = row["data"].get("attempts", 0) + 1
+            if attempts > config.MAX_STATE_FAILURES:
+                _enter_stuck(state, "RECOVERING", "Post-repair checks remain unresolved; diagnostic guidance is needed.")
+                return
+            row = database.update("recovery", row, attempts=attempts)
+            if row is None:
+                raise RuntimeError("Recovery update failed")
+            result = agent_runner.resume(state["session_id"], recovery.prompt(row, owned, state) +
+                "\nDiagnose these post-repair checks and repair the underlying issue:\n" + json.dumps(row["data"]["repair_checks"]))
+            if handle_result(state, result, "RECOVERING"):
+                return
+            _complete_recovery(state, result)
+            return
+        from types import SimpleNamespace
+        _complete_recovery(state, SimpleNamespace(output="Repository precondition restored."))
+        return
+    attempts = row["data"].get("attempts", 0) + 1
+    if attempts > config.MAX_STATE_FAILURES:
+        _enter_stuck(state, "RECOVERING", "Repository recovery made no verified progress. "
+                     "I need a concrete resolution for the preserved repository condition.")
+        return
+    row = database.update("recovery", row, attempts=attempts)
+    if row is None:
+        raise RuntimeError("Recovery update failed")
+    before = current["fingerprint"]
+    prompt = recovery.prompt(row, owned, state)
+    if row["data"].get("merge_heads"):
+        prompt += "\nThe preserved original checkout had an interrupted merge with heads " + json.dumps(row["data"]["merge_heads"]) + ". Complete the equivalent merge in this isolated workspace, preserving both branch intents."
+    if row["data"].get("diagnosis"):
+        prompt += "\nPrior attempt: " + row["data"]["diagnosis"] + "\nInvestigate and change the repair plan before retrying."
+    result = agent_runner.resume(state["session_id"], prompt)
+    if handle_result(state, result, "RECOVERING"):
+        return
+    if owned and not current["operations"] and not row["data"].get("merge_heads") and repo_provenance.inspect(config.REPO_PATH)["head"] != current["head"]:
+        # Recovery can commit task repairs, but never smuggle protected paths into
+        # that commit. The pre-existing worktree remains the preservation copy.
+        changed = git("diff", "--name-only", current["head"], "HEAD").splitlines()
+        outside = [path for path in changed if path not in owned]
+        if outside:
+            raise RuntimeError("Recovery committed paths outside its attributed scope: " + ", ".join(outside))
+    _complete_recovery(state, result)
+    if state["state"] == "RECOVERING" and repo_provenance.inspect(config.REPO_PATH)["fingerprint"] == before:
+        database.update("recovery", row, diagnosis="No repository progress; inspect prior attempt before repeating")
+
+
+def _complete_recovery(state, result):
+    database = phase_checkpoint.store()
+    row = database.get("recovery", state["recovery_id"])
+    if not row:
+        raise RuntimeError("Recovery context is missing")
+    after = repo_provenance.inspect(config.REPO_PATH)
+    protected = row["data"].get("protected", [])
+    if protected and not row["data"].get("isolated"):
+        raise RuntimeError("Recovery must isolate protected changes before repair")
+    if after["files"] or after["operations"]:
+        database.update("recovery", row, last_fingerprint=after["fingerprint"])
+        state["state"] = "RECOVERING"
+        return
+    if row["data"].get("reason", "").startswith("Archive condition requires repair"):
+        try:
+            active = config.REPO_PATH / "openspec/changes" / state["slug"]
+            if active.exists():
+                _run_checked(["openspec", "validate", state["slug"], "--strict", "--no-interactive"])
+            elif state.get("archive_path"):
+                _validate_archived_change(config.REPO_PATH / state["archive_path"])
+            else:
+                raise RuntimeError("Neither active change nor archive is available")
+        except Exception as error:
+            database.update("recovery", row, diagnosis=str(error))
+            state["state"] = "RECOVERING"
+            return
+    if row["data"]["before"]["head"] != after["head"]:
+        # Archived tasks cannot re-enter active-change-only verification prompts.
+        # Verify actual repaired content deterministically before resuming its origin.
+        report = final_checks.run(state, config.REPO_PATH, database)
+        state["final_check_report"] = report
+        if report["status"] != "pass":
+            database.update("recovery", row, diagnosis="Repair checks require diagnosis: " + report["status"],
+                            repair_checks=report)
+            state["state"] = "RECOVERING"
+            return
+    for key in ("quality_report", "internal_review_report", "reviewed_snapshot", "coverage_report"):
+        state.pop(key, None)
+    state["verify_round"] = 0
+    state["recovery_resume"] = row["data"]["resume"]
+    state["state"] = row["data"]["resume"]
+    save_state(state)
+    database.update("recovery", row, status="complete", outcome=result.output)
+
+
+def do_apply_feedback(state: dict) -> None:
+    result = agent_runner.resume(state["session_id"], prompts.render(prompts.APPLY_PR_FEEDBACK,
+        feedback=state["pending_feedback"], branch=state["branch"]) + review_intent.RULES)
+    if handle_result(state, result, "APPLY_FEEDBACK"):
+        return
+    _complete_local_feedback(state, result)
+
+
+def _complete_local_feedback(state, result):
+    state["verify_round"] = 0
+    state.pop("reviewed_snapshot", None)
+    state.pop("final_check_report", None)
+    state.pop("coverage_report", None)
+    if state.get("pr_url"):
+        state["feedback_delivery_pending"] = True
+    state["state"] = "VERIFYING"
+    if state.get("archive_path") and state.get("pr_url"):
+        _queue_push(state, "feedback", result.output, feedback=state.get("pending_feedback", ""))
+    if state.get("active_feedback_id"):
+        database = phase_checkpoint.store()
+        row = database.get("feedback", state["active_feedback_id"])
+        if row is None:
+            raise RuntimeError("Feedback context is missing")
+        database.update("feedback", row, status="verifying", outcome="corrected; verifying")
+        state.pop("active_feedback_id", None)
 
 
 # ---------------------------------------------------------------- abort / reset
@@ -2549,9 +4172,18 @@ def _reset_to_base_branch() -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_images", "base_sha", "slug",
+RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
+              "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
+              "recovery_id", "replan", "approved_proposal",
+              "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
+              "check_waivers", "technical_retry", "stuck_diagnostic", "feedback_origin",
+              "last_delivery", "verification_diagnostic", "proposal_delivery_pending",
+              "feedback_question_origin", "remote_branch", "feedback_delivery_pending", "recovery_resume",
+              "pending_decision_id", "reminded_decision", "last_effective_progress",
+              "feedback_question_id",
+              "isolated_merge_heads",
               "branch", "pending_question", "question_rounds", "stuck_return", "stuck_error", "failures", "session_id", "thread_id", "pr_url", "e2e_specs",
-              "return_state", "review_since", "review_round", "review_run_link",
+        "return_state", "review_since", "review_round", "review_run_link",
               "review_comment_watermark", "review_comments", "pr_summary", "pr_title",
               "pr_title_guidance",
               "pr_threads", "pr_thread_round", "pr_thread_notified", "pr_threads_seen",
@@ -2560,10 +4192,23 @@ RESET_KEYS = ("item", "item_id", "item_url", "trail_ref", "item_detail", "item_i
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
               "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url")
+              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "proposal_snapshot", "proposal_sent_key",
+              "quality_report", "internal_review_report", "e2e_passed",
+              "implementation_summary", "pending_feedback", "architecture_report",
+              "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
+              "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
+              "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
+              "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
+              "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
+              "implementation_return_round", "implementation_turn", "implementation_progress",
+              "implementation_no_progress", "implementation_stall_round", "implementation_stall_round_feedback",
+              "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
+              "verification_guidance", "verification_requested_from", "verification_blocker",
+              "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
+              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round")
 
 
-def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
+def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:
     """End the task successfully: mark the item done in the backlog, optionally reset the
     checkout to a clean base branch (needed when finishing before a merge — the tree may
     hold proposal artifacts or a stale branch), email confirmation, and land in IDLE."""
@@ -2592,10 +4237,36 @@ def _finish_task(state: dict, note: str, reset_repo: bool) -> None:
             body += ("\n\nThe repo reset finished with issues (I'll re-check before the "
                      "next task):\n- " + "\n- ".join(problems))
     body += "\n\nI'll pick up the next pending item from the backlog."
-    email(state, subj, body)
+    if merged:
+        email(state, subj, body, milestone="merged")
+    else:
+        email(state, subj, body)
+    _publish_progress(state, "completed")
+    if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
+        state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
+    if state.get("original_workspace"):
+        config.REPO_PATH = Path(state.pop("original_workspace"))
+        state.pop("workspace_path", None)
     state["state"] = "IDLE"
+
+
+def _content_filter_stop(state: dict, failed_state: str) -> None:
+    """Reject this attempt, preserve the task, and request new text without an LLM."""
+    state.setdefault("task_language", "English")
+    if failed_state not in USER_SIDE_WAITS:
+        state["stuck_return"] = failed_state
+        state["state"] = "WAIT_STUCK"
+    state.pop("technical_retry", None)
+    state.setdefault("failures", {}).pop(failed_state, None)
+    body = message_templates.operational("content_filtered", state.get("task_language", "English"))
+    if failed_state not in USER_SIDE_WAITS:
+        state["stuck_error"] = body
+    save_state(state)
+    log.warning("provider content filter blocked %s; waiting for reformulated text", failed_state)
+    label = "texto bloqueado" if state.get("task_language", "").casefold() == "spanish" else "content blocked"
+    email(state, label, body, localized=True)
 
 
 def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
@@ -2606,13 +4277,16 @@ def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
     escalates after repeated classifier failures) would strand the pending question —
     the answer would later resolve to an unknown phase and the task's context is lost."""
     state["stuck_return"] = failed_state
-    state["stuck_error"] = detail[-2000:]
+    path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+                              config.DATA_DIR, failed_state, detail=detail)
+    state["stuck_error"] = diagnostics.summary(detail=detail)
+    state["stuck_diagnostic"] = str(path)
     email(state, f"stuck in {failed_state}",
           f"Task: {state.get('item', '?')}\nState: {failed_state}\n\n"
-          f"I stopped and need your help.\n\n{detail}\n\n"
+          f"I stopped. {state['stuck_error']}\n\n"
           "Reply 'retry' to try that step again, 'abort' to reset to a clean slate, "
           "'complete' to mark the task done as-is, or reply with instructions and I'll "
-          "apply them and continue.")
+           "apply them and continue.", [path])
     state["state"] = "WAIT_STUCK"
 
 
@@ -2629,6 +4303,7 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
     state.pop("conflict_rounds", None)
     state.pop("stuck_return", None)
     state.pop("stuck_error", None)
+    state.pop("technical_retry", None)
 
 
 def _escalate(state: dict, failed_state: str) -> bool:
@@ -2640,7 +4315,7 @@ def _escalate(state: dict, failed_state: str) -> bool:
     try:
         _enter_stuck(state, failed_state,
                      f"I've failed this step {config.MAX_STATE_FAILURES} times in a row. "
-                     f"Last error:\n\n{traceback.format_exc()[-2000:]}")
+                     f"Last error:\n\n{traceback.format_exc()}")
         log.warning("escalated %s to WAIT_STUCK after %d failures",
                     failed_state, config.MAX_STATE_FAILURES)
         return True
@@ -2652,7 +4327,8 @@ def _escalate(state: dict, failed_state: str) -> bool:
 def do_stuck_reply(state: dict, reply: str) -> None:
     """Handle the user's reply while WAIT_STUCK: retry / abort / complete / instructions."""
     verdict = parse_json_reply(
-        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply),
+        agent_runner.run(prompts.render(prompts.CLASSIFY_STUCK_REPLY, reply=reply)
+                         + handoffs.classification_context(state),
                          contract=False).output)
     action = verdict.get("action")
     log.info("classified stuck reply as action=%r", action)
@@ -2671,6 +4347,19 @@ def do_stuck_reply(state: dict, reply: str) -> None:
               f"\n\n{reply}\n\nPlease reply 'retry', 'abort', 'complete', or with explicit "
               "instructions.")
         return  # stay in WAIT_STUCK
+    if failed_state == "RECOVERING" and state.get("recovery_id"):
+        database = phase_checkpoint.store()
+        row = database.get("recovery", state["recovery_id"])
+        if row:
+            database.update("recovery", row, attempts=0, diagnosis="User recovery guidance: " + reply)
+    if failed_state in ("ARCHIVING", "RESOLVE_CONFLICTS") and state.get("session_id"):
+        current = repo_provenance.inspect(config.REPO_PATH)
+        if current["files"] or current["operations"]:
+            recovery.begin(phase_checkpoint.store(), state, config.REPO_PATH,
+                "Recover blocked repository; user guidance: " + reply, failed_state)
+            _clear_stuck(state, failed_state)
+            save_state(state)
+            return
     if action == "instructions" and failed_state == "OPEN_PR":
         # OPEN_PR is orchestrator-driven: the PR title/body never pass through the coding
         # session, so guidance about them must be applied HERE or it would be silently
@@ -2686,6 +4375,8 @@ def do_stuck_reply(state: dict, reply: str) -> None:
             prompts.ANSWER_REPLY, reply=verdict.get("feedback") or reply,
             rules=prompts.PHASE_RULES.get(failed_state, "")))
         state["session_id"] = result.session_id
+        if handle_result(state, result, failed_state):
+            return
     # retry, or instructions applied: clear the failure history for the state and resume it.
     _clear_stuck(state, failed_state)
     if failed_state == "IDLE":
@@ -2723,6 +4414,9 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
           f"{note}\n\nWas working on: {aborted_task}\nPrevious state: {prev_state}\n\n{status}\n\n"
           "Remote branches and PRs were left untouched. I'll pick up the next pending item "
           "from the backlog.", new_thread=new_thread)
+    _publish_progress(state, "aborted")
+    if config.COMM_CHANNEL == "slack" and state.get("thread_id"):
+        state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
     state["state"] = "IDLE"
@@ -2732,7 +4426,11 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
 
 def _load_holds() -> list[dict]:
     try:
-        return json.loads(config.HOLDS_PATH.read_text())
+        holds = json.loads(config.HOLDS_PATH.read_text())
+        for hold in holds:
+            if hold.get("saved"):
+                task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
+        return holds
     except (OSError, json.JSONDecodeError):
         return []
 
@@ -2803,9 +4501,11 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
     problems = _reset_to_base_branch()
     if problems:
         log.warning("reset after hold left issues: %s", problems)
-    for key in RESET_KEYS:
-        state.pop(key, None)
-    state["state"] = "IDLE"
+    with _status_command_lock:
+        _publish_progress(state, "paused")
+        for key in RESET_KEYS:
+            state.pop(key, None)
+        state["state"] = "IDLE"
     log.info("task on hold: %r (resume at %s)", item[:80], resume_state)
 
 
@@ -2847,6 +4547,10 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         git("checkout", branch)
     state.update(saved)
     state["state"] = resume_state
+    # New holds carry their persisted language. A legacy hold is classified on
+    # the next FSM tick, rather than starting another classifier mid-resume.
+    agent_runner.set_task_language(state.get("task_language"))
+    save_state(state)
     _save_holds([h for h in _load_holds() if h.get("thread_id") != hold.get("thread_id")])
     if note and state["state"] in WAITS and state["state"] != "WAIT_REVIEW":
         # The note answers whatever the task was waiting on (approval, question, merge).
@@ -2880,6 +4584,61 @@ def _is_transient_network_error(error: BaseException) -> bool:
     return status in (429, 500, 502, 503, 504)
 
 
+def _request_verification(state: dict, note: str = "") -> None:
+    """Move an active change to verification without changing Git or approvals."""
+    if not state.get("item") or not state.get("session_id"):
+        raise ValueError("VERIFY requires an active task and coding session")
+    slug = _validated_slug(state.get("slug"))
+    if state.get("archive_path") or not (config.REPO_PATH / "openspec/changes" / slug / "tasks.md").is_file():
+        raise ValueError("VERIFY requires an active, unarchived OpenSpec change")
+    restore_commit, note = verification_recovery.guidance(note)
+    if restore_commit:
+        state["verification_plan_recovery"] = verification_recovery.restore(
+            config.REPO_PATH, slug, restore_commit, config.DATA_DIR)
+        state["verified_task_inventory"] = task_phases.inventory(config.REPO_PATH, slug)
+    # Removing only the in-memory context lets task_records.migrate replay these
+    # durable transitions on the next tick. Retain their history, but explicitly
+    # supersede the old continuation before saving the new phase.
+    database = phase_checkpoint.store()
+    task_id = database.task_identity(state, config.REPO_PATH)
+    # Prior VERIFY versions cleared these fields. Recover only an actual clean
+    # review outcome bound to precisely the current content, never an agent claim
+    # that an old review is still applicable.
+    review_rows = [row for row in database.list("checkpoint", task_id)
+                   if row["status"] in ("complete", "consumed")
+                   and row["data"].get("phase") == "INTERNAL_REVIEW"
+                   and row["data"].get("output")]
+    if review_rows:
+        snapshot = content_snapshot(config.REPO_PATH)
+        for row in review_rows:
+            if row["data"].get("snapshot") == snapshot:
+                report, _ = parse_internal_review(row["data"]["output"])
+                if report:
+                    state["internal_review_report"] = report
+                    state["reviewed_snapshot"] = snapshot
+                    break
+    if state.get("quality_snapshot") and state["quality_snapshot"] != content_snapshot(config.REPO_PATH):
+        state.pop("quality_report", None)
+        state.pop("quality_snapshot", None)
+        state.pop("quality_controller_validated", None)
+    for row in database.list("feedback", task_id):
+        if row["status"] in ("planning", "repairing"):
+            database.update("feedback", row, status="superseded", outcome="verify-requested")
+    state["verification_requested_from"] = state["state"]
+    for key in ("replan", "pending_question", "return_state", "stuck_return",
+                "active_feedback_id", "pending_feedback", "feedback_origin",
+                "coverage_report", "verification_blocker",
+                "final_check_report", "e2e_passed", "implementation_feedback",
+                "verify_round_feedback", "review_gate_round_feedback"):
+        state.pop(key, None)
+    state["verification_guidance"] = note or "Verify the existing implementation and continue the normal verification gates."
+    state["verify_round"] = 0
+    state["review_gate_round"] = 0
+    state["implementation_return_round"] = 0
+    state["state"] = "VERIFYING"
+    save_state(state)
+
+
 def check_commands(state: dict) -> bool:
     """Handle a mailbox-wide user command (ABORT / STATUS / DONE). Returns True only when
     the tick should skip normal dispatch (an ABORT reset or a DONE completion).
@@ -2902,6 +4661,43 @@ def check_commands(state: dict) -> bool:
     if polled is None:
         return False
     msg_id, thread_id, command, targeted, note = polled
+    if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
+        gmail_client.mark_processed(msg_id)
+        return False
+    if (config.COMM_CHANNEL == "slack" and thread_id != state.get("thread_id")
+            and not any(h.get("thread_id") == thread_id for h in _load_holds())):
+        # A completed/aborted hold may still have a queued event before its root
+        # is retired. Never let that event target an unrelated active task.
+        gmail_client.mark_processed(msg_id)
+        return False
+    if config.COMM_CHANNEL == "slack" and _handle_held_command(msg_id, thread_id, command, note):
+        return False  # command addressed a held task, not the active one
+    if command == "VERIFY":
+        if thread_id != state.get("thread_id") and not targeted:
+            gmail_client.mark_processed(msg_id)
+            return False
+        try:
+            _request_verification(state, note)
+        except ValueError as error:
+            _send_localized(state, subject(state, "verify"), str(error), thread_id)
+            gmail_client.mark_processed(msg_id)
+            return False
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+        gmail_client.mark_processed(msg_id)
+        email(state, "Verification requested", "I will verify the existing work without repeating planning or implementation. "
+              "Verification, internal review and final checks still apply.")
+        return True
+    if command == "KICK":
+        # The independent supervisor interrupts live turns; here there is no
+        # running agent to restart. Never fall through to ABORT.
+        gmail_client.mark_processed(msg_id)
+        body = ("No hay un turno del agente en ejecución; la tarea sigue igual."
+                if state.get("task_language", "English").casefold() == "spanish" else
+                "No coding-agent turn is running; the task is unchanged.")
+        gmail_client.send(subject(state, "kick"), body, thread_id)
+        return False
     if command == "CONTINUE":
         if not _request_continue(thread_id, note):
             if thread_id and thread_id == state.get("thread_id"):
@@ -2910,24 +4706,36 @@ def check_commands(state: dict) -> bool:
                 log.debug("CONTINUE-shaped reply on the active thread; deferring")
                 return False
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing on hold here",
-                              "CONTINUE received, but no task is on hold on this thread.",
-                              thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing on hold here",
+                            "CONTINUE received, but no task is on hold on this thread.",
+                            thread_id)
             return False
-        gmail_client.mark_processed(msg_id)
-        gmail_client.send(f"{config.SUBJECT_PREFIX} general — will continue",
-                          "Got it — this task is next: I'll resume it as soon as my current "
-                          "work is done (right away if I'm idle).", thread_id)
+        if config.COMM_CHANNEL == "email":
+            gmail_client.mark_processed(msg_id)
+        _send_localized(_language_state_for_thread(state, thread_id),
+                        f"{config.SUBJECT_PREFIX} general — will continue",
+                        "Got it — this task is next: I'll resume it as soon as my current "
+                        "work is done (right away if I'm idle).", thread_id)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+        if config.COMM_CHANNEL == "slack":
+            gmail_client.mark_processed(msg_id)
         return False
     if command == "HOLD":
         if not state.get("item"):
             log.warning("HOLD command received but no task is in progress; ignoring")
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to hold",
-                              "HOLD received, but no task is in progress.", thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing to hold",
+                            "HOLD received, but no task is in progress.", thread_id)
             return False
         # Consume only AFTER handling (multi-step side effects, like DONE).
         _hold_task(state, thread_id)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
         gmail_client.mark_processed(msg_id)
         return True
     if command == "DONE":
@@ -2942,8 +4750,9 @@ def check_commands(state: dict) -> bool:
         if not state.get("item"):
             log.warning("DONE command received but no task is in progress; ignoring")
             gmail_client.mark_processed(msg_id)
-            gmail_client.send(f"{config.SUBJECT_PREFIX} general — nothing to complete",
-                              "DONE received, but no task is in progress.", thread_id)
+            _send_localized(_language_state_for_thread(state, thread_id),
+                            f"{config.SUBJECT_PREFIX} general — nothing to complete",
+                            "DONE received, but no task is in progress.", thread_id)
             return False
         # Consume only AFTER handling: _finish_task has multi-step network side effects
         # (docs strike-through, repo reset, email); a failure mid-way must leave the
@@ -2951,18 +4760,70 @@ def check_commands(state: dict) -> bool:
         # to re-run (a struck item just reports "mark manually" on the retry).
         _finish_task(state, "DONE command received: marking the current task complete.",
                      reset_repo=True)
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
         gmail_client.mark_processed(msg_id)
         return True
-    # ABORT / STATUS: consume the trigger first — handling is idempotent, and marking it
-    # processed up front guarantees a failure afterwards can't loop us into re-running it.
-    gmail_client.mark_processed(msg_id)
+    # Gmail retains its mailbox-wide consume-first semantics. Slack's SQLite inbox
+    # instead checkpoints successful handling before marking an event consumed.
+    if config.COMM_CHANNEL == "email":
+        gmail_client.mark_processed(msg_id)
     if command == "STATUS":
         _send_status(state, thread_id)
         if thread_id and thread_id == state.get("thread_id"):
             _note_contact(state)  # a STATUS exchange on the task thread is contact too
+        if config.COMM_CHANNEL == "slack":
+            state["slack_last_handled_id"] = msg_id
+            save_state(state)
+            gmail_client.mark_processed(msg_id)
         return False  # STATUS is read-only; let the tick proceed normally
     _abort_and_reset(state, "ABORT received: I stopped the task in progress and reset myself "
                             "to a clean slate.", new_thread=True)
+    if config.COMM_CHANNEL == "slack":
+        state["slack_last_handled_id"] = msg_id
+        save_state(state)
+        gmail_client.mark_processed(msg_id)
+    return True
+
+
+def _handle_held_command(msg_id: str, thread_id: str, command: str, note: str) -> bool:
+    """A held Slack thread addresses its own task, never the unrelated active task."""
+    hold = next((h for h in _load_holds() if h.get("thread_id") == thread_id), None)
+    if not hold:
+        return False
+    item, item_id = hold["item"], hold.get("item_id")
+    if command == "CONTINUE":
+        _request_continue(thread_id, note)
+        response = "I'll resume this task after the current work is done."
+    elif command == "STATUS":
+        response = (f"{config.INSTANCE_ID} · on hold: {item}\n"
+                    f"Branch: {hold.get('branch', '-')}\n"
+                    f"Resume requested: {bool(hold.get('requested'))}")
+    elif command == "HOLD":
+        response = f"Task is already on hold: {item}"
+    elif command == "VERIFY":
+        response = "Resume this held task with CONTINUE before requesting VERIFY."
+    elif command == "ABORT":
+        task_source.unhold_task(item, item_id)
+        if not task_source.unclaim_task(item, item_id):
+            raise RuntimeError(f"could not release held task {item!r} from backlog")
+        _save_holds([h for h in _load_holds() if h.get("thread_id") != thread_id])
+        response = f"Released held task to the backlog: {item}"
+    elif command == "DONE":
+        if not task_source.mark_done(item, item_id):
+            raise RuntimeError(f"could not mark held task {item!r} done in backlog")
+        _save_holds([h for h in _load_holds() if h.get("thread_id") != thread_id])
+        response = f"Marked held task done: {item}"
+    else:
+        return False
+    _send_localized(hold.get("saved") or {},
+                    f"{config.SUBJECT_PREFIX} held task — {command}", response, thread_id)
+    gmail_client.mark_processed(msg_id)
+    if command in ("ABORT", "DONE"):
+        held_state = {**(hold.get("saved") or {}), "thread_id": thread_id}
+        _publish_progress(held_state, "aborted" if command == "ABORT" else "completed")
+        gmail_client.close_thread(thread_id)
     return True
 
 
@@ -2979,55 +4840,74 @@ def _heartbeat_age() -> float | None:
 
 def _send_status(state: dict, thread_id: str) -> None:
     """Reply to a STATUS command with a snapshot of the FSM. Never mutates state."""
-    lines = [
-        f"Instance: {config.INSTANCE_ID}",
-        f"State: {state.get('state', '?')}",
-        f"Task: {state.get('item', '-')}",
-        f"Slug: {state.get('slug', '-')}",
-        f"Branch: {state.get('branch', '-')}",
-        f"PR: {state.get('pr_url', '-')}",
-    ]
-    if state.get("stuck_return"):
-        lines.append(f"Stuck on state (awaiting your reply): {state['stuck_return']}")
-    if state.get("return_state"):
-        lines.append(f"Pending question from phase: {state['return_state']}")
-    if state.get("stuck_error"):
-        lines.append(f"Last error:\n{state['stuck_error']}")
-    active = {k: v for k, v in state.get("failures", {}).items() if v}
-    if active:
-        lines.append("Failure counters: " + ", ".join(f"{k}={v}" for k, v in active.items()))
-    if state.get("question_rounds"):
-        lines.append(f"Consecutive question rounds: {state['question_rounds']}")
-    if state.get("conflict_rounds"):
-        lines.append(f"Merge-conflict resolution attempts: {state['conflict_rounds']}")
-    age = _heartbeat_age()
-    if age is not None:
-        lines.append(f"Heartbeat age: {age:.0f}s")
+    body = _short_status(state, agent_runner.turn_snapshot(), time.time())
     holds = _load_holds()
     if holds:
-        lines.append("On hold: " + "; ".join(
-            f"{h.get('slug') or h.get('item', '?')[:40]}"
-            + (" (continue requested)" if h.get("requested") else "") for h in holds))
-    if state.get("last_transition"):
-        lines.append(f"Last transition: {_fmt_ts(state['last_transition'])}")
-    if state.get("last_contact") is not None:
-        lines.append(f"Last real email on the task thread: {_fmt_ts(state['last_contact'])}")
-    if state.get("ping_count"):
-        lines.append(f"Silence check-ins sent since then: {state['ping_count']} "
-                     f"(last at {_fmt_ts(state['last_ping_at'])})")
-    for key, label in (("e2e_round", "E2E fix rounds"), ("verify_round", "Quality-gate rounds"),
-                       ("review_round", "Code-review rounds"),
-                       ("pr_thread_round", "PR-thread rounds"), ("archive_round", "Archive rounds")):
-        if state.get(key):
-            lines.append(f"{label}: {state[key]}")
-    body = "codebot status:\n\n" + "\n".join(lines)
-    last = state.get("last_email")
-    if last:
-        body += (f"\n\n--- Last email sent ({_fmt_ts(last['sent_at'])}) ---\n"
-                 f"Subject: {last['subject']}\n\n{last['body']}")
-    subj = f"{config.SUBJECT_PREFIX} {state.get('slug', 'general')} — status"
-    gmail_client.send(subj, body, thread_id)
-    log.info("sent STATUS report (state=%s)", state.get("state"))
+        body += "\nOn hold: " + "; ".join(str(h.get("slug") or h.get("item", "?")) +
+            (" (continue requested)" if h.get("requested") else "") for h in holds[:3])
+    _send_localized(state, subject(state, "status"), body, thread_id)
+    task_records.contact(phase_checkpoint.store(), state, config.REPO_PATH,
+                         "status-" + str(time.time_ns()), thread_id)
+
+
+def _short_status(state: dict, turn: dict, now: float) -> str:
+    """A factual snapshot of the task and the last observable agent event."""
+    turn = activity.snapshot(state, turn, now)
+    spanish = state.get("task_language", "English").casefold() == "spanish"
+    phase = state.get("return_state") if state.get("state") == "WAIT_REPLY" else state.get("state", "IDLE")
+    title = str(state.get("item") or ("Sin tarea activa" if spanish else "No active task"))[:140]
+    started = (turn.get("started_at") if turn.get("active") else
+               state.get("last_transition") or _liveness.get("tick_started"))
+    elapsed = _fmt_dur(now - started) if isinstance(started, (float, int)) else "?"
+    last = turn.get("last_activity") or state.get("last_effective_progress")
+    counts = turn.get("todos") or {}
+    children = turn.get("children") or []
+    if spanish:
+        lines = [f"Tarea: {title}", f"Fase: {phase} (inició hace {elapsed})."]
+        if turn.get("current_task"):
+            lines.append(f"Ahora: {turn['current_task']}.")
+        if counts:
+            lines.append(f"Plan: {counts.get('in_progress', 0)} en curso, "
+                         f"{counts.get('pending', 0)} pendientes, {counts.get('completed', 0)} terminadas.")
+        if children:
+            lines.append("Subagentes: " + "; ".join(
+                f"{child['title']} (último evento hace {_fmt_dur(now - child['at'])})"
+                for child in children) + ".")
+        if last:
+            lines.append(f"Última actividad observada: {turn.get('activity', 'agente')} "
+                         f"(hace {_fmt_dur(now - last)}).")
+        if turn.get("process_dead"):
+            lines.append("El proceso del agente no aparece activo.")
+    else:
+        lines = [f"Task: {title}", f"Phase: {phase} (started {elapsed} ago)."]
+        if turn.get("current_task"):
+            lines.append(f"Now: {turn['current_task']}.")
+        if counts:
+            lines.append(f"Plan: {counts.get('in_progress', 0)} in progress, "
+                         f"{counts.get('pending', 0)} pending, {counts.get('completed', 0)} done.")
+        if children:
+            lines.append("Subagents: " + "; ".join(
+                f"{child['title']} (last event {_fmt_dur(now - child['at'])} ago)"
+                for child in children) + ".")
+        if last:
+            lines.append(f"Last observed activity: {turn.get('activity', 'agent')} "
+                         f"({_fmt_dur(now - last)} ago).")
+        if turn.get("process_dead"):
+            lines.append("The agent process is no longer running.")
+    for operation in operations.snapshot()[:4]:
+        elapsed = _fmt_dur(now - operation["started_at"])
+        lines.append(("Operación" if spanish else "Operation") + ": "
+                     + f"{operation['kind']} / {operation['label']} ({elapsed}); "
+                     + ("presupuesto restante" if spanish else "budget remaining")
+                     + f": {operation['remaining']:.0f}s")
+    if state.get("state") in USER_SIDE_WAITS and not turn.get("active"):
+        lines.append(_ping_body(state, now, 0))
+    elif not turn.get("active") and not operations.snapshot():
+        lines.append("No hay ejecución activa; siguiente paso o reintento pendiente." if spanish else
+                     "No active execution; next step or retry pending.")
+    else:
+        lines.append("Estoy trabajando; no necesito nada de ti." if spanish else "Working; no action needed.")
+    return "\n".join(lines[:10])
 
 
 # What "this phase finished via a WAIT_REPLY answer" means, per phase. Mirrors each
@@ -3036,29 +4916,17 @@ def _send_status(state: dict, thread_id: str) -> None:
 def _continue_exploring(state: dict, result) -> None:
     _undo_premature_work(state, "EXPLORING")
     state["state"] = "PROPOSING"
+    announce_milestone(state, "proposing", "Exploration is complete; I'm preparing the OpenSpec proposal.")
 
 
 def _continue_proposing(state: dict, result) -> None:
     note = _undo_premature_work(state, "PROPOSING")
-    email(state, "proposal for review",
-          f"{result.output}\n\n" + (f"{note}\n\n" if note else "")
-          + "Reply with your approval or requested changes.")
-    state["state"] = "WAIT_APPROVAL"
+    _send_proposal_review(state, result.output, note)
 
 
 def _continue_implementing(state: dict, result) -> None:
-    if _scrub_evidence_from_repo(state, "IMPLEMENTING") is None:
-        return
-    # The direct path parses the spec list from the final output; an answer that
-    # completes the phase carries the same contract, so parse it here too.
-    specs = evidence.reported_specs(result.output)
-    if specs:
-        state["e2e_specs"] = specs
-        log.info("implementation (via reply) reported %d e2e spec(s): %s", len(specs), specs)
-    state["e2e_round"] = 0
-    state["verify_round"] = 0
-    state["state"] = "VERIFYING"
-    trail(state, "Implementation complete; verifying")
+    state.pop("implementation_no_progress", None)
+    _complete_implementation(state, result)
 
 
 def _continue_verifying(state: dict, result) -> None:
@@ -3073,6 +4941,17 @@ def _continue_internal_review(state: dict, result) -> None:
 
 def _continue_e2e(state: dict, result) -> None:
     state["e2e_round"] = 0  # the user's guidance earns a fresh set of attempts
+    state.pop("final_check_round", None)
+    state.pop("final_repair_round", None)
+    if state.get("check_repair") and config.DETERMINISTIC_CHECKS:
+        _complete_check_repair(state, result)
+        return
+    # Upgrade legacy WAIT_REPLY final-check blockers into repair before rerunning.
+    if config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+        _begin_check_repair(state, state["final_check_report"], resume="E2E")
+        state["check_repair"]["guidance"] = "Prior user-guided investigation:\n" + result.output
+        save_state(state)
+        return
     if "e2e_repair_head" in state and "e2e_repair_status" in state:
         _finish_e2e_repair(state)
     else:
@@ -3088,6 +4967,7 @@ def _continue_address_review(state: dict, result) -> None:
     # Whether the answer-informed session committed is unknown on this detour path
     # (no head snapshot): push regardless — a no-op push is harmless, and the review
     # wait then either sees a new run or concludes from the clean-check.
+    state["review_round"] = state.get("review_round", 0) + 1
     _finish_address_review(state, result, head_before=None)
 
 
@@ -3100,7 +4980,8 @@ def _continue_resolve_conflicts(state: dict, result) -> None:
 def _continue_address_pr_threads(state: dict, result) -> None:
     if _scrub_evidence_from_repo(state, "ADDRESS_PR_THREADS") is None:
         return
-    _queue_push(state, "threads")
+    state["pr_thread_round"] = state.get("pr_thread_round", 0) + 1
+    _queue_push(state, "threads", result.output)
 
 
 def _continue_apply_pr_feedback(state: dict, result) -> None:
@@ -3111,10 +4992,17 @@ def _continue_apply_pr_feedback(state: dict, result) -> None:
         result, state.get("e2e_specs", []), state.get("e2e_kind"))
     existing = {path.resolve() for path in attachments}
     attachments += [path for path in extra_attachments if path.resolve() not in existing]
-    _queue_push(state, "feedback", result.output, attachments)
+    _queue_push(state, "feedback", result.output, attachments,
+                feedback=state.get("pending_feedback", ""))
 
 
 CONTINUATIONS = {
+    "RECOVERING": _complete_recovery,
+    "REPAIR_CHECKS": _complete_check_repair,
+    "EVIDENCE_REVIEW": _complete_evidence_review,
+    "REPLANNING": _continue_replanning,
+    "APPLY_FEEDBACK": _complete_local_feedback,
+    "FEEDBACK_QUESTION": lambda state, result: state.update(state="VERIFYING"),
     "EXPLORING": _continue_exploring,
     "PROPOSING": _continue_proposing,
     "IMPLEMENTING": _continue_implementing,
@@ -3133,6 +5021,19 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
     """The prompt that resumes the working session with the user's answer. Gate phases
     re-issue their own contract prompt (the answer alone would not make the session emit
     the completion contract again); every other phase gets the answer plus its rules."""
+    if phase == "REPAIR_CHECKS":
+        context = state["check_repair"]
+        context["guidance"] = reply
+        context["attempt"] = 1
+        return check_repair.prompt(state, context)
+    if phase == "EVIDENCE_REVIEW":
+        return (prompts.ENVIRONMENT + "\n" + prompts.PHASE_RULES[phase] +
+                "\n" + prompts.fenced_authoritative("user recovery guidance", reply))
+    if phase == "E2E" and config.DETERMINISTIC_CHECKS and state.get("final_check_report", {}).get("status") != "pass" and state.get("final_check_report"):
+        state["check_repair"] = {"attempt": 1, "resume": "E2E",
+            "checks": check_repair.unresolved(state["final_check_report"]),
+            "before": content_snapshot(config.REPO_PATH), "guidance": reply}
+        return check_repair.prompt(state, state["check_repair"])
     if phase in ("VERIFYING", "INTERNAL_REVIEW"):
         gate_prompt = _verify_prompt if phase == "VERIFYING" else _internal_review_prompt
         return f"User recovery guidance:\n{reply}\n\n" + gate_prompt(state)
@@ -3140,8 +5041,9 @@ def _reply_prompt(state: dict, phase: str, reply: str) -> str:
         return prompts.render(prompts.FIX_ARCHIVE,
                               error=state.get("archive_error", "unknown archival failure"),
                               guidance=reply)
-    return prompts.render(prompts.ANSWER_REPLY, reply=reply,
-                          rules=prompts.PHASE_RULES.get(phase, ""))
+    return (prompts.render(prompts.ANSWER_REPLY, reply=reply,
+                           rules=prompts.PHASE_RULES.get(phase, ""))
+            + handoffs.classification_context(state))
 
 
 def do_question_reply(state: dict, reply: str) -> None:
@@ -3149,10 +5051,14 @@ def do_question_reply(state: dict, reply: str) -> None:
     fresh session, like the other waits — because control-flow instructions ("mark it
     done and move on", "abandon this") must act on the FSM, not be forwarded to the
     working session, which has no lever on the FSM and can only loop asking questions."""
+    if state.get("pending_reply_delivery"):
+        _continue_reply_delivery(state)
+        return
     verdict = parse_json_reply(
         agent_runner.run(
             prompts.render(prompts.CLASSIFY_QUESTION_REPLY, reply=reply,
-                           question=state.get("pending_question", "(not recorded)")),
+                           question=state.get("pending_question", "(not recorded)"))
+            + handoffs.classification_context(state),
             contract=False).output)
     action = verdict.get("action")
     log.info("classified WAIT_REPLY reply as action=%r", action)
@@ -3163,6 +5069,40 @@ def do_question_reply(state: dict, reply: str) -> None:
     if action == "abort":
         _abort_and_reset(state, "Got it — I'm stopping this task and resetting to a clean slate.")
         return
+    if action == "resume_implementation":
+        blocker = state.get("verification_blocker", {})
+        if (state.get("return_state") == "VERIFYING" and
+                blocker.get("kind") == "unfinished or unclassified tasks"):
+            if _scope_drift(state):
+                return
+            # Do not let an LLM verdict approve a new inventory or bypass approval.
+            inventory = task_phases.inventory(config.REPO_PATH, state["slug"])
+            approved = state.get("verified_task_inventory", state.get("approved_task_inventory"))
+            pending = task_phases.inspect(config.REPO_PATH, state["slug"])
+            if approved is None or inventory != approved:
+                _verification_blocked(state, "scope drift",
+                                      "Cannot confirm pending tasks belong to the approved inventory.")
+                return
+            if pending["approval"]:
+                _verification_blocked(state, "approval", "\n".join(pending["approval"]))
+                return
+            if pending["implementation"]:
+                state["implementation_feedback"] = (
+                    "The user explicitly authorized completing only these pending approved "
+                    "implementation tasks. Preserve existing work and Git history; do not "
+                    "replan, expand scope, push or claim unexecuted checks. After completion, "
+                    "continue normal verification and evidence reconciliation.\n"
+                    + "\n".join(pending["implementation"]) + "\n"
+                    + prompts.fenced_authoritative("user continuation authorization", reply))
+                for key in ("verification_guidance", "verification_blocker", "pending_question",
+                            "return_state", "question_rounds", "implementation_no_progress",
+                            "implementation_progress", "quality_controller_validated"):
+                    state.pop(key, None)
+                state["state"] = "IMPLEMENTING"
+                save_state(state)
+                trail(state, "User authorized continuation of pending approved implementation",
+                      state["implementation_feedback"])
+                return
     # answer (the default): resume the working session, restating the phase rules the
     # raw reply lacks — sessions have overreached (implemented/pushed while PROPOSING)
     # exactly on these unframed resumes.
@@ -3175,14 +5115,74 @@ def do_question_reply(state: dict, reply: str) -> None:
                      f"{phase!r} and cannot resume it. 'retry' restarts from the backlog; "
                      "'abort' resets me.")
         return
+    pending_question = state.get("pending_question")
+    question_rounds = state.get("question_rounds")
     trail(state, f"Answer received (resuming {phase})", reply)
     result = agent_runner.resume(state["session_id"], _reply_prompt(state, phase, reply))
     if handle_result(state, result, phase):
         return  # re-questioned (or question cap hit); return_state already updated
+    reply_files = [Path(p) for p in result.attachments if Path(p).is_file()]
+    if result.output.strip() or reply_files:
+        # A WAIT_REPLY turn answers a person, regardless of the phase's normal
+        # completion notice. Deliver the answer/evidence before its continuation
+        # can replace it with a progress banner or silently discard attachments.
+        state["pending_reply_delivery"] = {
+            "phase": phase, "output": result.output, "session_id": result.session_id,
+            "attachments": [str(p) for p in reply_files],
+            "question": pending_question, "question_rounds": question_rounds,
+        }
+        if pending_question is not None:
+            state["pending_question"] = pending_question
+        if question_rounds is not None:
+            state["question_rounds"] = question_rounds
+        save_state(state)
+        _continue_reply_delivery(state)
+        return
     CONTINUATIONS[phase](state, result)
     if state["state"] != "WAIT_REPLY":  # a continuation may itself have re-questioned
         state.pop("return_state", None)
         state.pop("pending_question", None)
+
+
+def _continue_reply_delivery(state: dict) -> None:
+    """Resume only transport/continuation; never regenerate a completed agent reply."""
+    from types import SimpleNamespace
+    pending = state["pending_reply_delivery"]
+    phase = pending["phase"]
+    receipt_id = pending.get("notification_id")
+    if receipt_id:
+        receipt = phase_checkpoint.store().get("delivery_receipt", receipt_id)
+        if not receipt or receipt["status"] != "complete":
+            log.info("reply delivery pending for %s; waiting for transport confirmation", phase)
+            return
+    elif not pending.get("delivered"):
+        state.pop("last_delivery", None)
+        try:
+            label = "exploration reply" if phase == "EXPLORING" else f"reply during {phase}"
+            email(state, label, pending["output"].strip() or "The requested supporting files are attached.",
+                  [Path(p) for p in pending["attachments"]])
+        except Exception as error:
+            # Delivery receipts may already exist even if the send raised.
+            log.warning("reply delivery unavailable for %s; preserving completed answer: %s", phase, error)
+            save_state(state)
+            return
+        delivery = state.get("last_delivery", {})
+        if delivery.get("notification_id"):
+            pending["notification_id"] = delivery["notification_id"]
+        if delivery.get("complete") is False:
+            save_state(state)
+            log.info("reply delivery incomplete for %s; retrying transport only", phase)
+            return
+        pending["delivered"] = True
+        save_state(state)
+    result = SimpleNamespace(session_id=pending["session_id"], output=pending["output"],
+                             attachments=pending["attachments"], question=None, preamble="")
+    CONTINUATIONS[phase](state, result)
+    state.pop("pending_reply_delivery", None)
+    if state["state"] != "WAIT_REPLY":
+        state.pop("return_state", None)
+        state.pop("pending_question", None)
+    save_state(state)
 
 
 def _handle_reply(state: dict, reply: str) -> None:
@@ -3203,13 +5203,211 @@ def _handle_reply(state: dict, reply: str) -> None:
 # plausible duration, so a legit multi-hour agent call stays healthy but a wedged loop
 # eventually lets the heartbeat go stale (see config.HEARTBEAT_MAX_TICK_SECONDS).
 _liveness = {"tick_started": time.time()}
+_work_active = threading.Event()
+_status_command_lock = threading.RLock()
+_current_state: dict | None = None  # main-thread owner; status worker reads a snapshot only
 _lock_handle = None  # kept alive for the process lifetime so the flock is held
+_conversation_worker = None
+_conversation_state = None
+
+
+def _queue_conversation(state, message_id, text):
+    """Receipt first; commands retain their existing owner outside /btw."""
+    if parse_command(text):
+        return False
+    store = phase_checkpoint.store()
+    row = parallel_conversation.receive(store, state, config.REPO_PATH, message_id, text)
+    fixed = parallel_conversation.deterministic(state, text)
+    if fixed and row["status"] == "pending":
+        parallel_conversation.save_classification(store, row, fixed)
+    task_records.contact(store, state, config.REPO_PATH, message_id, state["thread_id"])
+    gmail_client.mark_processed(message_id)
+    if _conversation_worker:
+        _conversation_worker.wake.set()
+    return True
+
+
+def _dispatch_conversation(state):
+    store = phase_checkpoint.store()
+    rows = parallel_conversation.flow_pending(store, state, config.REPO_PATH)
+    if not rows:
+        return False
+    rows = [r for r in rows if not (r["data"].get("deferred_pr_decision") or r["data"].get("queued_pr_url"))
+            or state["state"] == "WAIT_MERGE"]
+    if not rows:
+        return False
+    row = rows[0]
+    if row["data"].get("queued_pr_url"):
+        if row["data"]["queued_pr_url"] != state.get("pr_url"):
+            store.update("conversation", row, status="complete", outcome="stale PR; not authorized")
+            email(state, "PR instruction needs confirmation", "The PR changed. Please send your instruction again; I did not merge.")
+            return True
+        if not row["data"].get("deferred_pr_decision"):
+            row = store.update("conversation", row, snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
+    if row["data"].get("deferred_pr_decision"):
+        if state["state"] != "WAIT_MERGE":
+            return False  # Repairs and push continue; lateral worker does not consume it.
+        if row["data"]["deferred_pr_decision"] != parallel_conversation.pr_decision_key(state):
+            store.update("conversation", row, status="complete", outcome="stale PR decision; not authorized")
+            email(state, "PR decision needs confirmation", "The displayed PR decision changed. Please review it and send your decision again; I did not merge.")
+            return True
+        # Only phase drift is permitted. The existing merge handler still validates
+        # reviewed content, conflicts, pending requirements and GitHub protections.
+        row = store.update("conversation", row, snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
+    if row["data"].get("flow_applied") or state.get("conversation_flow_id") == row["id"]:
+        store.update("conversation", row, status="complete", outcome=state["state"])
+        state.pop("conversation_flow_id", None)
+        return True
+    if row["data"]["snapshot"]["decision_version"] != parallel_conversation.decision_version(state):
+        store.update("conversation", row, status="pending", route=None, classification=None,
+                     snapshot=parallel_conversation.snapshot(store, state, config.REPO_PATH))
+        # Reusing a bare choice against a different decision is not safe.
+        if parallel_conversation.deterministic(state, row["data"]["text"]):
+            parallel_conversation.save_classification(store, store.get("conversation", row["id"]),
+                {"intent": "ambiguous", "resolves_pending_question": False, "inputs": []})
+        return True
+    phase = state["state"]
+    try:
+        _dispatch_wait_reply(state, row["identity"], row["data"]["original_text"])
+    except AgentContentFilterError:
+        state["state"] = phase
+        _content_filter_stop(state, phase)
+        store.update("conversation", row, status="failed", last_error="content-filter")
+        return True
+    state["conversation_flow_id"] = row["id"]
+    save_state(state)
+    state.pop("conversation_flow_id", None)
+    store.update("conversation", row, status="complete", outcome=state["state"])
+    return True
+
+
+def _deliver_conversation(row):
+    return parallel_conversation.delivery(phase_checkpoint.store(), row, row["data"]["snapshot"].get("repo", config.REPO_PATH),
+                                         config.DATA_DIR, gmail_client._backend())
+
+
+def _conversation_delivery_blocked(state):
+    store = phase_checkpoint.store()
+    # Drain authorized messages before evaluating the handoff, not after publishing.
+    if state.get("thread_id"):
+        with _status_command_lock:
+            _receive_feedback(state)
+    parallel_conversation.sync_inputs(store, state, config.REPO_PATH)
+    if not parallel_conversation.delivery_blockers(store, state, config.REPO_PATH):
+        state.pop("conversation_delivery_notified", None)
+        return False
+    if not state.get("conversation_delivery_notified"):
+        email(state, "pending conversation changes", "There are pending requests or messages to evaluate before "
+              "publishing or merging. Work is preserved; no publication or merge was authorized by the lateral chat.")
+        state["conversation_delivery_notified"] = True
+    return True
+
+
+def _status_supervisor_once() -> bool:
+    """Serve one inquiry without touching the FSM or starting another agent turn."""
+    state = dict(_current_state) if _current_state is not None else load_state()
+    working = _work_active.is_set() and state.get("state") in PHASES
+    turn = agent_runner.turn_snapshot()
+    if operations.snapshot():
+        turn["active"] = True
+    thread = state.get("thread_id") if _work_active.is_set() and turn.get("active") else None
+    with _status_command_lock:
+        # Interrupt only the live process; the main thread consumes VERIFY and owns
+        # the state transition on its next tick. Never mutate shared FSM state here.
+        if turn.get("active") and thread and state.get("item") and state.get("session_id"):
+            active = config.REPO_PATH / "openspec/changes" / str(state.get("slug", "")) / "tasks.md"
+            if not state.get("archive_path") and active.is_file():
+                verify = gmail_client.poll_verify(thread)
+                if isinstance(verify, tuple) and len(verify) == 5:
+                    if turn_control.request_kick():
+                        return True  # Leave the durable command queued for check_commands.
+        kick = gmail_client.poll_kick(thread) if turn.get("active") or config.COMM_CHANNEL == "slack" else None
+        if kick:
+            msg_id, reply_thread = kick
+            if turn_control.request_kick():
+                gmail_client.mark_processed(msg_id)
+                text = ("Reiniciando este turno del agente; conservaré la tarea y el trabajo ya guardado."
+                        if state.get("task_language", "English").casefold() == "spanish" else
+                        "Restarting this agent turn; keeping the task and saved work.")
+                try:
+                    gmail_client.send(subject(state, "kick"), text, reply_thread)
+                    task_records.contact(phase_checkpoint.store(), state, config.REPO_PATH,
+                                         msg_id, reply_thread)
+                except Exception:
+                    log.exception("turn kicked but acknowledgment could not be sent")
+                return True
+            if not turn.get("active"):
+                gmail_client.mark_processed(msg_id)
+                text = ("No hay un turno del agente en ejecución; la tarea sigue igual."
+                        if state.get("task_language", "English").casefold() == "spanish" else
+                        "No coding-agent turn is running; the task is unchanged.")
+                gmail_client.send(subject(state, "kick"), text, reply_thread)
+                return True
+            return False  # process is starting; leave KICK queued
+        if config.COMM_CHANNEL == "email" and not working:
+            return False  # normal mailbox polling owns STATUS between turns
+        request = gmail_client.poll_status(state.get("thread_id") if working else None)
+        if not request:
+            if (working or _work_active.is_set()) and state.get("thread_id"):
+                _receive_feedback(copy.deepcopy(_conversation_state or state))
+            return False
+        if config.COMM_CHANNEL == "email" and not _work_active.is_set():
+            return False  # let the normal command loop consume it
+        msg_id, reply_thread = request
+        snapshot = dict(_current_state) if _current_state is not None else state
+        turn = agent_runner.turn_snapshot()
+        body = _short_status(snapshot, turn, time.time())
+        subj = subject(snapshot, "brief status")
+        gmail_client.send(subj, body, reply_thread)
+        task_records.contact(phase_checkpoint.store(), snapshot, config.REPO_PATH,
+                             msg_id, reply_thread)
+        gmail_client.mark_processed(msg_id)
+        log.info("served brief STATUS in %s without interrupting %s",
+                 reply_thread, snapshot.get("state"))
+        return True
+
+
+def _status_supervisor_loop() -> None:
+    while True:
+        try:
+            _status_supervisor_once()
+        except Exception:  # noqa: BLE001 — supervisory polling never crashes codebot
+            log.exception("brief status supervisor failed; will retry")
+        try:
+            _refresh_progress()
+        except Exception:
+            log.exception("progress supervisor failed; will retry")
+        time.sleep(3 if config.COMM_CHANNEL == "slack" else 15)
+
+
+def _refresh_progress() -> None:
+    """Publish independently of STATUS requests, including user-side waits."""
+    with _status_command_lock:
+        state = dict(_current_state) if _current_state is not None else load_state()
+        if state.get("item") and state.get("thread_id"):
+            _publish_progress(state)
+        gmail_client.flush_progress()
+
+
+def _publish_progress(state: dict, situation: str | None = None) -> None:
+    with _status_command_lock:
+        try:
+            # Reply handlers retain wait states for safe retries while running an
+            # agent. Polling a wait alone is not work; a live turn is.
+            active = (bool(agent_runner.turn_snapshot().get("active")) or
+                      (_work_active.is_set() and state.get("state") in PHASES
+                       and state.get("state") != "IDLE"))
+            gmail_client.update_progress(state.get("thread_id"),
+                                         progress.snapshot(state, active=active, situation=situation))
+        except Exception:
+            log.exception("could not publish task progress; task execution continues")
 
 
 def _heartbeat_loop() -> None:
     while True:
         try:
-            if time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS:
+            if (not operations.expired() and
+                    (operations.snapshot() or time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS)):
                 config.HEARTBEAT_PATH.write_text(str(int(time.time())))
         except Exception:
             log.exception("heartbeat write failed")
@@ -3224,6 +5422,9 @@ class ShutdownRequested(BaseException):
 
 
 def _request_shutdown(signum, _frame) -> None:
+    if _conversation_worker:
+        _conversation_worker.close()
+    turn_control.request_kick(None)
     raise ShutdownRequested(signal.Signals(signum).name)
 
 
@@ -3268,10 +5469,18 @@ def validate_managed_runtime() -> None:
          config.BRIDGE_PLUGIN_DIR / "skills/coderbot-openspec-workflow/SKILL.md"),
     ]
     if config.AGENT == "claude":
-        required.append(("Superpowers Claude manifest",
-                         config.SUPERPOWERS_PLUGIN_DIR / ".claude-plugin/plugin.json"))
+        required.extend([
+            ("Superpowers Claude manifest",
+             config.SUPERPOWERS_PLUGIN_DIR / ".claude-plugin/plugin.json"),
+            ("OpenSpec skills manifest",
+             config.OPENSPEC_SKILLS_DIR / ".claude-plugin/plugin.json"),
+            ("OpenSpec Claude skills",
+             config.OPENSPEC_SKILLS_DIR / "skills/openspec-explore/SKILL.md"),
+        ])
     elif config.AGENT == "opencode":
         required.extend([
+            ("OpenSpec OpenCode skills",
+             config.OPENSPEC_SKILLS_DIR / "opencode/openspec-explore/SKILL.md"),
             ("Superpowers OpenCode entrypoint",
              config.SUPERPOWERS_PLUGIN_DIR / ".opencode/plugins/superpowers.js"),
             ("bridge OpenCode package", config.BRIDGE_PLUGIN_DIR / "package.json"),
@@ -3291,8 +5500,18 @@ def main() -> None:
             "/" not in config.OPENCODE_MODEL or config.OPENCODE_MODEL.endswith("/")):
         raise SystemExit("OPENCODE_MODEL must be set to provider/model when CODEBOT_AGENT=opencode")
     validate_managed_runtime()
-    if not config.USER_EMAIL:
+    if config.COMM_CHANNEL not in ("email", "slack"):
+        raise SystemExit("CODEBOT_COMM_CHANNEL must be 'email' or 'slack'")
+    if config.COMM_CHANNEL == "email" and not config.USER_EMAIL:
         raise SystemExit("CODEBOT_USER_EMAIL must be set in .env")
+    if config.COMM_CHANNEL == "slack":
+        for setting, value in (("CODEBOT_SLACK_CHANNEL_ID", config.SLACK_CHANNEL_ID),
+                               ("CODEBOT_SLACK_BOT_TOKEN", config.SLACK_BOT_TOKEN),
+                               ("CODEBOT_SLACK_APP_TOKEN", config.SLACK_APP_TOKEN)):
+            if not value:
+                raise SystemExit(f"{setting} must be set when CODEBOT_COMM_CHANNEL=slack")
+        if not re.fullmatch(r"C[A-Z0-9]+", config.SLACK_CHANNEL_ID):
+            raise SystemExit("CODEBOT_SLACK_CHANNEL_ID must be a public channel ID (C...)")
     if config.TASK_SOURCE not in task_source.SOURCES:
         raise SystemExit("CODEBOT_TASK_SOURCE must be one of: " + ", ".join(task_source.SOURCES))
     if config.TASK_SOURCE == "gdoc" and not config.DOC_ID:
@@ -3301,6 +5520,22 @@ def main() -> None:
         raise SystemExit("CODEBOT_GH_PROJECT_URL (or CODEBOT_GH_PROJECT_OWNER and "
                          "CODEBOT_GH_PROJECT_NUMBER) must be set in .env when "
                          "CODEBOT_TASK_SOURCE=github")
+    if config.TASK_SOURCE == "jira":
+        for setting, value in (("CODEBOT_JIRA_URL", config.JIRA_URL),
+                               ("CODEBOT_JIRA_PROJECT_KEY", config.JIRA_PROJECT_KEY),
+                               ("CODEBOT_JIRA_EMAIL", config.JIRA_EMAIL),
+                               ("CODEBOT_JIRA_API_TOKEN", config.JIRA_API_TOKEN),
+                               ("CODEBOT_JIRA_PICK_LABEL", config.JIRA_PICK_LABEL)):
+            if not value:
+                raise SystemExit(f"{setting} must be set when CODEBOT_TASK_SOURCE=jira")
+        if not re.fullmatch(r"https://[^/\s]+\.atlassian\.net", config.JIRA_URL):
+            raise SystemExit("CODEBOT_JIRA_URL must be an https://<site>.atlassian.net URL")
+        for setting, value in (("CODEBOT_JIRA_PICK_STATUS", config.JIRA_PICK_STATUS),
+                               ("CODEBOT_JIRA_ACTIVE_STATUS", config.JIRA_ACTIVE_STATUS),
+                               ("CODEBOT_JIRA_REVIEW_STATUS", config.JIRA_REVIEW_STATUS),
+                               ("CODEBOT_JIRA_DONE_STATUS", config.JIRA_DONE_STATUS)):
+            if not value:
+                raise SystemExit(f"{setting} must name a Jira workflow status")
     # .exists() not .is_dir(): in a git worktree .git is a file.
     if not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
@@ -3310,7 +5545,13 @@ def main() -> None:
     except RuntimeError as err:
         raise SystemExit(f"backlog ({config.TASK_SOURCE}) unavailable: {err}") from err
     _acquire_single_instance_lock()
+    gmail_client.start()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    global _conversation_worker
+    _conversation_worker = parallel_conversation.Worker(phase_checkpoint.store, config.REPO_PATH,
+                                                        agent_runner.converse, _deliver_conversation)
+    _conversation_worker.thread.start()
+    threading.Thread(target=_status_supervisor_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",
              config.INSTANCE_ID, config.AGENT, config.REPO_PATH, config.TASK_SOURCE,
              task_source.describe())
@@ -3336,15 +5577,20 @@ def main() -> None:
         log.info("received %s; stopping (the in-flight tick is discarded, state.json "
                  "keeps the last completed one)", sig)
     finally:
+        if _conversation_worker:
+            _conversation_worker.close()
         _release_single_instance_lock()
 
 
 def _run_loop() -> None:
-    backoff = config.POLL_INTERVAL_SECONDS
+    global _current_state, _conversation_state
+    backoff = 1
     while True:
         _liveness["tick_started"] = time.time()
         try:
             state = load_state()
+            if state.get("workspace_path"):
+                config.REPO_PATH = Path(state["workspace_path"])
         except (json.JSONDecodeError, OSError):
             # Corrupt/unreadable state.json: don't crash the process — log and wait
             # so an operator can repair or delete the file.
@@ -3353,44 +5599,148 @@ def _run_loop() -> None:
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
         prev = state["state"]
+        _current_state = state
+        with _status_command_lock:
+            _conversation_state = copy.deepcopy(state)
         try:
-            log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
-            if check_commands(state):
-                pass  # reset to IDLE; skip normal dispatch this tick
-            elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
-                pass  # the PR was merged/closed on GitHub, or the base branch moved
-                # and conflicted it; rerouted (IDLE / WAIT_STUCK / RESOLVE_CONFLICTS)
-                # and dispatched next tick
-            elif state["state"] == "WAIT_REVIEW":
-                handle_review_wait(state)
-            elif state["state"] == "WAIT_MERGE":
-                # A pending reply speaks to the CURRENT PR and is consumed first —
-                # do_merge_reply handles MERGED and CONFLICTING itself. Only a
-                # reply-less tick watches the PR, so a reply is never silently carried
-                # across a conflict detour. Someone merging the PR on GitHub finishes
-                # the task here instead of leaving it waiting for a 'merge' forever.
-                handle_merge_wait(state)
-                if state["state"] == "WAIT_MERGE":
-                    check_pr_status(state)
-            elif state["state"] in WAITS:
-                handle_wait(state)
+            if state.get("item") and state["state"] != "IDLE":
+                agent_runner.set_task_context(state)
+                _ensure_task_language(state)
             else:
-                PHASES[state["state"]](state)
+                agent_runner.set_task_context(None)
+            agent_runner.set_task_language(state.get("task_language"))
+            if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
+                gmail_client.close_thread(state["retire_thread_id"])
+                state.pop("retire_thread_id")
+                save_state(state)
+            if (config.COMM_CHANNEL == "slack" and state.get("item")
+                    and state["state"] != "IDLE" and not state.get("thread_id")):
+                state["thread_id"] = gmail_client.open_thread(state)
+                save_state(state)
+            log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
+            _announce_state(state)
+            with _status_command_lock:
+                handled_command = check_commands(state)
+            task_records.apply_contacts(phase_checkpoint.store(), state, config.REPO_PATH)
+            try:
+                gmail_client.retry_deliveries(state)
+            except Exception:
+                if not state.get("pending_reply_delivery"):
+                    raise
+                log.exception("reply transport retry failed; keeping completed answer pending")
+            receipt_id = state.get("last_delivery", {}).get("notification_id")
+            if receipt_id:
+                receipt = phase_checkpoint.store().get("delivery_receipt", receipt_id)
+                if receipt:
+                    state["last_delivery"]["complete"] = receipt["status"] == "complete"
+            if state.get("item") and not handled_command and state["state"] not in USER_SIDE_WAITS and state.get("execution_task_id"):
+                with _status_command_lock:
+                    _receive_feedback(state)
+            dispatched_feedback = False
+            if not handled_command and _dispatch_conversation(state):
+                dispatched_feedback = True
+            elif state.get("pending_reply_delivery") and not handled_command:
+                _continue_reply_delivery(state)
+                dispatched_feedback = True
+            elif state.get("item") and not handled_command:
+                _work_active.set()
+                try:
+                    dispatched_feedback = _dispatch_feedback(state)
+                finally:
+                    _work_active.clear()
+            retry_due = (state["state"] != "WAIT_STUCK" and state.get("technical_retry", {}).get("phase") == state["state"]
+                         and state.get("technical_retry", {}).get("next_at", 0) > time.time())
+            if handled_command or dispatched_feedback:
+                pass  # reset to IDLE; skip normal dispatch this tick
+            elif retry_due:
+                save_state(state)
+                remaining = state["technical_retry"]["next_at"] - time.time()
+                gmail_client.wait(max(0, min(config.POLL_INTERVAL_SECONDS, remaining)))
+                continue
+            else:
+                _announce_state(state)
+                _work_active.set()
+                try:
+                    if state["state"] == "WAIT_REVIEW" and check_pr_status(state):
+                        pass  # PR merged/closed or conflicts; dispatch next tick
+                    elif state["state"] == "WAIT_REVIEW":
+                        handle_review_wait(state)
+                    elif state["state"] == "WAIT_MERGE":
+                        handle_merge_wait(state)
+                        if state["state"] == "WAIT_MERGE":
+                            check_pr_status(state)
+                    elif state["state"] == "WAIT_CLEAN" and config.COMM_CHANNEL == "slack":
+                        check_clean_checkout(state)
+                    elif state["state"] in WAITS:
+                        handle_wait(state)
+                    else:
+                        with performance.span(str(state.get("branch", "idle")), "phase", state["state"]):
+                            PHASES[state["state"]](state)
+                finally:
+                    _work_active.clear()
             # Success: clear this state's consecutive-failure counter.
+            if not dispatched_feedback:
+                state.pop("technical_retry", None)
             if state.get("failures", {}).get(prev):
                 state["failures"][prev] = 0
+            if prev in PHASES and prev != "IDLE" and not dispatched_feedback and state["state"] != prev:
+                state["last_effective_progress"] = time.time()
             if state["state"] != prev:
                 log.info("state transition: %s -> %s", prev, state["state"])
                 state["last_transition"] = time.time()
             _maybe_ping(state)
             save_state(state)
-            backoff = config.POLL_INTERVAL_SECONDS
+            _announce_state(state)
+            if state.get("item") and state["state"] != prev:
+                phase_checkpoint.retire(state, prev)
+            if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
+                gmail_client.close_thread(state["retire_thread_id"])
+                state.pop("retire_thread_id")
+                save_state(state)
+            backoff = 1
+        except turn_control.TurnKicked:
+            # Discard only this tick's in-memory state. Last completed checkpoint
+            # and actual files remain authoritative; retry the same phase.
+            state = load_state()
+            if state.get("item"):
+                state["kick_pending"] = True
+                state["kick_count"] = state.get("kick_count", 0) + 1
+                save_state(state)
+            _current_state = state
+            log.info("user kicked agent turn; resuming %s without consuming failure budget",
+                     state.get("state"))
+            backoff = 1
+            continue
+        except AgentContentFilterError:
+            _content_filter_stop(state, prev)
+            backoff = 1
+            gmail_client.wait(config.POLL_INTERVAL_SECONDS)
+            continue
         except Exception as error:
+            if state.get("item"):
+                diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+                    config.DATA_DIR, prev, error=error)
             if _is_transient_network_error(error):
-                # A network blip is not a fault of this state: one line, no traceback,
-                # and no progress toward the WAIT_STUCK escalation.
-                log.warning("cycle failed in %s on a transient network error (%s: %s); "
-                            "retrying in %ss", prev, type(error).__name__, error, backoff)
+                if state.get("technical_retry", {}).get("phase") != prev:
+                    state["technical_retry"] = {"attempts": 0, "phase": prev}
+                retry = state["technical_retry"]
+                retry["attempts"] += 1
+                backoff = min(2 ** min(retry["attempts"] - 1, 12), 3600)
+                retry["next_at"] = time.time() + backoff
+                if retry["attempts"] >= config.MAX_STATE_FAILURES and not retry.get("notified"):
+                    path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
+                        config.DATA_DIR, prev, error=error)
+                    email(state, "service unavailable", message_templates.operational("unavailable", state.get("task_language", "English")), [path])
+                    retry["notified"] = True
+                    state["stuck_return"] = prev
+                    state["state"] = "WAIT_STUCK"
+                if state["state"] == "WAIT_STUCK":
+                    log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                                "automatic retries paused after %d attempts; waiting for user reply",
+                                prev, type(error).__name__, error, retry["attempts"])
+                else:
+                    log.warning("cycle failed in %s on a transient network error (%s: %s); "
+                                "retrying in %ss", prev, type(error).__name__, error, backoff)
             else:
                 failures = state.setdefault("failures", {})
                 failures[prev] = failures.get(prev, 0) + 1
@@ -3400,16 +5750,22 @@ def _run_loop() -> None:
                     if state["state"] != prev:
                         state["last_transition"] = time.time()
                     save_state(state)
-                    backoff = config.POLL_INTERVAL_SECONDS
+                    _announce_state(state)
+                    backoff = 1
                     time.sleep(config.POLL_INTERVAL_SECONDS)
                     continue
             _maybe_ping(state)  # a failing step is exactly when "is it stuck?" gets asked
             save_state(state)
-            time.sleep(backoff)
+            _announce_state(state)
+            if _is_transient_network_error(error):
+                gmail_client.wait(config.POLL_INTERVAL_SECONDS if state["state"] == "WAIT_STUCK" else backoff)
+            else:
+                time.sleep(backoff)
             backoff = min(backoff * 2, 3600)
             continue
         if state["state"] in WAITS or state["state"] == "IDLE":
-            time.sleep(config.POLL_INTERVAL_SECONDS)
+            gmail_client.wait(min(config.POLL_INTERVAL_SECONDS, 2) if state.get("item")
+                              else config.POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

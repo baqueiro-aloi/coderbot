@@ -142,6 +142,16 @@ class GateParserTests(unittest.TestCase):
 
 
 class LifecycleGateTests(unittest.TestCase):
+    def setUp(self):
+        # Gate tests exercise transition logic; milestone sends have their own coverage.
+        patcher = patch.object(main, "announce_milestone")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for patcher in (patch.object(main.config, "DETERMINISTIC_CHECKS", False),
+                        patch.object(main, "content_snapshot", return_value="fixture")):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def base_state(self, **updates):
         state = {
             "state": "IMPLEMENTING",
@@ -157,6 +167,10 @@ class LifecycleGateTests(unittest.TestCase):
     def test_implementation_advances_to_verification(self):
         state = self.base_state()
         with patch.object(main.agent_runner, "resume", return_value=result("implemented")), \
+             patch.object(main.task_phases, "inventory", return_value=["Approved task"]), \
+             patch.object(main, "_run_checked", return_value="{}"), \
+             patch.object(main.task_phases, "validate_progress", return_value={
+                 "total": 7, "complete": 7, "implementation": [], "final_checks": []}), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]):
             main.do_implement(state)
 
@@ -234,7 +248,7 @@ class LifecycleGateTests(unittest.TestCase):
                 self.assertEqual(state["verify_round"], 1)
 
     def test_clean_review_routes_by_e2e_capability(self):
-        for has_harness, expected in ((True, "E2E"), (False, "ARCHIVING")):
+        for has_harness, expected in ((True, "E2E"), (False, "E2E")):
             with self.subTest(has_harness=has_harness):
                 state = self.base_state(
                     state="INTERNAL_REVIEW", review_gate_round=1,
@@ -275,7 +289,7 @@ class LifecycleGateTests(unittest.TestCase):
             second_prompt = resume.call_args.args[1]
 
         self.assertNotIn("REJECTED", first_prompt)
-        self.assertIn("against `develop` in a throwaway `git worktree`", first_prompt)
+        self.assertIn("immutable base SHA `develop`", first_prompt)
         self.assertIn("REJECTED (round 1 of 2)", second_prompt)
         self.assertIn("quality gate status is not pass", second_prompt)
         self.assertIn("- npm run lint: fail (100 errors)", second_prompt)
@@ -284,8 +298,8 @@ class LifecycleGateTests(unittest.TestCase):
         body = email.call_args.args[2]
         self.assertIn("Latest reason: quality gate status is not pass "
                       "(failing: npm run lint: fail (100 errors))", body)
-        self.assertIn("Checks the agent reported (failing first):\n- npm run lint: fail (100 errors)",
-                      body)
+        self.assertIn("diagnostic file", body)
+        self.assertIn("Checks the agent reported (failing first)", body)
         self.assertIn("Agent's notes:\nRan everything.", body)
         self.assertIn("pre-existing on the base branch", body)
 
@@ -307,6 +321,7 @@ class LifecycleGateTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume",
                           return_value=result("still malformed")) as resume, \
+             patch.object(main, "email"), \
              patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3, create=True):
             main._handle_reply(state, "please rerun the checks")
 
@@ -391,6 +406,7 @@ class LifecycleGateTests(unittest.TestCase):
         state = self.base_state(
             state="WAIT_REPLY", return_state="E2E", e2e_round=6)
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
+             patch.object(main, "email"), \
              patch.object(main.agent_runner, "resume", return_value=result("try again")):
             main._handle_reply(state, "service is back")
 

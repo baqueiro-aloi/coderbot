@@ -175,6 +175,11 @@ class StuckReply(unittest.TestCase):
 
 
 class QuestionReply(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(main, "announce_milestone")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def base(self, phase):
         return {"state": "WAIT_REPLY", "return_state": phase, "pending_question": "q?",
                 "item": "task", "slug": "s", "branch": "b", "session_id": "sid"}
@@ -183,11 +188,13 @@ class QuestionReply(unittest.TestCase):
         state = self.base("EXPLORING")
         with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
              patch.object(main.agent_runner, "resume", return_value=result()) as resume, \
+             patch.object(main, "email") as email, \
              patch.object(main, "_undo_premature_work", return_value=""):
             main.do_question_reply(state, "blue")
         prompt = resume.call_args.args[1]
         self.assertIn("blue", prompt)
         self.assertIn("exploration phase", prompt)
+        email.assert_called_once_with(state, "exploration reply", "done", [])
         self.assertEqual(state["state"], "PROPOSING")
         self.assertNotIn("return_state", state)
         self.assertNotIn("pending_question", state)
@@ -195,10 +202,53 @@ class QuestionReply(unittest.TestCase):
     def test_classifier_sees_the_pending_question(self):
         state = self.base("EXPLORING")
         with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")) as run, \
-             patch.object(main.agent_runner, "resume", return_value=result()), \
-             patch.object(main, "_undo_premature_work", return_value=""):
+              patch.object(main.agent_runner, "resume", return_value=result()), \
+              patch.object(main, "email"), \
+              patch.object(main, "_undo_premature_work", return_value=""):
             main.do_question_reply(state, "blue")
         self.assertIn("q?", run.call_args.args[0])
+
+    def test_clarification_reaches_slack_before_exploration_advances(self):
+        state = self.base("EXPLORING")
+        explanation = "No necesito nada de ustedes para continuar la investigación."
+        events = []
+        def send(_state, _subject, body, _attachments):
+            self.assertEqual(_state["state"], "WAIT_REPLY")
+            events.append(("send", body))
+        with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+             patch.object(main.agent_runner, "resume", return_value=result(output=explanation)), \
+             patch.object(main, "email", side_effect=send), \
+             patch.object(main, "_undo_premature_work",
+                          side_effect=lambda *_: events.append(("advance", ""))):
+            main.do_question_reply(state, "No entiendo, sé más claro")
+        self.assertEqual(events, [("send", explanation), ("advance", "")])
+        self.assertEqual(state["state"], "PROPOSING")
+
+    def test_exploration_clarification_is_sent_on_the_existing_slack_thread(self):
+        state = self.base("EXPLORING") | {"thread_id": "C123:1.0"}
+        explanation = "No necesito nada más para continuar la investigación."
+        with patch.object(main.config, "COMM_CHANNEL", "slack"), \
+             patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+             patch.object(main.agent_runner, "resume", return_value=result(output=explanation)), \
+             patch.object(main.gmail_client, "send", return_value="C123:1.0") as send, \
+             patch.object(main, "_undo_premature_work", return_value=""), \
+             patch.object(main, "trail"):
+            main.do_question_reply(state, "¿Qué necesitas?")
+        self.assertEqual(send.call_args.args[:3],
+                         (main.subject(state, "exploration reply"), explanation, "C123:1.0"))
+        self.assertEqual(state["state"], "PROPOSING")
+
+    def test_failed_clarification_delivery_keeps_waiting_with_original_question(self):
+        state = self.base("EXPLORING") | {"question_rounds": 1}
+        with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+             patch.object(main.agent_runner, "resume", return_value=result(output="Entendido.")), \
+             patch.object(main, "email", side_effect=RuntimeError("Slack unavailable")), \
+             patch.object(main, "_undo_premature_work") as advance:
+            main.do_question_reply(state, "Aclara, por favor")
+        advance.assert_not_called()
+        self.assertEqual(state["state"], "WAIT_REPLY")
+        self.assertEqual(state["pending_question"], "q?")
+        self.assertEqual(state["question_rounds"], 1)
 
     def test_complete_finishes_without_resuming(self):
         state = self.base("IMPLEMENTING")
@@ -234,6 +284,106 @@ class QuestionReply(unittest.TestCase):
         self.assertEqual(state["return_state"], "EXPLORING")
         self.assertEqual(state["pending_question"], "and?")
 
+    def test_every_phase_delivers_reply_and_attachment_before_continuation(self):
+        with tempfile.TemporaryDirectory() as root:
+            attachment = pathlib.Path(root) / "comparison.md"
+            attachment.write_text("comparison evidence")
+            for phase in main.CONTINUATIONS:
+                with self.subTest(phase=phase):
+                    state = self.base(phase)
+                    if phase == "REPAIR_CHECKS":
+                        state["check_repair"] = {"attempt": 1, "resume": "E2E", "before": "same", "checks": []}
+                    response = result(output="The failures also occur on main; no gate pass claimed.")
+                    response.attachments = [str(attachment), str(attachment.parent / "missing.md")]
+                    events = []
+                    def send(_state, label, body, files):
+                        self.assertEqual(_state["state"], "WAIT_REPLY")
+                        self.assertIn("no gate pass claimed", body)
+                        self.assertEqual(files, [attachment])
+                        events.append("send")
+                    def advance(_state, _result):
+                        events.append("advance")
+                        _state["state"] = "E2E"
+                    with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                         patch.object(main.agent_runner, "resume", return_value=response), \
+                         patch.object(main, "email", side_effect=send), \
+                         patch.dict(main.CONTINUATIONS, {phase: advance}):
+                        main.do_question_reply(state, "Investigate the failures")
+                    self.assertEqual(events, ["send", "advance"])
+                    self.assertNotIn("pending_question", state)
+
+    def test_failed_or_partial_reply_delivery_preserves_wait_in_e2e(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial):
+                state = self.base("E2E") | {"question_rounds": 2}
+                def send(*args):
+                    if partial:
+                        state["last_delivery"] = {"complete": False}
+                    else:
+                        raise RuntimeError("Slack unavailable")
+                continuation = Mock()
+                with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                     patch.object(main.agent_runner, "resume", return_value=result()), \
+                     patch.object(main, "email", side_effect=send), \
+                     patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+                    main.do_question_reply(state, "Investigate main")
+                continuation.assert_not_called()
+                self.assertEqual(state["state"], "WAIT_REPLY")
+                self.assertEqual(state["return_state"], "E2E")
+                self.assertEqual(state["pending_question"], "q?")
+                self.assertEqual(state["question_rounds"], 2)
+                self.assertEqual(state["pending_reply_delivery"]["phase"], "E2E")
+
+    def test_partial_delivery_restart_resumes_transport_without_agent_or_duplicate_body(self):
+        state = self.base("E2E")
+        def send(*args):
+            state["last_delivery"] = {"complete": False, "notification_id": "receipt"}
+        continuation = Mock(side_effect=lambda s, r: s.update(state="E2E"))
+        with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+             patch.object(main.agent_runner, "resume", return_value=result(output="Diagnosis complete")) as agent, \
+             patch.object(main, "email", side_effect=send) as email, \
+             patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+            main.do_question_reply(state, "Investigate main")
+        self.assertEqual(agent.call_count, 1)
+        self.assertEqual(email.call_count, 1)
+        continuation.assert_not_called()
+        reloaded = json.loads(json.dumps(state))
+        with patch.object(main.phase_checkpoint, "store") as store, \
+             patch.object(main.agent_runner, "resume") as agent, \
+             patch.object(main.agent_runner, "run") as classify, \
+             patch.object(main, "email") as email, \
+             patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+            store.return_value.get.return_value = {"status": "pending"}
+            main.do_question_reply(reloaded, "retry")
+            continuation.assert_not_called()
+            store.return_value.get.return_value = {"status": "complete"}
+            main._continue_reply_delivery(reloaded)
+        agent.assert_not_called()
+        classify.assert_not_called()
+        email.assert_not_called()
+        continuation.assert_called_once()
+        self.assertEqual(continuation.call_args.args[1].output, "Diagnosis complete")
+        self.assertEqual(reloaded["state"], "E2E")
+        self.assertNotIn("pending_reply_delivery", reloaded)
+        self.assertNotIn("pending_question", reloaded)
+
+    def test_attachment_only_answer_is_delivered(self):
+        with tempfile.TemporaryDirectory() as root:
+            attachment = pathlib.Path(root) / "comparison.md"
+            attachment.write_text("evidence")
+            state = self.base("E2E")
+            response = result(output="")
+            response.attachments = [str(attachment)]
+            continuation = Mock()
+            with patch.object(main.agent_runner, "run", return_value=verdict(action="answer")), \
+                 patch.object(main.agent_runner, "resume", return_value=response), \
+                 patch.object(main, "email") as send, \
+                 patch.dict(main.CONTINUATIONS, {"E2E": continuation}):
+                main.do_question_reply(state, "Send the comparison")
+            send.assert_called_once_with(state, "reply during E2E",
+                                         "The requested supporting files are attached.", [attachment])
+            continuation.assert_called_once()
+
 
 class ActivityTrail(unittest.TestCase):
     def test_trail_posts_and_stores_a_string_ref(self):
@@ -259,11 +409,12 @@ class ActivityTrail(unittest.TestCase):
 
     def test_email_is_mirrored_to_the_trail_with_attachment_names(self):
         state = {"item": "task", "slug": "s"}
-        with patch.object(main.gmail_client, "send", return_value="t1"), \
+        with patch.object(main.gmail_client, "deliver", return_value={"thread_id": "t1", "complete": True}), \
              patch.object(main, "trail") as trail:
             main.email(state, "proposal for review", "body", [pathlib.Path("/x/video.webm")])
         trail.assert_called_once_with(state, "proposal for review",
-                                      "body\n\nAttachments (emailed): video.webm")
+                                      main.handoffs.render_decision(state["pending_decision"]) +
+                                      "\n\nbody\n\nFiles (delivery receipts tracked separately): video.webm")
 
 
 class FinishTask(unittest.TestCase):
@@ -327,8 +478,8 @@ class Commands(unittest.TestCase):
             self.assertFalse(main.check_commands(state))
         self.assertEqual(state["state"], "EXPLORING")
         body = send.call_args.args[1]
-        self.assertIn("State: EXPLORING", body)
-        self.assertIn("Last email sent", body)
+        self.assertIn("Phase: EXPLORING", body)
+        self.assertNotIn("Last email sent", body)
 
     def test_abort_resets(self):
         state = {"state": "EXPLORING", "item": "task"}

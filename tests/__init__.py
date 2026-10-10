@@ -16,3 +16,14 @@ if str(SRC) not in sys.path:
 # data/ of a live deployment sharing this checkout. Individual modules still override
 # config.STATE_PATH; this is the backstop for everything else.
 os.environ.setdefault("CODEBOT_DATA_DIR", tempfile.mkdtemp(prefix="codebot-test-data-"))
+
+# Several legacy test modules import main under patch.dict(sys.modules, ...).
+# Keep Markdown and its extension base classes loaded before those temporary module
+# patches, so later imports do not create incompatible Extension class identities.
+try:
+    import markdown  # noqa: F401
+    import markdown.extensions.fenced_code  # noqa: F401
+    import markdown.extensions.tables  # noqa: F401
+    import markdown.extensions.sane_lists  # noqa: F401
+except ImportError:
+    pass  # Minimal host-side tests still run without optional runtime dependencies.

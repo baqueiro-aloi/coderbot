@@ -79,9 +79,9 @@ class BridgeSkillTests(unittest.TestCase):
         self.assertEqual(self.skill.lower().count("checkout"), 1)
 
     def test_requires_strict_tdd_for_inherited_production_code(self):
-        self.assertIn("Strict TDD applies to inherited production code", self.skill)
-        self.assertIn("delete or revert it and restart test-first", self.skill)
-        self.assertIn("previous agent", self.skill)
+        self.assertIn("Preserve valid work from previous attempts", self.skill)
+        self.assertIn("durable RED/GREEN evidence", self.skill)
+        self.assertNotIn("delete or revert it and restart test-first", self.skill)
 
     def test_phase_contract_has_exact_order(self):
         expected = [
@@ -113,8 +113,8 @@ class BridgeSkillTests(unittest.TestCase):
 
     def test_verification_requires_fresh_evidence_openspec_validation_and_review(self):
         contracts = dict(self.phases)
-        self.assertIn("fresh full relevant verification", contracts["VERIFYING"])
-        self.assertIn("strictly validates OpenSpec", contracts["VERIFYING"])
+        self.assertIn("focused checks", contracts["VERIFYING"])
+        self.assertIn("validates OpenSpec", contracts["VERIFYING"])
         self.assertIn("fresh internal review", contracts["INTERNAL_REVIEW"])
         self.assertIn("Prior test evidence", contracts["INTERNAL_REVIEW"])
         self.assertIn("future external review", contracts["INTERNAL_REVIEW"])
@@ -122,9 +122,9 @@ class BridgeSkillTests(unittest.TestCase):
 
     def test_tracked_e2e_repairs_repeat_verification_and_internal_review(self):
         contract = dict(self.phases)["E2E repair"]
-        self.assertIn("tracked code", contract)
-        self.assertLess(contract.index("VERIFYING"), contract.index("INTERNAL_REVIEW"))
-        self.assertIn("before coderbot retries E2E", contract)
+        self.assertIn("confirmed new regressions", contract)
+        self.assertIn("independent re-review", contract)
+        self.assertIn("invalidate affected checks", contract)
 
     def test_implementing_does_not_perform_verifying_phase_work(self):
         implementing = dict(self.phases)["IMPLEMENTING"]

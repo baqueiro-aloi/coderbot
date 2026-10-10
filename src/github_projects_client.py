@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.request
 
 import config
+import ownership
 from task_text import normalize, priority_of
 
 log = logging.getLogger(__name__)
@@ -251,11 +252,13 @@ def _item(item_id: str) -> dict | None:
 # ---------------------------------------------------------------- labels
 
 def claim_label(instance: str = config.INSTANCE_ID) -> str:
-    return f"{config.GH_LABEL_PREFIX}:{instance}"
+    owner = ownership.me() if instance == config.INSTANCE_ID else instance
+    return f"{config.GH_LABEL_PREFIX}:{owner}"
 
 
 def hold_label(instance: str = config.INSTANCE_ID) -> str:
-    return f"{config.GH_LABEL_PREFIX}-hold:{instance}"
+    owner = ownership.me() if instance == config.INSTANCE_ID else instance
+    return f"{config.GH_LABEL_PREFIX}-hold:{owner}"
 
 
 def claimed_by(labels: set[str]) -> str | None:
@@ -274,7 +277,7 @@ def held_by(labels: set[str]) -> str | None:
 def _foreign_claims(labels: set[str]) -> set[str]:
     prefix = f"{config.GH_LABEL_PREFIX}:"
     return {l for l in labels
-            if l.startswith(prefix) and l[len(prefix):].strip().lower() != config.INSTANCE_ID}
+            if l.startswith(prefix) and l[len(prefix):].strip().lower() != ownership.me()}
 
 
 def _add_label(task: dict, label: str) -> None:
@@ -334,7 +337,7 @@ def _pick_statuses() -> list[str]:
 def _pending(tasks: list[dict], target_repo: str) -> list[dict]:
     """Pickable tasks: open issues of the target repo in a pick status with no codebot
     label, plus any not-done issue this instance already claimed (claimed_by_me)."""
-    me = config.INSTANCE_ID
+    me = ownership.me()
     picks, done = _pick_statuses(), config.GH_PROJECT_DONE_STATUS.lower()
     pending, skipped, foreign = [], {"draft/PR": 0, "other repo": 0, "closed": 0}, set()
     for t in tasks:
@@ -351,7 +354,9 @@ def _pending(tasks: list[dict], target_repo: str) -> list[dict]:
         owner, holder = claimed_by(t["labels"]), held_by(t["labels"])
         if holder:
             continue
-        if owner == me:
+        if (owner == me or ownership.legacy_marker(owner, t["title"], t["item_id"])) \
+                and not (_foreign_claims(t["labels"]) - {
+                    f"{config.GH_LABEL_PREFIX}:{config.INSTANCE_ID}"}):
             if status != done:
                 pending.append(dict(t, claimed_by_me=True))
             continue
@@ -444,13 +449,13 @@ def _find_task(item_text: str, item_id: str | None) -> dict | None:
         if task is not None and task["kind"] == "Issue":
             return task
         log.warning("board item %s is gone or is not an issue; matching by title", item_id)
-    me, done = config.INSTANCE_ID, config.GH_PROJECT_DONE_STATUS.lower()
+    me, done = ownership.me(), config.GH_PROJECT_DONE_STATUS.lower()
 
     def rank(task: dict) -> int:
         if task["state"].upper() == "CLOSED" or (task.get("status") or "").lower() == done:
             return 3
         owner = claimed_by(task["labels"]) or held_by(task["labels"])
-        if owner == me:
+        if owner == me or ownership.legacy_marker(owner, task["title"], task["item_id"]):
             return 0
         return 1 if owner is None else 2
 
@@ -471,11 +476,27 @@ def claim_task(item_text: str, item_id: str | None = None) -> bool:
         log.warning("no open board issue to claim for: %r", item_text[:80])
         return False
     owner = claimed_by(task["labels"])
-    if owner == config.INSTANCE_ID:
+    if owner == ownership.me():
+        if _foreign_claims(task["labels"]):
+            log.warning("task %r has competing claim labels; refusing ownership", item_text[:80])
+            return False
         log.info("task already claimed by this instance: %r", item_text[:80])
         if (task.get("status") or "").lower() in _pick_statuses():
             # Label landed but the status move did not (crash between the two).
             _set_status(task, config.GH_PROJECT_ACTIVE_STATUS)
+        return True
+    if ownership.legacy_marker(owner, item_text, task["item_id"]):
+        # Install the fingerprinted marker first, then retire the legacy one.
+        # Never adopt a legacy label merely because the readable name matches.
+        _add_label(task, claim_label())
+        fresh = _item(task["item_id"]) or task
+        rivals = _foreign_claims(fresh["labels"]) - {f"{config.GH_LABEL_PREFIX}:{owner}"}
+        if rivals:
+            _remove_label(task, claim_label())
+            return False
+        _remove_label(task, f"{config.GH_LABEL_PREFIX}:{owner}")
+        if (fresh.get("status") or "").lower() in _pick_statuses():
+            _set_status(fresh, config.GH_PROJECT_ACTIVE_STATUS)
         return True
     if owner:
         log.info("task already claimed by %r: %r", owner, item_text[:80])
@@ -498,6 +519,16 @@ def unclaim_task(item_text: str, item_id: str | None = None) -> bool:
     if task is None:
         log.warning("no board issue to unclaim for: %r", item_text[:80])
         return False
+    owner = claimed_by(task["labels"])
+    holder = held_by(task["labels"])
+    if holder and not ownership.mine(holder, item_text, task["item_id"]):
+        return False
+    if _foreign_claims(task["labels"]) - {f"{config.GH_LABEL_PREFIX}:{config.INSTANCE_ID}"}:
+        return False
+    if owner and not ownership.mine(owner, item_text, task["item_id"]):
+        return False
+    if ownership.legacy_marker(owner, item_text, task["item_id"]):
+        _remove_label(task, f"{config.GH_LABEL_PREFIX}:{owner}")
     _remove_label(task, claim_label())
     if not _is_done(task) and task["state"].upper() != "CLOSED":
         _set_status(task, config.GH_PROJECT_PICK_STATUSES[0])
@@ -509,9 +540,17 @@ def hold_task(item_text: str, item_id: str | None = None) -> bool:
     if task is None or _is_done(task):
         log.warning("no open board issue to put on hold for: %r", item_text[:80])
         return False
+    owner = claimed_by(task["labels"])
+    holder = held_by(task["labels"])
+    if holder:
+        return ownership.mine(holder, item_text, task["item_id"])
+    if owner and not ownership.mine(owner, item_text, task["item_id"]):
+        return False
     if hold_label() not in task["labels"]:
         _add_label(task, hold_label())
     _remove_label(task, claim_label())
+    if ownership.legacy_marker(owner, item_text, task["item_id"]):
+        _remove_label(task, f"{config.GH_LABEL_PREFIX}:{owner}")
     log.info("put board issue #%s on hold for %s", task["number"], config.INSTANCE_ID)
     return True
 
@@ -521,7 +560,12 @@ def unhold_task(item_text: str, item_id: str | None = None) -> bool:
     if task is None:
         log.warning("no board issue to take off hold for: %r", item_text[:80])
         return False
+    holder = held_by(task["labels"])
+    if holder and not ownership.mine(holder, item_text, task["item_id"]):
+        return False
     _remove_label(task, hold_label())
+    if ownership.legacy_marker(holder, item_text, task["item_id"]):
+        _remove_label(task, f"{config.GH_LABEL_PREFIX}-hold:{holder}")
     return True
 
 
@@ -530,12 +574,19 @@ def mark_done(item_text: str, item_id: str | None = None) -> bool:
     if task is None:
         log.warning("no board issue matched item text: %r", item_text[:80])
         return False
+    owner = claimed_by(task["labels"]) or held_by(task["labels"])
+    if owner and not ownership.mine(owner, item_text, task["item_id"]):
+        return False
     if _is_done(task):
         log.info("board issue #%s already Done", task["number"])
     else:
         _set_status(task, config.GH_PROJECT_DONE_STATUS)
     _remove_label(task, claim_label())
     _remove_label(task, hold_label())
+    if ownership.legacy_marker(owner, item_text, task["item_id"]):
+        prefix = (f"{config.GH_LABEL_PREFIX}:" if claimed_by(task["labels"])
+                  else f"{config.GH_LABEL_PREFIX}-hold:")
+        _remove_label(task, prefix + (owner or ""))
     return True
 
 

@@ -7,7 +7,7 @@
 #   /opt/codebot/codebot.env          -> the .env (see .env.example)
 #   /opt/codebot/claude/               -> ~/.claude for the bot (contains .credentials.json)
 #   /opt/codebot/claude.json           -> read-only seed of ~/.claude.json
-#   /opt/coderbot/data/{token,credentials}.json -> Google OAuth files
+#   /opt/coderbot/data/{token,credentials}.json -> Google OAuth files when needed
 services:
   codebot:
     build: .

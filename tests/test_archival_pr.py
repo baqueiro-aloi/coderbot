@@ -71,11 +71,11 @@ class ArchivalTests(unittest.TestCase):
             commands)
         expected_archive = self.state["archive_path"]
         self.assertIn(call(
-            "add", "-A", "--", "openspec/specs", "openspec/changes/api-version",
+            "add", "-A", "--", "openspec/specs",
             expected_archive), git.call_args_list)
         self.assertIn(call(
             "commit", "-m", "chore: archive OpenSpec change", "--", "openspec/specs",
-            "openspec/changes/api-version", expected_archive), git.call_args_list)
+            expected_archive), git.call_args_list)
         self.assertNotIn(call("add", "--", "openspec/"), git.call_args_list)
         self.assertEqual(self.state["state"], "OPEN_PR")
         self.assertNotIn("archive_error", self.state)
@@ -92,6 +92,56 @@ class ArchivalTests(unittest.TestCase):
         self.assertEqual(self.state["state"], "ARCHIVING")
         self.assertEqual(self.state["archive_round"], 1)
         self.assertIn("archive failed", self.state["archive_error"])
+
+    def test_resuming_committed_archive_preserves_recovery_note_and_finishes(self):
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        for key, value in (("user.name", "Fixture"), ("user.email", "fixture@example.test")):
+            subprocess.run(["git", "config", key, value], cwd=self.repo, check=True)
+        active = self.repo / "openspec/changes/api-version"
+        (active / "proposal.md").write_text("Approved proposal")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "active change"], cwd=self.repo, check=True)
+        self.state["archive_path"] = "openspec/changes/archive/2026-10-07-api-version"
+        target = self.repo / self.state["archive_path"]
+        target.parent.mkdir(parents=True)
+        active.rename(target)
+        note = target / main.TRANSCRIPT_NAME
+        note.write_text("Preserved recovery note")
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "archive already committed"], cwd=self.repo, check=True)
+        # An extra archive-owned file requires a closing commit; active path no
+        # longer exists either in the filesystem or Git's index.
+        (target / "design.md").write_text("Recovered approved design")
+        source = self.repo / ".git/transcript.txt"
+        source.write_text("Growing recovery transcript" * 100)
+        with patch.object(main.config, "REPO_PATH", self.repo), \
+             patch.object(main, "_transcript_path", return_value=source), \
+             patch.object(main, "_run_checked", return_value="valid") as commands, \
+             patch.object(main, "_validate_archived_change"), \
+             patch.object(main, "save_state"), patch.object(main, "trail"):
+            main.do_archive(self.state)
+            first_head = main.git("rev-parse", "HEAD")
+            self.state["state"] = "ARCHIVING"
+            source.write_text("Even more recovery activity")
+            main.do_archive(self.state)
+            self.assertEqual(first_head, main.git("rev-parse", "HEAD"))
+            self.assertEqual(main.git("status", "--porcelain"), "")
+        self.assertEqual(self.state["state"], "OPEN_PR")
+        self.assertEqual(note.read_text(), "Preserved recovery note")
+        self.assertFalse(active.exists())
+        self.assertFalse(any(call.args[0][:2] == ["openspec", "archive"] for call in commands.call_args_list))
+
+    def test_archive_commit_paths_keep_deleted_active_files_only_when_pending(self):
+        self.state["archive_path"] = "openspec/changes/archive/2026-10-07-api-version"
+        (self.repo / "openspec/changes/api-version").rmdir()
+        with patch.object(main.config, "REPO_PATH", self.repo):
+            roots = main._archive_commit_paths(self.state,
+                "D openspec/changes/api-version/proposal.md\n"
+                "?? openspec/changes/archive/2026-10-07-api-version/proposal.md")
+            self.assertIn("openspec/changes/api-version", roots)
+            roots = main._archive_commit_paths(self.state,
+                " M openspec/changes/archive/2026-10-07-api-version/agent-log.md")
+            self.assertNotIn("openspec/changes/api-version", roots)
 
     def test_strict_validation_failure_stays_before_open_pr(self):
         def run(command, **kwargs):
@@ -229,7 +279,7 @@ class ArchivalTests(unittest.TestCase):
         self.assertFalse(any(c.args[0][:2] == ["openspec", "archive"]
                              for c in process.call_args_list))
         self.assertIn(call(
-            "add", "-A", "--", "openspec/specs", "openspec/changes/api-version",
+            "add", "-A", "--", "openspec/specs",
             "openspec/changes/archive/2026-09-01-api-version"), git.call_args_list)
         self.assertEqual(self.state["state"], "OPEN_PR")
 
@@ -254,12 +304,13 @@ class ArchivalTests(unittest.TestCase):
         with patch.object(main.config, "REPO_PATH", self.repo), \
              patch.object(main, "save_state"), \
              patch.object(main, "git", return_value=" M app.py"), \
+             patch.object(main.recovery, "begin", side_effect=lambda db, state, repo, reason, resume: state.update(state="RECOVERING")) as recover, \
              patch.object(main.subprocess, "run") as process:
             main.do_archive(self.state)
 
         process.assert_not_called()
-        self.assertEqual(self.state["state"], "ARCHIVING")
-        self.assertEqual(self.state["archive_round"], 1)
+        self.assertEqual(self.state["state"], "RECOVERING")
+        recover.assert_called_once()
 
     def test_untracked_openspec_file_blocks_first_archive(self):
         def git(*args):
@@ -325,6 +376,7 @@ class ArchivalTests(unittest.TestCase):
                      question=None, attachments=[])
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed) as resume, \
+             patch.object(main, "email"), \
              patch.object(main, "_reset_to_base_branch") as reset:
             main._handle_reply(state, "fix the malformed requirement")
 
@@ -471,6 +523,10 @@ class ArchivalTests(unittest.TestCase):
 
 class NativePullRequestTests(unittest.TestCase):
     def setUp(self):
+        for helper in ("_publish_existing_pr", "_verify_pr_publication"):
+            patcher = patch.object(main, helper)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
         (self.repo / "openspec/changes/archive/2026-09-01-api-version").mkdir(parents=True)
@@ -554,7 +610,27 @@ class NativePullRequestTests(unittest.TestCase):
         body = create[create.index("--body") + 1]
         self.assertIn("Closes https://github.com/acme/project/issues/9", body)
         note_pr.assert_called_once_with(state["item"], "PVTI_1",
-                                        "https://github.com/acme/project/pull/42")
+                                         "https://github.com/acme/project/pull/42")
+
+    def test_jira_pr_references_issue_without_relying_on_github_auto_close(self):
+        state = self.state() | {"item_id": "10001", "item_key": "TEAM-7",
+                                "item_url": "https://team.atlassian.net/browse/TEAM-7"}
+        responses = [
+            subprocess.CompletedProcess([], 0, "[]", ""),
+            subprocess.CompletedProcess([], 0, "https://github.com/acme/project/pull/42", ""),
+        ]
+        with patch.object(main.config, "TASK_SOURCE", "jira"), \
+             patch.object(main, "git", side_effect=self.ready_git), \
+             patch.object(main.subprocess, "run", side_effect=responses) as process, \
+             patch.object(main.task_source, "note_pr") as note_pr, \
+             patch.object(main, "_enter_review_wait"):
+            main.do_open_pr(state)
+        create = process.call_args_list[1].args[0]
+        body = create[create.index("--body") + 1]
+        self.assertIn("Closes TEAM-7", body)
+        self.assertIn("Jira: https://team.atlassian.net/browse/TEAM-7", body)
+        note_pr.assert_called_once_with(state["item"], "10001",
+                                         "https://github.com/acme/project/pull/42")
 
     def test_open_pr_survives_backlog_write_back_failure(self):
         state = self.state() | {"pr_url": "https://github.com/acme/project/pull/42"}
@@ -575,6 +651,8 @@ class NativePullRequestTests(unittest.TestCase):
         self.assertFalse(any(c.args and c.args[0] == "push" for c in git.call_args_list))
         process.assert_not_called()
         enter_wait.assert_called_once_with(state)
+        main._publish_existing_pr.assert_called_once_with(state)
+        main._verify_pr_publication.assert_called_once_with(state)
 
     def test_open_pr_restart_discovers_existing_pr_before_create(self):
         state = self.state()
@@ -826,6 +904,10 @@ class NativePullRequestTests(unittest.TestCase):
 
 
 class PushPhaseTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(main.final_checks, "run", return_value={"status": "pass"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
     def state(self, continuation, **context):
         return {
             "state": "PUSHING",
@@ -842,7 +924,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main, "_enter_review_wait") as enter:
             main.do_push(state)
 
-        git.assert_called_once_with("push", "origin", "codebot-api-version")
+        git.assert_any_call("push", "origin", "codebot-api-version")
         resume.assert_not_called()
         resolve.assert_called_once()
         enter.assert_called_once_with(state)
@@ -857,7 +939,8 @@ class PushPhaseTests(unittest.TestCase):
 
         args = email.call_args.args
         self.assertIn("fixed details", args[2])
-        self.assertEqual(args[3], [Path("/tmp/evidence.txt")])
+        self.assertEqual(args[3][0], Path("/tmp/evidence.txt"))
+        self.assertEqual(args[3][-1].suffix, ".md")
         self.assertEqual(state["state"], "WAIT_MERGE")
         self.assertNotIn("push_context", state)
 
@@ -890,7 +973,7 @@ class PushPhaseTests(unittest.TestCase):
              patch.object(main.agent_runner, "resume") as resume, patch.object(main, "email"):
             main.PHASES[state["state"]](state)
 
-        git.assert_called_once_with("push", "origin", "codebot-api-version")
+        git.assert_any_call("push", "origin", "codebot-api-version")
         resume.assert_not_called()
         self.assertEqual(state["state"], "WAIT_MERGE")
 
@@ -904,6 +987,7 @@ class PushPhaseTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+             patch.object(main, "email"), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "use the safe option")
 
@@ -922,6 +1006,7 @@ class PushPhaseTests(unittest.TestCase):
         with patch.object(main.agent_runner, "run", return_value=Mock(output='{"action":"answer"}')), \
              patch.object(main.agent_runner, "resume", return_value=fixed), \
              patch.object(main, "_scrub_evidence_from_repo", return_value=[]), \
+             patch.object(main, "email"), \
              patch.object(main, "save_state"), patch.object(main, "git") as git:
             main._handle_reply(state, "apply it")
 

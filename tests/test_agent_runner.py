@@ -8,9 +8,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 import agent_runner
+import claude_runner
 
 
 class StreamingTests(unittest.TestCase):
+    def test_operation_timeout_reports_operation_limit_and_keeps_partial_output(self):
+        import operations
+        expired = {"id": "child", "kind": "subagent", "label": "task", "timeout": 600}
+        with patch.object(operations, "expired", return_value=[expired]):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                agent_runner._run_streaming([sys.executable, "-c",
+                    "import time; print('partial', flush=True); time.sleep(30)"],
+                    cwd=None, env=dict(os.environ), timeout=1800, on_line=lambda _: None)
+        self.assertEqual(caught.exception.timeout, 600)
+        self.assertIn("subagent task", caught.exception.stderr)
+        self.assertIn("partial", caught.exception.output)
     def test_summarize_events(self):
         cases = [
             ({"type": "text", "part": {"text": "  Running lint now.\n"}}, "[agent] Running lint now."),
@@ -67,6 +79,25 @@ class StreamingTests(unittest.TestCase):
 
 
 class OpenCodeRunnerTests(unittest.TestCase):
+    def test_utility_configuration_omits_coding_plugins(self):
+        token = agent_runner._utility.set(True)
+        try:
+            config = json.loads(agent_runner._opencode_environment()["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config["plugin"], [])
+            self.assertEqual(config["default_agent"], "utility")
+        finally:
+            agent_runner._utility.reset(token)
+    def test_role_routing_does_not_change_primary_model(self):
+        with patch.object(agent_runner.config, "OPENCODE_ROLE_MODELS", {"explore": "provider/fast"}), \
+             patch.object(agent_runner.config, "OPENCODE_ROLE_EFFORTS", {"explore": "low"}):
+            config = json.loads(agent_runner._opencode_environment()["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(config["model"], agent_runner.config.OPENCODE_MODEL)
+        self.assertEqual(config["agent"]["explore"]["model"], "provider/fast")
+        self.assertEqual(config["agent"]["explore"]["options"]["reasoningEffort"], "low")
+    def setUp(self):
+        self.transport = patch.object(agent_runner.config, "OPENCODE_TRANSPORT", "cli")
+        self.transport.start()
+        self.addCleanup(self.transport.stop)
     superpowers = Path("/managed/superpowers")
     bridge = Path("/managed/bridge")
 
@@ -78,6 +109,19 @@ class OpenCodeRunnerTests(unittest.TestCase):
                 "part": {"text": "done"},
             }), "")
 
+    def test_working_prompts_name_the_active_conversation_channel(self):
+        with patch.object(agent_runner.config, "COMM_CHANNEL", "slack"):
+            prompt = agent_runner._language_prompt("Continue exploring.")
+            self.assertIn("this task's Slack thread", prompt)
+            self.assertIn("Do not say you will email the user", prompt)
+            self.assertIn("secure runtime configuration", prompt)
+            self.assertNotIn("by email", claude_runner.SENTINEL_CONTRACT)
+            self.assertNotIn("relevant email", claude_runner.EVIDENCE_CONTRACT)
+        with patch.object(agent_runner.config, "COMM_CHANNEL", "email"):
+            prompt = agent_runner._language_prompt("Continue exploring.")
+            self.assertIn("task's email thread", prompt)
+            self.assertIn("do not describe this conversation as Slack", prompt)
+
     def assert_managed_config(self, call):
         self.assertIn("env", call.kwargs, "OpenCode subprocess is missing managed environment")
         environment = call.kwargs["env"]
@@ -87,6 +131,8 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertIs(inline["autoupdate"], False)
         self.assertEqual(inline["plugin"].count(str(self.superpowers)), 1)
         self.assertEqual(inline["plugin"].count(str(self.bridge)), 1)
+        self.assertEqual(inline["skills"]["paths"].count(
+            str(agent_runner.config.OPENSPEC_SKILLS_DIR / "opencode")), 1)
 
     def test_collects_final_text_and_session_id(self):
         stdout = '\n'.join([
@@ -99,6 +145,15 @@ class OpenCodeRunnerTests(unittest.TestCase):
             result = agent_runner._opencode("hello")
         self.assertEqual(result.session_id, "ses_123")
         self.assertEqual(result.output, "first\nsecond")
+
+    def test_http_transport_uses_stdin_without_prompt_in_process_args(self):
+        with patch.object(agent_runner.config, "OPENCODE_TRANSPORT", "http"), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            result = agent_runner._opencode("private prompt", "ses_old")
+        self.assertEqual(result.output, "done")
+        self.assertEqual(run.call_args.args[0][0], "node")
+        self.assertNotIn("private prompt", " ".join(run.call_args.args[0]))
+        self.assertEqual(json.loads(run.call_args.kwargs["input_text"])["sessionID"], "ses_old")
 
     def test_raises_for_opencode_error_event(self):
         proc = subprocess.CompletedProcess(
@@ -122,6 +177,50 @@ class OpenCodeRunnerTests(unittest.TestCase):
         self.assertEqual(command[0:2], ["opencode", "run"])
         self.assertIn("--session", command)
         self.assertEqual(command[command.index("--session") + 1], "ses_123")
+
+    def test_effort_applies_to_new_and_resumed_runs_preserving_provider_config(self):
+        model_id = "gpt-6.1-sol/gpt-6.1-sol"
+        existing = {"provider": {"azure": {
+            "options": {"baseURL": "https://example.test"},
+            "models": {model_id: {"options": {"textVerbosity": "low", "reasoningEffort": "high"},
+                                  "variants": {"custom": {"reasoningEffort": "high"}}},
+                       "other": {"options": {"reasoningEffort": "high"}}}}}}
+        with patch.object(agent_runner.config, "OPENCODE_MODEL", "azure/" + model_id), \
+             patch.object(agent_runner.config, "OPENCODE_EFFORT", "low"), \
+             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(existing)}), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            agent_runner._opencode("start")
+            agent_runner._opencode("continue", "ses_old")
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertEqual(command[command.index("--variant") + 1], "coderbot-effort")
+            provider = json.loads(call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["azure"]
+            self.assertEqual(provider["options"], existing["provider"]["azure"]["options"])
+            self.assertEqual(provider["models"][model_id]["options"],
+                             {"textVerbosity": "low", "reasoningEffort": "low"})
+            self.assertEqual(provider["models"][model_id]["variants"]["coderbot-effort"],
+                             {"reasoningEffort": "low"})
+            self.assertEqual(provider["models"][model_id]["variants"]["custom"],
+                             {"reasoningEffort": "high"})
+            self.assertEqual(provider["models"]["other"], existing["provider"]["azure"]["models"]["other"])
+
+    def test_blank_effort_preserves_defaults_and_omits_variant(self):
+        existing = {"provider": {"azure": {"models": {
+            "gpt-6.1-sol": {"options": {"reasoningEffort": "high"}}}}}}
+        with patch.object(agent_runner.config, "OPENCODE_EFFORT", ""), \
+             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": json.dumps(existing)}), \
+             patch("agent_runner._run_streaming", return_value=self._successful_process()) as run:
+            agent_runner._opencode("start")
+        self.assertNotIn("--variant", run.call_args.args[0])
+        inline = json.loads(run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(inline["provider"], existing["provider"])
+
+    def test_invalid_effort_fails_before_launching_opencode(self):
+        with patch.object(agent_runner.config, "OPENCODE_EFFORT", "typo"), \
+             patch("agent_runner._run_streaming") as run:
+            with self.assertRaisesRegex(RuntimeError, "OPENCODE_EFFORT must be"):
+                agent_runner._opencode("start")
+        run.assert_not_called()
 
     def test_resume_recovers_from_missing_session(self):
         missing = subprocess.CompletedProcess([], 1, "", "Error: Session not found")
@@ -180,17 +279,20 @@ class OpenCodeRunnerTests(unittest.TestCase):
             self.assert_managed_config(call)
             inline = json.loads(call.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
             self.assertEqual(inline["theme"], "custom")
-            self.assertEqual(inline["permission"], {"bash": "ask"})
-            self.assertEqual(inline["skills"], existing["skills"])
+            self.assertEqual(inline["permission"], {"*": "allow"})
+            self.assertEqual(inline["skills"]["urls"], existing["skills"]["urls"])
+            self.assertEqual(inline["skills"]["paths"][0], "/existing/skills")
             self.assertIn("existing-plugin", inline["plugin"])
 
-    def test_does_not_create_inline_skills_config(self):
+    def test_adds_openspec_skills_path_to_empty_config(self):
         with patch.object(agent_runner.config, "SUPERPOWERS_PLUGIN_DIR", self.superpowers), \
              patch.object(agent_runner.config, "BRIDGE_PLUGIN_DIR", self.bridge), \
+             patch.object(agent_runner.config, "OPENSPEC_SKILLS_DIR", Path("/managed/os"),
+                          create=True), \
              patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": "{}"}):
             inline = json.loads(agent_runner._opencode_environment()[
                 "OPENCODE_CONFIG_CONTENT"])
-        self.assertNotIn("skills", inline)
+        self.assertEqual(inline["skills"], {"paths": ["/managed/os/opencode"]})
         self.assertEqual(inline["plugin"], [str(self.superpowers), str(self.bridge)])
 
     def test_rejects_non_string_plugin_entries(self):
