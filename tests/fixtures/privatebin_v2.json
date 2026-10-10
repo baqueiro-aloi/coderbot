@@ -1,0 +1,38 @@
+{
+  "_comment": "Captured from a real PrivateBin 2.0.6 server (privatebin/nginx-fpm-alpine) for a burn-after-reading paste created with PBinCLI 0.3.7. Synthetic secret.",
+  "link": "http://127.0.0.1:48081/?a5dfe97e7615aff2#6EqV5r91fyCXR8DogFGruZ9p3fRXeiZZLAcdLUnq3Wnp",
+  "plaintext": "synthetic-real-server-secret-123",
+  "payload": {
+    "status": 0,
+    "id": "a5dfe97e7615aff2",
+    "url": "/?a5dfe97e7615aff2",
+    "adata": [
+      [
+        "C6H+Hc3bu99/V47nxJGtcA==",
+        "YbdKXUCkUmM=",
+        100000,
+        256,
+        128,
+        "aes",
+        "gcm",
+        "zlib"
+      ],
+      "plaintext",
+      0,
+      1
+    ],
+    "meta": {
+      "time_to_live": 86392
+    },
+    "v": 2,
+    "ct": "qy0YSLkbpRqo0mVXr19ee6F4o9543VbX9Gw4VDXt46yXnXWQThLkZ37NvYqDS+NwU2YYBPO24vhfuoZ3",
+    "comments": [],
+    "comment_count": 0,
+    "comment_offset": 0,
+    "@context": "?jsonld=paste"
+  },
+  "burned_response": {
+    "status": 1,
+    "message": "Document does not exist, has expired or has been deleted."
+  }
+}
