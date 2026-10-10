@@ -81,8 +81,14 @@ class NeverBlocks(unittest.TestCase):
 
     def test_new_flags_default_to_legacy_behaviour(self):
         result = _python("import sys; sys.path.insert(0, 'src'); import config; "
-                         "print(config.EMPTY_SUITE_FAILS)")
-        self.assertEqual(result.stdout.strip(), "False", result.stderr[-2000:])
+                         "print(config.EMPTY_SUITE_FAILS, config.CREDENTIAL_REQUESTS)")
+        self.assertEqual(result.stdout.strip(), "False False", result.stderr[-2000:])
+
+    def test_bad_numeric_secret_settings_do_not_stop_startup(self):
+        result = _python("import sys; sys.path.insert(0, 'src'); import config; "
+                         "print(config.SECRET_TTL_SECONDS, config.PRIVATEBIN_TTL_SECONDS)",
+                         CODEBOT_SECRET_TTL_SECONDS="4h", CODEBOT_PRIVATEBIN_TTL_SECONDS="-5")
+        self.assertEqual(result.stdout.strip(), "14400 3600", result.stderr[-2000:])
 
 
 if __name__ == "__main__":

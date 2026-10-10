@@ -236,6 +236,29 @@ QUALITY_GATE_MAX_ROUNDS = int(os.environ.get("CODEBOT_QUALITY_GATE_MAX_ROUNDS", 
 # CHECK_PLAN; auto-discovered suites are never failed for being empty. Off by default.
 EMPTY_SUITE_FAILS = (os.environ.get("CODEBOT_EMPTY_SUITE_FAILS") or "off").strip().lower() in (
     "1", "on", "true", "yes")
+
+# Credential requests: the agent may ask for a missing credential (CREDENTIAL_REQUEST line);
+# the user can send it through a one-time PrivateBin link, continue without it, or pause.
+# Off by default: with it off the request line is ignored and nothing below is used.
+CREDENTIAL_REQUESTS = (os.environ.get("CODEBOT_CREDENTIAL_REQUESTS") or "off").strip().lower() in (
+    "1", "on", "true", "yes")
+# Extra PrivateBin instances whose links are accepted (comma-separated HTTPS base URLs).
+# The bot's own temporary instance is always accepted while it is open.
+PRIVATEBIN_INSTANCES = [u.strip() for u in (os.environ.get("CODEBOT_PRIVATEBIN_INSTANCES") or "").split(",")
+                        if u.strip().startswith("https://")]
+PRIVATEBIN_IMAGE = (os.environ.get("CODEBOT_PRIVATEBIN_IMAGE") or "privatebin/nginx-fpm-alpine:2.0.6").strip()
+# How long the temporary secure page stays open, and how long a received secret is kept.
+def _seconds(name: str, default: int) -> int:
+    """A positive int setting that falls back to its default instead of failing startup."""
+    try:
+        value = int((os.environ.get(name) or "").strip() or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+PRIVATEBIN_TTL_SECONDS = _seconds("CODEBOT_PRIVATEBIN_TTL_SECONDS", 3600)
+SECRET_TTL_SECONDS = _seconds("CODEBOT_SECRET_TTL_SECONDS", 14400)
 # After this many CONSECUTIVE failures of the same FSM state, codebot stops retrying
 # silently and emails the user (entering WAIT_STUCK). Any successful tick resets it.
 MAX_STATE_FAILURES = int(os.environ.get("CODEBOT_MAX_STATE_FAILURES", "5"))

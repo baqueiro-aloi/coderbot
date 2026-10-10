@@ -18,11 +18,19 @@ Protocol reference: PrivateBin js/privatebin.js (CryptTool) and its JSON API doc
 import base64
 import hashlib
 import json
+import os
 import re
+import shutil
+import signal
+import socket
+import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+
+import config
 
 MAX_CIPHERTEXT = 100_000      # bytes of paste JSON fetched
 MAX_PLAINTEXT = 32_768        # bytes after decompression
@@ -151,3 +159,199 @@ def decode(payload: dict, key: bytes) -> str:
     except Exception:
         raise LinkUnusable("I could not decrypt that paste (wrong or incomplete link, or an "
                            "unsupported PrivateBin version).") from None
+
+
+# ---------------------------------------------------------------- temporary instance
+#
+# The bot can host its own short-lived PrivateBin: a container from the pinned image,
+# reachable by the user through a localhost.run SSH tunnel (no account, no inbound
+# port). Inside Docker the container joins the bot's network namespace
+# (--network container:<bot>), so "127.0.0.1:8080" is the same address for the bot's
+# fetch and for the tunnel. Outside Docker it publishes 127.0.0.1:HOST_PORT instead.
+# Every subprocess has a timeout; only start() raises (Unavailable).
+
+
+CONTAINER_PORT = 8080   # fixed by the image's nginx config
+HOST_PORT = 48080       # only used when the bot itself is not in a container
+LABEL = "codebot.privatebin"
+TUNNEL_HOST = "nokey@localhost.run"
+_TUNNEL_URL = re.compile(r"https://[a-z0-9][a-z0-9-]*\.lhr\.life\b")
+_processes: dict[int, subprocess.Popen] = {}
+
+CONF = """;<?php http_response_code(403); /*
+; Temporary PrivateBin for handing one credential to codebot. Generated; do not edit.
+[main]
+name = "codebot secure drop"
+discussion = false
+opendiscussion = false
+password = false
+fileupload = false
+burnafterreadingselected = true
+defaultformatter = "plaintext"
+sizelimit = 32768
+qrcode = false
+email = false
+[expire]
+default = "{default}"
+[expire_options]
+5min = 300
+10min = 600
+1hour = 3600
+[formatter_options]
+plaintext = "Plain Text"
+[traffic]
+limit = 5
+[purge]
+limit = 0
+batchsize = 10
+[model]
+class = Filesystem
+[model_options]
+dir = PATH "data"
+;*/
+"""
+
+
+class Unavailable(Exception):
+    """The temporary instance could not be started; the message is safe to show."""
+
+
+def _in_container() -> bool:
+    return os.path.exists("/.dockerenv")
+
+
+def _run(args, timeout, check=True):
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=check)
+
+
+def _port_busy(port: int) -> bool:
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    process = _processes.get(pid)
+    if process is not None:
+        return process.poll() is None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _is_tunnel(pid: int) -> bool:
+    """Only ever signal a pid that is still our ssh tunnel (pids get reused)."""
+    try:
+        command = _run(["ps", "-o", "command=", "-p", str(pid)], 5, check=False).stdout
+    except Exception:  # noqa: BLE001
+        return False
+    return "localhost.run" in command
+
+
+def start(instance_id: str, directory, *, ttl: int = 3600) -> dict:
+    """Start a container and a public tunnel; return the session to persist.
+
+    Raises Unavailable with a user-safe reason. Partial resources are removed on failure."""
+    if not shutil.which("docker") or not shutil.which("ssh"):
+        raise Unavailable("docker or ssh is not available where I run.")
+    directory = os.fspath(directory)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    port = CONTAINER_PORT if _in_container() else HOST_PORT
+    if _port_busy(port):
+        raise Unavailable(f"local port {port} is already in use.")
+    network = (["--network", f"container:{socket.gethostname()}"] if _in_container()
+               else ["-p", f"127.0.0.1:{HOST_PORT}:{CONTAINER_PORT}"])
+    session = {"container_id": None, "tunnel_pid": None, "public_url": None,
+               "local_url": f"http://127.0.0.1:{port}/", "expires_at": time.time() + ttl}
+    try:
+        created = _run(["docker", "create", "--rm", "--label", f"{LABEL}={instance_id}",
+                        *network, config.PRIVATEBIN_IMAGE], 180)
+        session["container_id"] = created.stdout.strip()
+        conf = os.path.join(directory, "conf.php")
+        with open(conf, "w") as handle:
+            handle.write(CONF.replace("{default}", "1hour" if ttl >= 3600 else "10min"))
+        _run(["docker", "cp", conf, f"{session['container_id']}:/srv/cfg/conf.php"], 30)
+        _run(["docker", "start", session["container_id"]], 30)
+        deadline = time.time() + 30
+        while not _port_busy(port):
+            if time.time() > deadline:
+                raise Unavailable("the secure page did not come up in time.")
+            time.sleep(0.5)
+        log_path = os.path.join(directory, "tunnel.log")
+        with open(log_path, "w") as log_file:
+            process = subprocess.Popen(
+                ["ssh", "-T", "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", f"UserKnownHostsFile={os.path.join(directory, 'known_hosts')}",
+                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ExitOnForwardFailure=yes",
+                 "-o", "ServerAliveInterval=30", "-R", f"80:127.0.0.1:{port}", TUNNEL_HOST],
+                stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
+                start_new_session=True)
+        _processes[process.pid] = process
+        session["tunnel_pid"] = process.pid
+        deadline = time.time() + 30
+        while session["public_url"] is None:
+            with open(log_path, errors="replace") as handle:
+                found = _TUNNEL_URL.search(handle.read())
+            if found:
+                session["public_url"] = found.group(0) + "/"
+            elif process.poll() is not None or time.time() > deadline:
+                raise Unavailable("the public tunnel (localhost.run) could not be opened.")
+            else:
+                time.sleep(0.5)
+        return session
+    except Unavailable:
+        stop(session)
+        raise
+    except (subprocess.SubprocessError, OSError) as error:
+        stop(session)
+        raise Unavailable(f"the secure page could not be started ({type(error).__name__}).") from None
+
+
+def accepted_bases(session: dict | None, allowlist=()) -> dict[str, str]:
+    """Public base -> fetch base for parse_link: our tunnel maps to the local container."""
+    bases = {base_of(url): base_of(url) for url in allowlist if url.startswith("https://")}
+    if session and session.get("public_url") and session.get("local_url"):
+        bases[base_of(session["public_url"])] = session["local_url"]
+    return bases
+
+
+def running(session: dict | None) -> bool:
+    return bool(session and session.get("public_url") and _alive(session.get("tunnel_pid"))
+                and time.time() < session.get("expires_at", 0))
+
+
+def stop(session: dict | None) -> None:
+    """Remove the container and close the tunnel. Never raises."""
+    if not session:
+        return
+    pid = session.get("tunnel_pid")
+    try:
+        if _alive(pid) and (pid in _processes or _is_tunnel(pid)):
+            os.killpg(pid, signal.SIGTERM) if pid in _processes else os.kill(pid, signal.SIGTERM)
+            process = _processes.pop(pid, None)
+            if process is not None:
+                process.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if session.get("container_id"):
+            _run(["docker", "rm", "-f", session["container_id"]], 30, check=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def cleanup_stale(instance_id: str) -> None:
+    """Remove containers this instance left behind (e.g. after a crash). Never raises."""
+    try:
+        if not shutil.which("docker"):
+            return
+        ids = _run(["docker", "ps", "-aq", "--filter", f"label={LABEL}={instance_id}"], 10,
+                   check=False).stdout.split()
+        if ids:
+            _run(["docker", "rm", "-f", *ids], 30, check=False)
+    except Exception:  # noqa: BLE001
+        pass
