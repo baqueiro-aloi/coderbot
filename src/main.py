@@ -56,9 +56,11 @@ import task_source
 from task_text import MalformedPayload
 import turn_control
 import conversation as gmail_client
+import privatebin
 import progress
 import prompts
 import redaction
+import secret_store
 from command_text import parse_command
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
@@ -416,6 +418,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     state["session_id"] = result.session_id
     requested = check_plan.reported(result.output)
     if requested:
+        requested = check_plan.relax(requested, _skipped_credentials(state))
         database = phase_checkpoint.store()
         task_id = database.task_identity(state, config.REPO_PATH)
         outcomes = checks.execute_plan(requested, config.REPO_PATH, database, task_id)
@@ -425,6 +428,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
                               f"Session: `{result.session_id}`\n\n{result.output.strip()}\n")
+    if _maybe_request_credential(state, result, phase):
+        return True
     question = result.question
     if not question:  # None, or a bare/blank sentinel line — nothing actionable to ask
         state.pop("question_rounds", None)  # phase produced a real result; loop broken
@@ -3597,6 +3602,221 @@ def check_clean_checkout(state: dict) -> None:
         state["state"] = "IDLE"
 
 
+# ---------------------------------------------------------------- credentials
+#
+# The agent may ask for a credential it lacks (CREDENTIAL_REQUEST line). The user can
+# send it through a one-time PrivateBin page the bot opens, continue without it, or
+# pause. Off unless CODEBOT_CREDENTIAL_REQUESTS is on. Every helper here either acts or
+# returns control to the existing code path; none of them can stall the loop.
+
+def _credential_key(state: dict) -> str:
+    return progress.task_key(state)
+
+
+def _skipped_credentials(state: dict) -> list[str]:
+    return [name for name, decision in (state.get("credentials") or {}).items()
+            if isinstance(decision, dict) and decision.get("decision") == "skip"]
+
+
+def _credential_text(state: dict, kind: str, **fields) -> str:
+    return message_templates.operational(kind, state.get("task_language") or "English").format(**fields)
+
+
+def _maybe_request_credential(state: dict, result, phase: str) -> bool:
+    """Pause for a credential the agent asked for. False leaves handle_result unchanged."""
+    try:
+        request = secret_store.parse_request(getattr(result, "output", ""))
+        if not request or phase not in CONTINUATIONS:
+            return False
+        env = request["env"]
+        if env in _skipped_credentials(state) or secret_store.available(env):
+            return False  # already decided or already present: the agent just continues
+        rounds = state.get("question_rounds", 0) + 1
+        if rounds > config.QUESTION_MAX_ROUNDS:
+            return False
+        text = _credential_text(state, "credential_ask", **request)
+        email(state, "credential needed", text, localized=True)
+    except Exception:  # noqa: BLE001 — the phase continues exactly as before
+        log.warning("could not request a credential; continuing without pausing", exc_info=True)
+        return False
+    state["question_rounds"] = rounds
+    state["credential_request"] = {**request, "phase": phase, "asked_at": time.time(), "session": None}
+    state["pending_question"] = text
+    state["return_state"] = phase
+    state["state"] = "WAIT_REPLY"
+    _transcript_note(state, f"asked the user for credential {env} via {config.COMM_CHANNEL}")
+    return True
+
+
+_CREDENTIAL_CHOICE = re.compile(r"\(?([123])\)?[.):]?")
+_CREDENTIAL_WORDS = (
+    ("skip", re.compile(r"\b(sin (la |el )?(clave|key|credencial|token)|contin[uú]a sin|sigue sin|"
+                       r"without (it|the)|skip|omit|om[ií]tel[ao]|no (la )?tengo|i don'?t have)\b")),
+    ("pause", re.compile(r"\b(pausa|pause|espera|wait|hold|luego|later|m[aá]s tarde)\b")),
+    ("send_link", re.compile(r"\b(env[ií]a|m[aá]nda|send|link|enlace|p[aá]gina|page|s[ií]|yes|ok|dale)\b")),
+)
+
+
+def _classify_credential_reply(state: dict, reply: str) -> str:
+    text = reply.strip().casefold()
+    choice = _CREDENTIAL_CHOICE.fullmatch(text)
+    if choice:
+        return {"1": "send_link", "2": "skip", "3": "pause"}[choice.group(1)]
+    if len(text) <= 120:
+        for action, pattern in _CREDENTIAL_WORDS:
+            if pattern.search(text):
+                return action
+    request = state["credential_request"]
+    verdict = parse_json_reply(agent_runner.run(
+        prompts.render(prompts.CLASSIFY_CREDENTIAL_REPLY, reply=reply, env=request["env"],
+                       purpose=request["purpose"], service=request["service"]),
+        contract=False).output)
+    action = verdict.get("action")
+    return action if action in ("send_link", "skip", "pause") else "other"
+
+
+def _credential_action(state: dict, msg_id: str, reply: str):
+    """A callable that handles this reply as a credential reply, or None (today's path).
+
+    Deciding never raises; acting may (like any reply handler) and is then retried."""
+    try:
+        if not secret_store.enabled():
+            return None
+        links = secret_store.take_links(msg_id)
+        request = state.get("credential_request")
+        if not (request and state["state"] == "WAIT_REPLY" and state.get("item")):
+            if links:
+                return lambda: email(state, "secure link not used",
+                                     _credential_text(state, "credential_unexpected"), localized=True)
+            return None
+        if links or secret_store.available(request["env"]):
+            return lambda: _credential_provided(state, links)
+        action = _classify_credential_reply(state, reply)
+        return {"send_link": lambda: _credential_send_link(state),
+                "skip": lambda: _credential_skip(state),
+                "pause": lambda: email(state, "credential paused", _credential_text(
+                    state, "credential_paused", env=request["env"]), localized=True)}.get(action)
+    except Exception:  # noqa: BLE001
+        log.warning("could not classify a credential reply; handling it normally", exc_info=True)
+        return None
+
+
+def _credential_send_link(state: dict) -> None:
+    request = state["credential_request"]
+    session = request.get("session")
+    if not privatebin.running(session):
+        privatebin.stop(session)
+        request["session"] = None
+        try:
+            session = privatebin.start(config.INSTANCE_ID, config.DATA_DIR / "privatebin",
+                                       ttl=config.PRIVATEBIN_TTL_SECONDS)
+        except privatebin.Unavailable as error:
+            allowed = (" (" + ", ".join(config.PRIVATEBIN_INSTANCES) + ")") if config.PRIVATEBIN_INSTANCES else ""
+            email(state, "credential page unavailable", _credential_text(
+                state, "credential_unavailable", reason=str(error), allowed=allowed,
+                env=request["env"]), localized=True)
+            return
+        request["session"] = session
+        save_state(state)  # a retry after a failed email must find, not orphan, the page
+    email(state, "credential link", _credential_text(
+        state, "credential_link", url=session["public_url"], env=request["env"],
+        minutes=max(1, int((session["expires_at"] - time.time()) // 60))), localized=True)
+
+
+def _credential_provided(state: dict, links: list[str]) -> None:
+    request = state["credential_request"]
+    env = request["env"]
+    if not secret_store.available(env):  # already stored when retrying after a crash
+        accepted = privatebin.accepted_bases(request.get("session"), config.PRIVATEBIN_INSTANCES)
+        problem = "it is not a PrivateBin link I can open."
+        value = None
+        for link in links:
+            try:
+                fetch_url, key = privatebin.parse_link(link, accepted)
+                value = privatebin.decode(privatebin.fetch(fetch_url), key)
+                break
+            except privatebin.LinkUnusable as error:
+                problem = str(error)
+        if value is None:
+            email(state, "credential not received", _credential_text(
+                state, "credential_failed", problem=problem, env=env), localized=True)
+            return
+        secret_store.put(_credential_key(state), env, value, ttl=config.SECRET_TTL_SECONDS,
+                         source="privatebin")
+    privatebin.stop(request.get("session"))
+    state.setdefault("credentials", {})[env] = {"decision": "provided", "at": time.time()}
+    state.pop("credential_request", None)
+    save_state(state)
+    email(state, "credential received", _credential_text(
+        state, "credential_received", env=env, hours=max(1, config.SECRET_TTL_SECONDS // 3600)),
+        localized=True)
+    _answer_question(state, f"The credential {env} is now set as environment variable {env} for "
+                            "you and for controller-run checks. Do not print, log or commit its "
+                            "value. Continue the work.")
+
+
+def _credential_skip(state: dict) -> None:
+    request = state["credential_request"]
+    env = request["env"]
+    privatebin.stop(request.get("session"))
+    state.setdefault("credentials", {})[env] = {"decision": "skip", "at": time.time()}
+    state.pop("credential_request", None)
+    save_state(state)
+    email(state, "continuing without credential", _credential_text(
+        state, "credential_skipped", env=env), localized=True)
+    _answer_question(state, f"The user chose to continue without {env}; do not ask for it again. "
+                            f"Checks that need it must list it in env_keys with optional: true; "
+                            "they will be reported as skipped. Continue with everything else.")
+
+
+def _credential_tick(state: dict) -> None:
+    """Select the task's credentials and close a page that expired or died. Never raises."""
+    try:
+        secret_store.activate(_credential_key(state) if state.get("item") else None)
+        request = state.get("credential_request")
+        if not request:
+            return
+        if state.get("state") != "WAIT_REPLY" or not state.get("item"):
+            privatebin.stop(request.get("session"))
+            state.pop("credential_request", None)
+            return
+        session = request.get("session")
+        if session and not privatebin.running(session):
+            privatebin.stop(session)
+            request["session"] = None
+            email(state, "credential page closed", _credential_text(
+                state, "credential_page_closed", env=request["env"]), localized=True)
+    except Exception:  # noqa: BLE001
+        log.warning("credential housekeeping failed", exc_info=True)
+
+
+def _release_credentials(state: dict, *, drop: bool) -> None:
+    """Close any open page; on task end also delete the task's stored values. Never raises."""
+    try:
+        request = state.get("credential_request") or {}
+        privatebin.stop(request.get("session"))
+        if request:
+            request["session"] = None
+        if drop and state.get("item"):
+            secret_store.drop_task(_credential_key(state))
+    except Exception:  # noqa: BLE001
+        log.warning("could not release task credentials", exc_info=True)
+
+
+def _startup_credentials() -> None:
+    """Background: remove pages left by a previous run (unless one is still serving the
+    pending request) and expired values. Never raises."""
+    try:
+        if not secret_store.enabled():
+            return
+        session = (load_state().get("credential_request") or {}).get("session")
+        if not privatebin.running(session):
+            privatebin.cleanup_stale(config.INSTANCE_ID)
+        secret_store.sweep()
+    except Exception:  # noqa: BLE001
+        log.warning("credential startup cleanup failed", exc_info=True)
+
+
 def handle_wait(state: dict) -> None:
     polled = gmail_client.poll_reply(state["thread_id"]) if state.get("thread_id") else None
     if polled is None:
@@ -3618,14 +3838,20 @@ def handle_wait(state: dict) -> None:
         return
     log.info("reply received in %s: %r", state["state"], reply[:200])
     _note_contact(state)
-    if _queue_conversation(state, msg_id, reply):
+    # Before the conversation queue: queuing marks the message processed, which forgets
+    # its captured secure links. None means "not a credential reply": today's path.
+    credential_action = _credential_action(state, msg_id, reply)
+    if credential_action is None and _queue_conversation(state, msg_id, reply):
         return
-    if state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(token in reply.casefold()
-            for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
+    if credential_action is None and state["state"] in ("WAIT_REPLY", "WAIT_STUCK") and any(
+            token in reply.casefold() for token in ("skip e2e", "saltarnos las pruebas e2e", "omitir e2e")):
         verification_ledger.waiver(state, reply, "e2e:general", content_snapshot(config.REPO_PATH))
     reply_phase = state["state"]
     try:
-        _dispatch_wait_reply(state, msg_id, reply)
+        if credential_action is not None:
+            credential_action()
+        else:
+            _dispatch_wait_reply(state, msg_id, reply)
     except AgentContentFilterError:
         state["state"] = reply_phase
         _content_filter_stop(state, reply_phase)
@@ -4313,7 +4539,7 @@ def _reset_to_base_branch(label: str = "reset") -> list[str]:
 
 # Every task-scoped state key. Cleared whenever a task ends (merge, DONE, abort) so the
 # next pick starts from a clean slate. Keep in sync when adding state.
-RESET_KEYS = ("item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
+RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url", "item_key", "trail_ref", "item_detail", "item_images", "task_language", "thread_intro", "base_sha", "slug", "thread_nonce",
               "execution_task_id", "conversation_version", "conversation_flow_id", "conversation_delivery_notified",
               "recovery_id", "replan", "approved_proposal",
               "reviewed_proposal", "reviewed_pr_snapshot", "active_feedback_id", "coverage_report",
@@ -4353,6 +4579,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
     """End the task successfully: mark the item done in the backlog, optionally reset the
     checkout to a clean base branch (needed when finishing before a merge — the tree may
     hold proposal artifacts or a stale branch), email confirmation, and land in IDLE."""
+    _release_credentials(state, drop=True)
     item = state.get("item", "")
     struck = task_source.mark_done(item, state.get("item_id")) if item else False
     if struck:
@@ -4533,6 +4760,7 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     task state, and return to IDLE. Used both by the mailbox-wide last-resort 'ABORT'
     email and by an explicit abort classified from a WAIT_APPROVAL/WAIT_MERGE reply.
     Never touches remote branches or PRs — those are left for the user to clean up."""
+    _release_credentials(state, drop=True)
     aborted_task = state.get("item", "-")
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
@@ -4617,6 +4845,7 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
     """Park the current task: save its work and state, mark it on hold in the backlog,
     and return to IDLE so the next task can start. CONTINUE on the task's thread
     brings it back with top priority."""
+    _release_credentials(state, drop=False)
     item = state.get("item", "")
     notes = _commit_pending_work(state)
     try:
@@ -5249,9 +5478,14 @@ def do_question_reply(state: dict, reply: str) -> None:
                 trail(state, "User authorized continuation of pending approved implementation",
                       state["implementation_feedback"])
                 return
-    # answer (the default): resume the working session, restating the phase rules the
-    # raw reply lacks — sessions have overreached (implemented/pushed while PROPOSING)
-    # exactly on these unframed resumes.
+    # answer (the default): resume the working session.
+    _answer_question(state, reply)
+
+
+def _answer_question(state: dict, reply: str) -> None:
+    """Resume the working session with the user's answer, restating the phase rules the
+    raw reply lacks — sessions have overreached (implemented/pushed while PROPOSING)
+    exactly on these unframed resumes."""
     # Read return_state without popping: if a later step here raises, the state stays
     # WAIT_REPLY with return_state intact so the retry re-runs cleanly.
     phase = state.get("return_state")
@@ -5691,6 +5925,7 @@ def main() -> None:
     except RuntimeError as err:
         raise SystemExit(f"backlog ({config.TASK_SOURCE}) unavailable: {err}") from err
     _acquire_single_instance_lock()
+    threading.Thread(target=_startup_credentials, daemon=True).start()
     gmail_client.start()
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     global _conversation_worker
@@ -5754,6 +5989,7 @@ def _run_loop() -> None:
                 _ensure_task_language(state)
             else:
                 agent_runner.set_task_context(None)
+            _credential_tick(state)
             agent_runner.set_task_language(state.get("task_language"))
             if config.COMM_CHANNEL == "slack" and state.get("retire_thread_id"):
                 gmail_client.close_thread(state["retire_thread_id"])

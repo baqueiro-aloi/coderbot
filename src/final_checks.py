@@ -26,6 +26,8 @@ def run(state, repo, store):
                 continue
             plan.append(check)
             declared.add(check.id)
+    plan = check_plan.relax(plan, [name for name, decision in (state.get("credentials") or {}).items()
+                                   if isinstance(decision, dict) and decision.get("decision") == "skip"])
     task_id = store.task_identity(state, repo)
     results = checks.execute_plan(plan, repo, store, task_id)
     outcomes = []

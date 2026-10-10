@@ -267,12 +267,28 @@ def _parse(proc: subprocess.CompletedProcess) -> ClaudeResult:
     return result
 
 
+CREDENTIAL_CONTRACT = """
+If a check or live test needs a credential you do not have (for example a third-party
+API key), never ask for its value in a question. Instead END your response with one line
+  CREDENTIAL_REQUEST: {"env": "VARIABLE_NAME", "service": "<service>", "purpose": "<why>"}
+and stop working. The user either provides it (it then appears as environment variable
+VARIABLE_NAME for you and for controller-run checks) or tells you to continue without it.
+Never print, log, write to a file or commit a credential's value. Checks that need it list
+it in "env_keys" with "optional": true, so they are skipped rather than failed without it.
+"""
+
+
+def contract_text() -> str:
+    """The working-session contract; the credential part only when the feature is on."""
+    return SENTINEL_CONTRACT + (CREDENTIAL_CONTRACT if getattr(config, "CREDENTIAL_REQUESTS", False) else "")
+
+
 def run(prompt: str, contract: bool = True) -> ClaudeResult:
     # Agentic working sessions get the NEED_USER_INPUT contract. One-shot utility calls
     # (PICK, reply classifiers) pass contract=False so their sole output instruction is
     # the JSON contract in their own prompt — the sentinel contract would otherwise let
     # a classifier emit NEED_USER_INPUT instead of JSON and loop the reply forever.
-    full = SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+    full = contract_text() + "\n\n" + prompt if contract else prompt
     if not contract:
         with operations.budget(config.UTILITY_TIMEOUT_SECONDS):
             return _invoke(["--tools", ""], full)

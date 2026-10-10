@@ -217,7 +217,7 @@ def _working_opencode(prompt, session_id=None, *, interrupted=False):
         if not session_id or "Session not found" not in str(error):
             raise
         log.warning("OpenCode session %s is unavailable; starting a recovery session", session_id)
-        return _opencode(claude_runner.SENTINEL_CONTRACT + "\n\n" +
+        return _opencode(claude_runner.contract_text() + "\n\n" +
                          _SESSION_RECOVERY_CONTEXT + "\n\n" + prompt)
 
 
@@ -623,7 +623,7 @@ def run(prompt: str, contract: bool = True):
         if config.AGENT == "claude":
             result = claude_runner.run(prompt, contract=contract)
         elif config.AGENT == "opencode":
-            full = claude_runner.SENTINEL_CONTRACT + "\n\n" + prompt if contract else prompt
+            full = claude_runner.contract_text() + "\n\n" + prompt if contract else prompt
             with operations.budget(config.UTILITY_TIMEOUT_SECONDS if not contract else config.AGENT_TIMEOUT_SECONDS):
                 result = (_working_opencode(full, recovering, interrupted=True) if recovering
                           else _opencode(full))

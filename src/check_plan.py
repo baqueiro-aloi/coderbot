@@ -1,5 +1,5 @@
 """Versioned, declarative checks for the trusted deterministic runner."""
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import sys
 from pathlib import Path
@@ -44,6 +44,12 @@ class Check:
 
     def missing_credentials(self, environ) -> list[str]:
         return [name for name in self.env_keys if not (environ.get(name) or "").strip()]
+
+
+def relax(checks, names):
+    """Checks needing any credential the user chose to go without become optional."""
+    names = set(names or ())
+    return [replace(c, optional=True) if names & set(c.env_keys) else c for c in checks]
 
 
 def parse(value):

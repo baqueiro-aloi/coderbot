@@ -548,6 +548,22 @@ Classify what the user wants. Respond with ONLY a JSON object, no other text:
 - "unclear" when you cannot confidently tell. When in doubt, choose "unclear".
 """
 
+CLASSIFY_CREDENTIAL_REPLY = """Codebot needs the credential $env ($purpose) to test against
+$service, and offered the user three options: 1) send it through a secure one-time link,
+2) continue without it (checks that need it are skipped), 3) pause until they decide.
+
+""" + fenced("user reply", "$reply") + """
+
+Classify the reply. Respond with ONLY a JSON object, no other text:
+{"action": "send_link" | "skip" | "pause" | "other"}
+
+- "send_link": they want to provide it or asked for the link.
+- "skip": they cannot or will not provide it and want the work to continue without it.
+- "pause": they want to wait or decide later.
+- "other": a question, a different instruction, or anything unclear.
+"""
+
+
 CLASSIFY_QUESTION_REPLY = """Codebot asked the user a question while working on a task
 and is waiting for the answer. The question codebot asked is below, followed by the
 user's reply.
