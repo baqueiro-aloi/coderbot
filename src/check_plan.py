@@ -1,8 +1,12 @@
 """Versioned, declarative checks for the trusted deterministic runner."""
 from dataclasses import asdict, dataclass, field, replace
 import json
+import logging
+import re
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,10 +70,36 @@ def load(repo):
     return parse(json.loads(path.read_text())) if path.exists() else None
 
 
+def _reported(output):
+    markers = list(re.finditer(r"(?m)^CHECK_PLAN:[ \t]*", output))
+    if not markers:
+        return [], None
+    text = output[markers[-1].end():].lstrip()
+    # Accept a pretty-printed object, including a JSON fence after the marker.
+    # Never search prose for a later object or fall back to an earlier plan.
+    if text.startswith("```json\n"):
+        text = text[len("```json\n"):].lstrip()
+    elif text.startswith("```\n"):
+        text = text[len("```\n"):].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text)
+        return parse(value), None
+    except json.JSONDecodeError:
+        return [], "CHECK_PLAN must contain a valid JSON object with version 1 and a checks array"
+    except (ValueError, TypeError, AttributeError):
+        return [], "CHECK_PLAN has invalid check fields, schema, or duplicate check IDs"
+
+
 def reported(output):
-    lines = [line[len("CHECK_PLAN:"):].strip() for line in output.splitlines()
-             if line.startswith("CHECK_PLAN:")]
-    return parse(json.loads(lines[-1])) if lines else []
+    checks, error = _reported(output)
+    if error:
+        log.warning("Ignoring malformed agent check plan: %s", error)
+    return checks
+
+
+def reported_error(output):
+    """A rejected plan is not successful verification or an empty valid plan."""
+    return _reported(output)[1]
 
 
 def discover(repo):

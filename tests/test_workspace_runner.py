@@ -65,6 +65,50 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertIn("All files and child repositories", runner.instructions(self.state, self.context))
         self.assertFalse((self.root / ".git").exists())
 
+    def test_malformed_plan_does_not_hide_question_or_erase_previous_checks(self):
+        self.state["reported_check_plan"] = [{"id": "existing", "argv": ["test"]}]
+        result = SimpleNamespace(session_id="session", output="CHECK_PLAN: \nNEED_USER_INPUT: Which behavior?",
+                                 question="Which behavior?", attachments=[], preamble="")
+        with patch.object(main, "_maybe_request_credential", return_value=False):
+            self.assertTrue(main.handle_result(self.state, result, "EXPLORING"))
+        self.assertEqual(self.state["state"], "WAIT_REPLY")
+        self.assertEqual(self.state["reported_check_plan"][0]["id"], "existing")
+        self.assertIn("reported_check_plan_error", self.state)
+
+    def test_malformed_plan_never_passes_workspace_verification(self):
+        self.state["state"] = "VERIFYING"
+        runner.remember_checks(self.state, "CHECK_PLAN:")
+        invalid = SimpleNamespace(session_id="session", output="CHECK_PLAN: invalid", question=None,
+                                  attachments=[], preamble="")
+        with patch.object(runner, "turn", return_value=invalid), \
+             patch("checks.execute_plan") as execute:
+            runner.verify(self.state)
+        execute.assert_not_called()
+        self.assertNotIn("verified_snapshot", self.state["workspace"])
+        self.assertEqual(self.state["state"], "VERIFYING")
+
+    def test_question_reply_routes_without_lateral_worker(self):
+        self.state.update(state="WAIT_REPLY", return_state="EXPLORING", pending_question="What scope?", thread_id="C123:1")
+        with patch.object(main.gmail_client, "mark_processed"):
+            self.assertTrue(main._queue_conversation(self.state, "reply", "Only frontend, not PICA"))
+        row = main.phase_checkpoint.store().list("conversation", "task")[0]
+        self.assertEqual(row["data"]["route"], "flow")
+        with patch.object(main, "_dispatch_wait_reply") as dispatch:
+            self.assertTrue(main._dispatch_conversation(self.state))
+        dispatch.assert_called_once_with(self.state, "reply", "Only frontend, not PICA")
+
+    def test_restart_recovers_pending_question_reply_but_not_btw(self):
+        import parallel_conversation
+        self.state.update(state="WAIT_REPLY", return_state="EXPLORING", pending_question="What scope?", thread_id="C123:1")
+        store = main.phase_checkpoint.store()
+        pending = parallel_conversation.receive(store, self.state, self.root, "reply", "Only frontend")
+        aside = parallel_conversation.receive(store, self.state, self.root, "aside", "/btw explain")
+        with patch.object(main, "_dispatch_wait_reply") as dispatch:
+            self.assertTrue(main._dispatch_conversation(self.state))
+        dispatch.assert_called_once_with(self.state, "reply", "Only frontend")
+        self.assertEqual(store.get("conversation", pending["id"])["status"], "complete")
+        self.assertIsNone(store.get("conversation", aside["id"])["data"]["route"])
+
     def test_pick_only_accepts_actual_backlog_item_and_preserves_branches(self):
         self.state = {"state": "IDLE"}
         main.task_source.list_pending_items.return_value = [
@@ -144,7 +188,8 @@ class WorkspaceRunnerTests(unittest.TestCase):
         (self.root / ".env").write_text("SECRET=private")
         self.assertEqual(snapshot(self.root), before)
 
-    def test_checks_run_again_when_another_repository_changes(self):
+    @patch("checks.tool_versions", return_value={"executable": "sh", "version": "test"})
+    def test_checks_run_again_when_another_repository_changes(self, tool_versions):
         import checks
         import check_plan
         store = main.phase_checkpoint.store()
@@ -156,14 +201,63 @@ class WorkspaceRunnerTests(unittest.TestCase):
         (self.ui / "source.txt").write_text("changed")
         third = checks.execute(check, self.root, store, "task")
         self.assertFalse(third["reused"])
+        self.assertEqual(third["repetition_reason"], "content_changed")
+        self.assertEqual(tool_versions.call_count, 3)
 
     def test_unsafe_harness_rejected_without_execution(self):
         import check_plan
         e2e = self.root / "e2e"
         e2e.mkdir()
         (e2e / "run.sh").write_text("docker compose down --volumes\n")
-        with self.assertRaisesRegex(WorkspaceError, "destructive"):
+        with self.assertRaisesRegex(WorkspaceError, "project"):
             runner.validate_check(self.context, check_plan.Check("e2e", ["./run.sh"], cwd="e2e"))
+
+    def test_dedicated_cleanup_and_guarded_open_are_allowed(self):
+        import check_plan
+        e2e = self.root / "e2e"
+        e2e.mkdir()
+        (self.root / "docker-compose.e2e.yaml").write_text("services: {}\n")
+        (e2e / "run.sh").write_text(
+            'COMPOSE="docker compose -p feature-e2e -f $ROOT/docker-compose.e2e.yaml"\n'
+            '$COMPOSE down --volumes\n'
+            'if [ "$(uname -s)" = "Darwin" ] && command -v open >/dev/null; then\n'
+            ' open report.html\nfi\n')
+        value = {"name": "feature-e2e", "services": {}, "volumes": {"data": {"name": "feature-e2e_data"}}}
+        def command(root, argv):
+            if "compose" in argv:
+                return json.dumps(value)
+            if "inspect" in argv:
+                return '"unix:///var/run/docker.sock"'
+            return "default"
+        with patch.object(runner, "command", side_effect=command), patch.dict("os.environ", {}, clear=True):
+            runner.validate_check(self.context, check_plan.Check("e2e", ["./run.sh"], cwd="e2e"))
+
+    def test_harness_blocker_invokes_repair_instead_of_crash_loop(self):
+        from workspace_checks import HarnessBlocked
+        self.state.update(state="VERIFYING", reported_check_plan=[{"id": "integration", "argv": ["true"], "cwd": "."}])
+        result = SimpleNamespace(session_id="session", output="Harness updated", question=None, attachments=[])
+        with patch.object(runner, "validate_check", side_effect=HarnessBlocked("shared volume")), \
+             patch.object(runner, "turn", return_value=result) as turn, patch("checks.execute_plan") as execute:
+            runner.verify(self.state)
+        turn.assert_called_once()
+        self.assertIn("Repair the shared local test harness", turn.call_args.args[1])
+        execute.assert_not_called()
+        self.assertEqual(self.state["state"], "VERIFYING")
+
+    def test_harness_repair_prompts_change_and_explicit_retry_resets_budget(self):
+        from workspace_checks import HarnessBlocked
+        self.state.update(state="VERIFYING", reported_check_plan=[{"id": "integration", "argv": ["true"], "cwd": "."}])
+        result = SimpleNamespace(session_id="session", output="Harness updated", question=None, attachments=[])
+        with patch.object(runner, "validate_check", side_effect=HarnessBlocked("unresolved blocker")), \
+             patch.object(runner, "turn", return_value=result) as turn:
+            runner.verify(self.state)
+            runner.verify(self.state)
+        first, second = (call.args[1] for call in turn.call_args_list)
+        self.assertNotEqual(first, second)
+        self.assertIn("Repair attempt 1", first)
+        self.assertIn("Repair attempt 2", second)
+        main._clear_stuck(self.state, "VERIFYING")
+        self.assertNotIn("harness_repair_round", self.state["workspace"])
 
     def publication(self, repo, record):
         return {"url": f"https://github.com/example/{repo.relative_path}/pull/1", "state": "OPEN",

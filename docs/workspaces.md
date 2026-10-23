@@ -65,15 +65,17 @@ mismatched/unattributed work pauses rather than resets it. Abort/hold preserve
 workspace files and branches. State from another target requires explicit reset or
 migration. Do not run older single-repository builds against workspace state.
 
-Docker checks require an explicit context and host-root mapping. The mapping is
-not file synchronization: remote paths must already exist and match harness binds.
-Checked scripts that prune Docker resources or delete volumes are rejected. Use a
-dedicated test Compose project without development/shared volumes; arbitrary shell
-commands are not a security sandbox. Linux checks cannot call macOS `open`.
+Local Docker socket tests use the mounted host paths without extra configuration.
+Remote Docker tests require a host-root mapping; it is not file synchronization:
+remote paths must already exist and match harness binds. An optional configured
+context must match the active context.
 
-The current ejecuciones-mensuales `e2e/run.sh` needs a safe Linux-compatible entrypoint:
-it calls `open` and removes volumes. Coderbot reports this instead of executing
-destructive cleanup against your development stack.
+Compose `down --volumes` is allowed only with explicit test/e2e project and file
+arguments and a resolved configuration with project-scoped volumes/networks.
+External volumes/networks, shared resource names, and global prune are rejected.
+Harness blockers prompt an agent repair before verification retries. Arbitrary
+shell commands are not a security sandbox. Guard report opening with a Darwin
+check and `command -v open`; Linux should print the report path instead.
 
 Cross-repository merges are independent, not atomic. Changed PR heads, closed PRs,
 conflicts, and failed checks pause completion. Verified root-only changes can be

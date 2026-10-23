@@ -1,9 +1,10 @@
 import unittest
+import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from check_plan import discover, parse, reported
+from check_plan import discover, parse, reported, reported_error
 from check_results import parse_output
 
 
@@ -37,6 +38,28 @@ class CheckPlanTests(unittest.TestCase):
         self.assertEqual(reported("QUALITY_GATE: {}"), [])
         plan = reported('summary\nCHECK_PLAN: {"version":1,"checks":[{"id":"unit","argv":["test"],"scope":"focused"}]}')
         self.assertEqual(plan[0].scope, "focused")
+
+    def test_reported_multiline_and_fenced_json(self):
+        value = {"version": 1, "checks": [{"id": "unit", "argv": ["test"]}]}
+        for prefix in ("CHECK_PLAN: ", "CHECK_PLAN:\n", "CHECK_PLAN:\n```json\n", "CHECK_PLAN:\n```\n"):
+            with self.subTest(prefix=prefix):
+                output = prefix + json.dumps(value, indent=2) + "\n```\nSummary"
+                self.assertEqual(reported(output)[0].id, "unit")
+                self.assertIsNone(reported_error(output))
+
+    def test_malformed_agent_plan_is_reported_without_crashing(self):
+        for payload in ("", "not JSON", '{"version":1}', '{"version":1,"checks":[null]}',
+                        '{"version":1,"checks":[{"id":"bad","argv":[]}]}',
+                        '{"version":1,"checks":[{"id":"bad","argv":["test"],"unexpected":true}]}'):
+            with self.subTest(payload=payload):
+                output = "Exploration complete\nCHECK_PLAN: " + payload
+                self.assertEqual(reported(output), [])
+                self.assertIsNotNone(reported_error(output))
+
+    def test_invalid_latest_plan_does_not_execute_earlier_plan(self):
+        output = 'CHECK_PLAN: {"version":1,"checks":[{"id":"old","argv":["test"]}]}\nCHECK_PLAN: invalid'
+        self.assertEqual(reported(output), [])
+        self.assertIsNotNone(reported_error(output))
     def test_unknown_output_never_becomes_identifiable_failure(self):
         self.assertEqual(parse_output("connection failed", 1, "unittest")["status"], "unknown")
         result = parse_output("FAIL: test_x (tests.X)\n----------------------------------------------------------------------\nAssertionError: bad\n----------------------------------------------------------------------\nRan 1 test in 0.1s\nFAILED", 1, "unittest")

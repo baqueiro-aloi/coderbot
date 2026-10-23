@@ -26,7 +26,8 @@ class CheckRunnerTests(unittest.TestCase):
             self.assertEqual([r["check"] for r in results], ["0", "1"])
     def test_reuse_and_invalidation_for_content_and_environment(self):
         from unittest.mock import patch
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as root, \
+             patch("checks.tool_versions", return_value={"executable": sys.executable, "version": "test"}):
             repo = Path(root) / "repo"
             repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)

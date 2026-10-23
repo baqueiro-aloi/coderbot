@@ -320,8 +320,12 @@ def run_phase(state):
 
 def remember_checks(state, output):
     import check_plan
+    if error := check_plan.reported_error(output):
+        state["reported_check_plan_error"] = error
+        return
     reported = check_plan.reported(output)
     if reported:
+        state.pop("reported_check_plan_error", None)
         current = {entry["id"]: entry for entry in state.get("reported_check_plan", [])}
         current.update({check.id: check.to_dict() for check in reported})
         state["reported_check_plan"] = list(current.values())
@@ -367,6 +371,20 @@ def verify(state):
     import main
     import checks
     context = target()
+    if state.get("reported_check_plan_error"):
+        result = turn(state, "Correct your malformed check plan without repeating exploration or implementation. "
+            "Emit CHECK_PLAN: followed by a valid JSON object with version 1 and a checks array. "
+            "Each check needs id, argv as an array of strings, and workspace-relative cwd. "
+            "Include repository checks and shared integration/E2E checks. Do not claim verification passed.\n"
+            + state["reported_check_plan_error"])
+        if main.handle_result(state, result, "VERIFYING"):
+            return
+        if state.get("reported_check_plan_error"):
+            state["check_plan_repair_round"] = state.get("check_plan_repair_round", 0) + 1
+            if state["check_plan_repair_round"] >= config.QUALITY_GATE_MAX_ROUNDS:
+                main._enter_stuck(state, "VERIFYING", "The agent could not produce a valid check plan; no malformed plan was executed.")
+            return
+        state.pop("check_plan_repair_round", None)
     plan = check_plan_for(state, context)
     if not plan or not any(check.cwd in (".", "e2e") for check in plan):
         result = turn(state, "Inspect the whole feature and run cross-repository verification. "
@@ -379,8 +397,27 @@ def verify(state):
         plan = check_plan_for(state, context)
     if not plan or not any(check.cwd in (".", "e2e") for check in plan):
         raise workspace.WorkspaceError("Workspace verification requires a shared integration check; emit CHECK_PLAN or configure a manifest")
-    for check in plan:
-        validate_check(context, check)
+    from workspace_checks import HarnessBlocked
+    try:
+        for check in plan:
+            validate_check(context, check)
+    except HarnessBlocked as error:
+        state["workspace"]["harness_repair_round"] = state["workspace"].get("harness_repair_round", 0) + 1
+        if state["workspace"]["harness_repair_round"] > config.QUALITY_GATE_MAX_ROUNDS:
+            main._enter_stuck(state, "VERIFYING", "Workspace harness still needs repair: " + str(error))
+            return
+        result = turn(state, "Repair the shared local test harness/configuration, not application scope. "
+            f"Repair attempt {state['workspace']['harness_repair_round']}: re-evaluate the current blocker; "
+            "a previous repair response did not resolve it. "
+            "Keep all required repository and integration tests; do not skip them. Use an explicit dedicated "
+            "Compose test project with only project-scoped volumes/networks, no external/shared cleanup or prune. "
+            "Guard macOS report opening on Linux. Reuse local Docker socket paths; configure host_root only for remote Docker. "
+            "Do not execute cleanup until the controller validates it. Emit the corrected CHECK_PLAN.\nBlocker: " + str(error))
+        if not main.handle_result(state, result, "VERIFYING"):
+            remember_checks(state, result.output)
+            state["state"] = "VERIFYING"
+        return
+    state["workspace"].pop("harness_repair_round", None)
     before = snapshot(context.root)
     outcomes = checks.execute_plan(plan, context.root, main.phase_checkpoint.store(), state["execution_task_id"])
     failed = [outcome for outcome in outcomes if outcome["status"] not in ("pass", "skipped") or outcome.get("zero_tests")]
@@ -418,19 +455,22 @@ def verify(state):
 
 
 def validate_check(context, check):
-    """Reject known destructive harness entrypoints; workspace writes stay allowed."""
+    """Allow cleanup only after validating an explicit dedicated test project."""
+    from workspace_checks import HarnessBlocked, validate_cleanup, validate_docker
     cwd = workspace.contained(context.root, check.cwd)
     text = " ".join(check.argv)
     visited = set()
+    scripts = []
     def script(path):
         nonlocal text
         if path in visited or not path.is_file() or path.suffix not in (".sh", ".py", ".js", ".mjs"):
             return
         visited.add(path)
         body = path.read_text()
+        scripts.append(body)
         text += "\n" + body
         # Shell harnesses commonly delegate cleanup to a sibling/root script.
-        for name in re.findall(r"(?:\$ROOT/|\$\{ROOT\}/|\./)([A-Za-z0-9_./-]+\.sh)", body):
+        for name in re.findall(r"(?:\$ROOT/|\$\{ROOT\}/|\$root/|\$\{root\}/|\./)([A-Za-z0-9_./-]+\.sh)", body):
             for root in (context.root, path.parent):
                 candidate = workspace.contained(context.root, root / name)
                 script(candidate)
@@ -440,17 +480,15 @@ def validate_check(context, check):
         candidate = cwd / arg
         if candidate.exists() and candidate.is_relative_to(context.root):
             script(candidate)
-    if re.search(r"\b(?:system|volume|container|network)\s+prune\b|\bdown\b[^\n]*(?:--volumes|-v\b)|\bvolume\s+rm\b", text):
-        raise workspace.WorkspaceError(f"Check {check.id} performs destructive Docker cleanup; use a dedicated test project/harness without shared-volume deletion")
+    if re.search(r"\b(?:system|volume|container|network)\s+prune\b|\bvolume\s+rm\b", text):
+        raise HarnessBlocked(f"Check {check.id} performs global destructive Docker cleanup")
+    if re.search(r"\bdown\b[^\n]*(?:--volumes|-v\b)", text):
+        validate_cleanup(context, [*scripts, " ".join(check.argv)], command)
     if "docker" in text:
-        mapping = json.loads(context.manifest.docker_json)
-        if not mapping.get("context") or not mapping.get("host_root"):
-            raise workspace.WorkspaceError(f"Check {check.id} requires explicit Docker context and host_root in workspace manifest")
-        daemon = command(context.root, ["docker", "context", "show"])
-        if daemon != mapping["context"]:
-            raise workspace.WorkspaceError(f"Docker context mismatch: expected {mapping['context']}, got {daemon}")
-    if re.search(r"^\s*open\s+", text, re.MULTILINE):
-        raise workspace.WorkspaceError(f"Check {check.id} calls macOS open; use a Linux-compatible test command")
+        validate_docker(context, command)
+    if re.search(r"^\s*open\s+", text, re.MULTILINE) and not (
+            "uname" in text and "Darwin" in text and "command -v open" in text):
+        raise HarnessBlocked(f"Check {check.id} calls macOS open without a platform guard")
 
 
 def archive(state):

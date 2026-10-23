@@ -77,7 +77,8 @@ def process_one(store, repo, generate, deliver):
                                session_id=result.session_id)
         receipt = deliver(row)
         store.update("conversation", row, status="complete" if receipt["complete"] else "generated",
-                     notification_id=receipt["notification_id"], last_error=receipt.get("error"))
+                      notification_id=receipt["notification_id"], last_error=receipt.get("error"),
+                      retry_at=0 if receipt["complete"] else time.time() + 30)
     except Exception as error:
         from agent_errors import AgentContentFilterError
         row = store.get("conversation", row["id"])

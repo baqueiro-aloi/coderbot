@@ -61,7 +61,7 @@ import progress
 import prompts
 import redaction
 import secret_store
-from command_text import parse_command
+from command_text import parse_command, parse_btw
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
                      format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -430,7 +430,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     """
     state["session_id"] = result.session_id
     requested = check_plan.reported(result.output)
-    if requested and config.TARGET_MODE == "workspace":
+    if config.TARGET_MODE == "workspace":
         import workspace_runner
         workspace_runner.remember_checks(state, result.output)
     elif requested:
@@ -1481,6 +1481,10 @@ def _verify_preflight(state: dict) -> bool:
 
 def _verify_requested_checks(state: dict, result) -> bool:
     """The agent's pass claim cannot override a controller-run unknown/failure."""
+    if error := check_plan.reported_error(result.output):
+        _gate_failed(state, "VERIFYING", "verify_round", error,
+                     "Emit CHECK_PLAN: followed by a valid version-1 JSON check plan; no tests were executed from the malformed plan.", [])
+        return True
     if not check_plan.reported(result.output):
         return False
     failed = [check for check in state.get("focused_check_results", [])
@@ -4630,7 +4634,8 @@ RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url"
               "implementation_summary", "pending_feedback", "architecture_report",
               "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
               "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
-              "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
+               "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
+               "reported_check_plan_error", "check_plan_repair_round",
               "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
@@ -4728,6 +4733,8 @@ def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
 
 
 def _clear_stuck(state: dict, failed_state: str) -> None:
+    if state.get("workspace"):
+        state["workspace"].pop("harness_repair_round", None)
     # return_state is deliberately KEPT: when resuming WAIT_REPLY it still points at the
     # phase whose question is pending, and handle_result refreshes it on new questions.
     if "failures" in state:
@@ -5686,6 +5693,10 @@ def _queue_conversation(state, message_id, text):
     store = phase_checkpoint.store()
     row = parallel_conversation.receive(store, state, config.REPO_PATH, message_id, text)
     fixed = parallel_conversation.deterministic(state, text)
+    if config.TARGET_MODE == "workspace" and state.get("state") == "WAIT_REPLY" and parse_btw(text) is None:
+        # Route to the question handler, which classifies the actual reply before
+        # acting. Do not make an unrelated lateral-delivery worker a dependency.
+        fixed = {"intent": "answer", "resolves_pending_question": True, "inputs": []}
     if fixed and row["status"] == "pending":
         parallel_conversation.save_classification(store, row, fixed)
     task_records.contact(store, state, config.REPO_PATH, message_id, state["thread_id"])
@@ -5697,6 +5708,17 @@ def _queue_conversation(state, message_id, text):
 
 def _dispatch_conversation(state):
     store = phase_checkpoint.store()
+    if config.TARGET_MODE == "workspace" and state.get("state") == "WAIT_REPLY":
+        # Recover receipts already taken out of Slack's inbox by an older build.
+        # Only unchanged active question/thread receipts qualify; /btw remains lateral.
+        for pending in store.list("conversation", store.task_identity(state, config.REPO_PATH)):
+            view = pending["data"].get("snapshot", {})
+            if (pending["status"] in ("pending", "retry") and not pending["data"].get("classification")
+                    and not pending["data"].get("explicit_btw") and view.get("state") == "WAIT_REPLY"
+                    and view.get("thread_id") == state.get("thread_id")
+                    and view.get("decision_version") == parallel_conversation.decision_version(state)):
+                parallel_conversation.save_classification(store, pending,
+                    {"intent": "answer", "resolves_pending_question": True, "inputs": []})
     rows = parallel_conversation.flow_pending(store, state, config.REPO_PATH)
     if not rows:
         return False
