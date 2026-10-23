@@ -31,7 +31,8 @@ def field(key, group, help, default="", kind="text", secret=False, advanced=Fals
 
 
 SETTINGS = (
-    field("CODEBOT_REPO_PATH", "Repository", "Absolute path to the target Git checkout.", kind="directory"),
+    field("CODEBOT_REPO_PATH", "Repository", "Absolute path to a Git checkout or feature workspace.", kind="directory"),
+    field("CODEBOT_WORKSPACE_MANIFEST", "Repository", "Optional JSON manifest inside the workspace for discovery, base overrides and checks.", advanced=True),
     field("CODEBOT_BASE_BRANCH", "Repository", "Trunk branch for task branches and PRs.", "main"),
     field("CODEBOT_PROJECT_NAME", "Repository", "Human-readable project name used in prompts."),
     field("CODEBOT_INSTANCE", "Repository", "Optional instance name; blank generates a stable adjective-animal name."),
@@ -191,8 +192,8 @@ def validate_value(setting: Setting, value: str) -> str | None:
     if setting.kind == "schedule" and value.lower() not in ("off", "none", "0", "false"):
         if not re.fullmatch(r"[1-9]\d*[smhd]?(?:\s*,\s*[1-9]\d*[smhd]?)*", value, re.I):
             return "use comma-separated durations such as 30m,1h, or off"
-    if setting.key == "CODEBOT_REPO_PATH" and value and not (Path(value).is_absolute() and (Path(value) / ".git").exists()):
-        return "select an absolute Git checkout (with .git)"
+    if setting.key == "CODEBOT_REPO_PATH" and value and not (Path(value).is_absolute() and Path(value).is_dir()):
+        return "select an absolute target directory (Git checkout or workspace)"
     if setting.key == "CODEBOT_JIRA_URL" and value and not re.fullmatch(r"https://[^/\s]+\.atlassian\.net/?", value):
         return "enter https://<site>.atlassian.net"
     if setting.key == "CODEBOT_JIRA_PICK_LABEL" and value and not re.fullmatch(r"[^\s]+", value):
@@ -217,6 +218,9 @@ def validate(values: dict[str, str]) -> list[str]:
     source = values.get("CODEBOT_TASK_SOURCE") or "gdoc"
     channel = values.get("CODEBOT_COMM_CHANNEL") or "email"
     agent = values.get("CODEBOT_AGENT") or "claude"
+    target = values.get("CODEBOT_REPO_PATH")
+    if target and not (Path(target) / ".git").exists() and source == "github" and not values.get("CODEBOT_GH_ISSUE_REPO"):
+        required.append("CODEBOT_GH_ISSUE_REPO")
     if source == "gdoc":
         required.append("CODEBOT_DOC_ID")
     elif source == "github" and not values.get("CODEBOT_GH_PROJECT_URL"):

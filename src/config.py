@@ -159,10 +159,15 @@ ACTIVITY_TRAIL = (os.environ.get("CODEBOT_ACTIVITY_TRAIL") or "on").strip().lowe
 # May be a comma-separated list: mail is SENT to the first address; mail FROM any of
 # them is trusted as the user (replies, approvals, ABORT/STATUS/DONE commands).
 USER_EMAIL = os.environ.get("CODEBOT_USER_EMAIL", "")
-# Target git checkout the agent works on. Required in the container (compose and
-# entrypoint enforce it; main() validates it's a git repo). The sentinel default
+# Target directory the agent works on. Required in the container (compose and
+# entrypoint enforce it). The sentinel default
 # keeps host-side imports (setup_oauth.py) working without env vars.
 REPO_PATH = Path(os.environ.get("CODEBOT_REPO_PATH") or "/unset-CODEBOT_REPO_PATH")
+# Worktrees have a .git file rather than a directory. Unconfigured host-side
+# imports retain repo behavior; startup still rejects an unset target path.
+TARGET_MODE = ("repo" if not os.environ.get("CODEBOT_REPO_PATH") or
+               (REPO_PATH / ".git").exists() else "workspace")
+WORKSPACE_MANIFEST = os.environ.get("CODEBOT_WORKSPACE_MANIFEST") or None
 # Human-readable project name used in prompts; defaults to the repo dir name.
 PROJECT_NAME = os.environ.get("CODEBOT_PROJECT_NAME") or REPO_PATH.name
 

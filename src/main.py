@@ -86,8 +86,21 @@ redaction.install()  # after every root handler exists (never raises)
 def load_state() -> dict:
     if config.STATE_PATH.exists():
         state = json.loads(config.STATE_PATH.read_text())
+        state = _validate_target_state(state)
         return task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
-    return {"state": "IDLE"}
+    return _validate_target_state({"state": "IDLE"})
+
+
+def _validate_target_state(state: dict) -> dict:
+    # Validate before task migration can replay feedback or write durable records.
+    if config.TARGET_MODE == "workspace" or state.get("workspace"):
+        import workspace
+        import workspace_state
+        target = workspace.discover(config.REPO_PATH, mode=config.TARGET_MODE,
+                                    manifest_path=config.WORKSPACE_MANIFEST,
+                                    base_branch=config.BASE_BRANCH if config.TARGET_MODE == "repo" else None)
+        return workspace_state.bind_and_validate(state, target)
+    return state
 
 
 def save_state(state: dict) -> None:
@@ -417,7 +430,10 @@ def handle_result(state: dict, result, phase: str) -> bool:
     """
     state["session_id"] = result.session_id
     requested = check_plan.reported(result.output)
-    if requested:
+    if requested and config.TARGET_MODE == "workspace":
+        import workspace_runner
+        workspace_runner.remember_checks(state, result.output)
+    elif requested:
         requested = check_plan.relax(requested, _skipped_credentials(state))
         database = phase_checkpoint.store()
         task_id = database.task_identity(state, config.REPO_PATH)
@@ -852,6 +868,9 @@ def _e2e_report_note(state: dict) -> str:
 # ---------------------------------------------------------------- phases
 
 def do_pick(state: dict) -> None:
+    if config.TARGET_MODE == "workspace":
+        import workspace_runner
+        return workspace_runner.pick(state)
     # Only tracked, uncommitted changes matter — untracked files (e.g. host-side
     # git-ignored config not excluded inside the container) don't block a checkout.
     if git("status", "--porcelain", "--untracked-files=no"):
@@ -1018,6 +1037,8 @@ def _undo_premature_work(state: dict, phase: str) -> str:
 
     Best-effort by design: a cleanup error must never fail the phase, so problems are
     reported in the note instead of raised."""
+    if config.TARGET_MODE == "workspace":
+        return ""  # Shared planning is local; never reset child repos as hygiene.
     notes = []
     base_branch = config.BASE_BRANCH
     try:
@@ -1191,9 +1212,12 @@ def do_approval_reply(state: dict, reply: str) -> None:
         announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
     # changes: revise the proposal in the working session and go back to waiting.
-    result = agent_runner.resume(
-        state["session_id"],
-        prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"]))
+    revision_prompt = prompts.render(prompts.REVISE_PROPOSAL, feedback=verdict.get("feedback", ""), slug=state["slug"])
+    if config.TARGET_MODE == "workspace":
+        import workspace_runner
+        result = workspace_runner.turn(state, revision_prompt)
+    else:
+        result = agent_runner.resume(state["session_id"], revision_prompt)
     if handle_result(state, result, "PROPOSING"):
         return
     note = "" if state.get("replan") else _undo_premature_work(state, "PROPOSING")
@@ -3897,6 +3921,8 @@ def handle_wait(state: dict) -> None:
 
 
 def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
+    if config.TARGET_MODE == "workspace":
+        return _handle_reply(state, reply)
     selection = handoffs.selected_reply(state, reply)
     if selection is not None:
         if selection.get("error") or selection.get("wait"):
@@ -4001,6 +4027,15 @@ def _dispatch_feedback(state: dict) -> bool:
     if not rows:
         return False
     row = rows[0]
+    if config.TARGET_MODE == "workspace":
+        state["pending_feedback"] = row["data"]["text"]
+        if state["state"] not in ("EXPLORING", "PROPOSING", "WAIT_APPROVAL"):
+            state["state"] = "APPLY_FEEDBACK"
+        else:
+            state["implementation_feedback"] = row["data"]["text"]
+        database.update("feedback", row, status="complete")
+        save_state(state)
+        return True
     original_phase = state["state"]
     try:
         return _apply_received_feedback(state, database, row)
@@ -4630,7 +4665,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
         body = (f"{note}\n\nBut I could not find this item in the backlog to mark it "
                 f"done:\n\n{item}\n\nPlease mark it done (or delete it) promptly "
                 "— until then it may be picked again.")
-    if reset_repo:
+    if reset_repo and config.TARGET_MODE != "workspace":
         problems = _reset_to_base_branch(f"finished {state.get('slug') or state.get('branch') or 'task'}")
         if problems:
             body += ("\n\nNotes from the repo reset (I'll re-check before the "
@@ -4645,6 +4680,9 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
         state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
+    if config.TARGET_MODE == "workspace":
+        state.pop("workspace", None)
+        state.pop("workspace_review", None)
     if state.get("original_workspace"):
         config.REPO_PATH = Path(state.pop("original_workspace"))
         state.pop("workspace_path", None)
@@ -4795,7 +4833,9 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
     aborted_task = state.get("item", "-")
     prev_state = state["state"]
     log.warning("ABORT: resetting to IDLE (was state=%s task=%r)", prev_state, aborted_task[:80])
-    problems = _reset_to_base_branch(f"aborted {state.get('slug') or state.get('branch') or 'task'}")
+    problems = (["Workspace files and child repository branches were preserved; no reset was performed"]
+                if config.TARGET_MODE == "workspace" else
+                _reset_to_base_branch(f"aborted {state.get('slug') or state.get('branch') or 'task'}"))
     # The task goes back to the pool, so its claim marker must go too — otherwise no
     # instance (including this one, if its state was wiped) would ever pick it again.
     if aborted_task and aborted_task != "-":
@@ -4819,6 +4859,9 @@ def _abort_and_reset(state: dict, note: str, new_thread: bool = False) -> None:
         state["retire_thread_id"] = state["thread_id"]
     for key in RESET_KEYS:
         state.pop(key, None)
+    if config.TARGET_MODE == "workspace":
+        state.pop("workspace", None)
+        state.pop("workspace_review", None)
     state["state"] = "IDLE"
 
 
@@ -4829,6 +4872,7 @@ def _load_holds() -> list[dict]:
         holds = json.loads(config.HOLDS_PATH.read_text())
         for hold in holds:
             if hold.get("saved"):
+                hold["saved"] = _validate_target_state(hold["saved"])
                 task_records.migrate(hold["saved"], phase_checkpoint.store(), config.REPO_PATH)
         return holds
     except (OSError, json.JSONDecodeError):
@@ -4878,7 +4922,8 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
     brings it back with top priority."""
     _release_credentials(state, drop=False)
     item = state.get("item", "")
-    notes = _commit_pending_work(state)
+    notes = (["Workspace changes remain saved locally; no blanket commit or reset was performed"]
+             if config.TARGET_MODE == "workspace" else _commit_pending_work(state))
     try:
         if not task_source.hold_task(item, state.get("item_id")):
             notes.append("could not mark the item on hold in the backlog — another "
@@ -4888,6 +4933,8 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
         notes.append("could not update the backlog (see logs)")
     resume_state = state["state"]
     saved = {k: state[k] for k in RESET_KEYS if k in state}
+    if config.TARGET_MODE == "workspace":
+        saved["workspace"] = copy.deepcopy(state["workspace"])
     saved["state"] = resume_state
     holds = [h for h in _load_holds() if h.get("thread_id") != state.get("thread_id")]
     holds.append({"thread_id": state.get("thread_id") or thread_id, "item": item,
@@ -4899,10 +4946,14 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
             f"committed there)\nIt was in state {resume_state}.\n\n"
             "I'm moving on to the next backlog item. Reply 'continue' on THIS thread "
             "(optionally followed by instructions) and I'll pick this task back up "
-            "first thing after my current work.")
+             "first thing after my current work.")
+    if config.TARGET_MODE == "workspace":
+        body = (f"Task on hold: {item}\nWorkspace files and child branches remain local; "
+                "no blanket commit or reset was performed.\n"
+                f"It was in state {resume_state}. Reply 'continue' on this thread to resume.")
     if notes:
         body += "\n\nNotes:\n- " + "\n- ".join(notes)
-    problems = _reset_to_base_branch(f"hold {state.get('slug') or state.get('branch') or 'task'}")
+    problems = [] if config.TARGET_MODE == "workspace" else _reset_to_base_branch(f"hold {state.get('slug') or state.get('branch') or 'task'}")
     if problems:
         log.warning("reset after hold left notes: %s", problems)
         body += "\n\nRepo reset:\n- " + "\n- ".join(problems)
@@ -4911,6 +4962,8 @@ def _hold_task(state: dict, thread_id: str | None) -> None:
         _publish_progress(state, "paused")
         for key in RESET_KEYS:
             state.pop(key, None)
+        if config.TARGET_MODE == "workspace":
+            state.pop("workspace", None)
         state["state"] = "IDLE"
     log.info("task on hold: %r (resume at %s)", item[:80], resume_state)
 
@@ -4934,6 +4987,7 @@ def _resume_held_task(state: dict, hold: dict) -> None:
     """Restore a held task into `state` (branch, session, wait/phase state) and apply
     the user's CONTINUE note, if any, as the reply the task was waiting for."""
     saved = dict(hold.get("saved") or {})
+    saved = _validate_target_state(saved)
     resume_state = saved.pop("state", "EXPLORING")
     note = hold.get("note", "")
     item = hold.get("item", "")
@@ -4949,7 +5003,7 @@ def _resume_held_task(state: dict, hold: dict) -> None:
         _save_holds([h for h in _load_holds() if h is not hold and h.get("thread_id") != hold.get("thread_id")])
         return
     branch = hold.get("branch") or saved.get("branch")
-    if branch:
+    if branch and config.TARGET_MODE != "workspace":
         git("checkout", branch)
     state.update(saved)
     state["state"] = resume_state
@@ -5597,6 +5651,9 @@ def _continue_reply_delivery(state: dict) -> None:
 
 
 def _handle_reply(state: dict, reply: str) -> None:
+    if config.TARGET_MODE == "workspace":
+        import workspace_runner
+        return workspace_runner.reply(state, reply)
     if state["state"] == "WAIT_APPROVAL":
         do_approval_reply(state, reply)
     elif state["state"] == "WAIT_STUCK":
@@ -5905,6 +5962,13 @@ def validate_managed_runtime() -> None:
 
 
 def main() -> None:
+    # No credential threads, backlog validation, channel delivery, or agent turn
+    # may start against a mismatched target. Do not migrate durable records yet.
+    raw_state = json.loads(config.STATE_PATH.read_text()) if config.STATE_PATH.exists() else {"state": "IDLE"}
+    try:
+        _validate_target_state(raw_state)
+    except ValueError as error:
+        raise SystemExit(f"Target state unavailable: {error}") from error
     if config.AGENT not in ("claude", "opencode"):
         raise SystemExit("CODEBOT_AGENT must be 'claude' or 'opencode'")
     if config.AGENT == "opencode" and (
@@ -5948,7 +6012,7 @@ def main() -> None:
             if not value:
                 raise SystemExit(f"{setting} must name a Jira workflow status")
     # .exists() not .is_dir(): in a git worktree .git is a file.
-    if not (config.REPO_PATH / ".git").exists():
+    if config.TARGET_MODE != "workspace" and not (config.REPO_PATH / ".git").exists():
         raise SystemExit(
             f"CODEBOT_REPO_PATH ({config.REPO_PATH}) is not a git checkout; set it in .env")
     try:
@@ -6074,7 +6138,10 @@ def _run_loop() -> None:
                 _announce_state(state)
                 _work_active.set()
                 try:
-                    if state["state"] == "WAIT_REVIEW" and check_pr_status(state):
+                    if config.TARGET_MODE == "workspace":
+                        import workspace_runner
+                        workspace_runner.run_phase(state)
+                    elif state["state"] == "WAIT_REVIEW" and check_pr_status(state):
                         pass  # PR merged/closed or conflicts; dispatch next tick
                     elif state["state"] == "WAIT_REVIEW":
                         handle_review_wait(state)

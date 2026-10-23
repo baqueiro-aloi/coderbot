@@ -16,6 +16,8 @@ from execution_identity import digest, environment_identity, snapshot
 
 def dependency_snapshot(repo, inputs=None):
     repo = Path(repo)
+    if not (repo / ".git").exists():
+        return snapshot(repo, inputs)
     files = operations.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
                            cwd=repo, timeout=30).stdout.split('\0')
     entries = []

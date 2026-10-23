@@ -79,6 +79,17 @@ exec setpriv --reuid=bot --regid=bot --init-groups env HOME=/home/bot bash -c '
   # --replace-all (not a plain set): the key is multi-valued below, and a plain set fails
   # on an existing multi-valued key, which would break every restart of this container.
   git config --global --replace-all url."https://github.com/".insteadOf "git@github.com:"
+  if [ ! -e "${CODEBOT_REPO_PATH}/.git" ]; then
+    # The parent bind mount already exposes every child, including worktrees.
+    while IFS= read -r -d "" marker; do
+      repo="${marker%/.git}"
+      git config --global --add safe.directory "$repo"
+      origin="$(git -C "$repo" config --get remote.origin.url || true)"
+      if [[ "$origin" =~ ^git@([^:]+): ]] && [ "${BASH_REMATCH[1]}" != "github.com" ]; then
+        git config --global --add url."https://github.com/".insteadOf "git@${BASH_REMATCH[1]}:"
+      fi
+    done < <(find "${CODEBOT_REPO_PATH}" -name .git -print0 -prune)
+  fi
   # The host may point origin at an SSH host alias from its own ~/.ssh/config, e.g.
   # "git@github-work:org/repo.git". The container has neither that config nor the key,
   # and gh refuses a remote whose host it does not recognize ("none of the git remotes
