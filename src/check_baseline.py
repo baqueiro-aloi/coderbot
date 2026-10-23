@@ -12,6 +12,7 @@ import subprocess
 import operations
 from checks import execute
 from execution_identity import digest, environment_identity, snapshot
+from selfheal_events import runtime_epoch
 
 
 def dependency_snapshot(repo, inputs=None):
@@ -106,7 +107,7 @@ def baseline_result(check, repo, sha, store):
     dependencies = dependency_inputs(check, repo)
     current_dependencies = dependency_snapshot(repo, dependencies)
     identity = digest({"sha": sha, "check": check.to_dict(), "environment": environment,
-                       "dependencies": current_dependencies, "version": 2,
+                        "dependencies": current_dependencies, "version": 2, "runtime_epoch": runtime_epoch(),
                        "repair_revision": environment_revision(store, repo, check.id)})
     saved = store.reusable_check(cache_task, identity)
     if saved and saved["data"]["result"]["status"] in ("pass", "fail"):

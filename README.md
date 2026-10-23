@@ -15,6 +15,9 @@ not hardcoded application adapters. See [harness contracts](docs/harness-contrac
 Target mode is automatic: a root `.git` means single repository; otherwise the
 directory is a workspace. See [feature workspaces](docs/workspaces.md).
 
+Optional independent supervision and validated Python repairs are documented in
+[self-healing](docs/self-healing.md); automatic repair is disabled by default.
+
 The communication façade supports optional live task progress. Slack edits the
 initial feature message with its phase, `:loading:` while working, `:question:`
 when user input is required, and the last three safe operational log lines.

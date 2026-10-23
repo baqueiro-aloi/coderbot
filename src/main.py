@@ -61,6 +61,7 @@ import progress
 import prompts
 import redaction
 import secret_store
+import selfheal_events
 from command_text import parse_command, parse_btw
 
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.DEBUG),
@@ -87,6 +88,11 @@ def load_state() -> dict:
     if config.STATE_PATH.exists():
         state = json.loads(config.STATE_PATH.read_text())
         state = _validate_target_state(state)
+        recovered = selfheal_events.recover(state)
+        if recovered != state:
+            save_state(recovered)  # Commit the resume before consuming its ticket or running a phase.
+            selfheal_events.acknowledge(recovered)
+        state = recovered
         return task_records.migrate(state, phase_checkpoint.store(), config.REPO_PATH)
     return _validate_target_state({"state": "IDLE"})
 
@@ -5898,6 +5904,7 @@ def _heartbeat_loop() -> None:
         try:
             if (not operations.expired() and
                     (operations.snapshot() or time.time() - _liveness["tick_started"] < config.HEARTBEAT_MAX_TICK_SECONDS)):
+                selfheal_events.emit("heartbeat", _current_state or {})
                 config.HEARTBEAT_PATH.write_text(str(int(time.time())))
         except Exception:
             log.exception("heartbeat write failed")
@@ -6066,6 +6073,7 @@ def main() -> None:
         log.exception("could not re-assert the in-flight task's claim at startup")
     _install_shutdown_handlers()
     try:
+        selfheal_events.emit("ready", load_state())
         _run_loop()
     except ShutdownRequested as sig:
         # Deliberately no save_state: the tick in flight may have half-mutated the
@@ -6097,6 +6105,8 @@ def _run_loop() -> None:
             time.sleep(config.POLL_INTERVAL_SECONDS)
             continue
         prev = state["state"]
+        attempt_task_id = state.get("execution_task_id")
+        selfheal_events.emit("heartbeat", state)
         _current_state = state
         with _status_command_lock:
             _conversation_state = copy.deepcopy(state)
@@ -6192,6 +6202,8 @@ def _run_loop() -> None:
                 state["last_transition"] = time.time()
             _maybe_ping(state)
             save_state(state)
+            if state["state"] != prev:
+                selfheal_events.emit("phase_completed", state, origin=prev, task_id=attempt_task_id)
             _announce_state(state)
             if state.get("item") and state["state"] != prev:
                 phase_checkpoint.retire(state, prev)
@@ -6252,6 +6264,10 @@ def _run_loop() -> None:
                     if state["state"] != prev:
                         state["last_transition"] = time.time()
                     save_state(state)
+                    selfheal_events.emit("incident", {**state, "state": prev}, category="implementation",
+                        error_type=type(error).__name__, location=traceback.extract_tb(error.__traceback__)[-1].name,
+                        binding=selfheal_events.state_binding(state),
+                        diagnostic=diagnostics.redact(traceback.format_exc()))
                     _announce_state(state)
                     backoff = 1
                     time.sleep(config.POLL_INTERVAL_SECONDS)

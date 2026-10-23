@@ -9,6 +9,7 @@ from contextvars import copy_context
 
 import operations
 import preparation
+from selfheal_events import runtime_epoch
 from check_results import parse_output
 from execution_identity import digest, environment_identity, snapshot
 log = logging.getLogger(__name__)
@@ -61,7 +62,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
     environment = environment_identity(check.argv, cwd, env_keys=check.env_keys, environ=env,
-        tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id)},
+        tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id),
+               "runtime_epoch": runtime_epoch()},
         key_path=store.path.parent / "identity.key")
     from check_baseline import dependency_snapshot, dependency_inputs
     dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))

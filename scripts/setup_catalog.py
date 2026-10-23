@@ -33,6 +33,7 @@ def field(key, group, help, default="", kind="text", secret=False, advanced=Fals
 SETTINGS = (
     field("CODEBOT_REPO_PATH", "Repository", "Absolute path to a Git checkout or feature workspace.", kind="directory"),
     field("CODEBOT_WORKSPACE_MANIFEST", "Repository", "Optional JSON manifest inside the workspace for discovery, base overrides and checks.", advanced=True),
+    field("CODEBOT_SELF_HEAL", "Operations", "Independent supervisor: off, observe, propose, or automatic validated Python repair.", "off", "choice", advanced=True, choices=("off", "observe", "propose", "auto")),
     field("CODEBOT_BASE_BRANCH", "Repository", "Trunk branch for task branches and PRs.", "main"),
     field("CODEBOT_PROJECT_NAME", "Repository", "Human-readable project name used in prompts."),
     field("CODEBOT_INSTANCE", "Repository", "Optional instance name; blank generates a stable adjective-animal name."),
@@ -135,7 +136,8 @@ assert len(BY_KEY) == len(SETTINGS), "duplicate configuration setting"
 
 # Runtime aliases, and variables injected solely into subprocesses, not user knobs.
 REVIEWED_NON_SETTINGS = {"GITHUB_TOKEN", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
-                         "XDG_CACHE_HOME", "XDG_STATE_HOME", "PW_VIDEO"}
+                         "XDG_CACHE_HOME", "XDG_STATE_HOME", "PW_VIDEO",
+                         "CODEBOT_SUPERVISOR_DIR", "CODEBOT_WORKER_BOOT", "CODEBOT_RUNTIME_EPOCH"}
 
 
 def relevant(setting: Setting, values: dict[str, str]) -> bool:
