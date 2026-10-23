@@ -8,6 +8,9 @@ managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
 OpenCode), and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
 Several instances can share a backlog; Slack instances each use their own app.
 
+Target mode is automatic: a root `.git` means single repository; otherwise the
+directory is a workspace. See [feature workspaces](docs/workspaces.md).
+
 The communication façade supports optional live task progress. Slack edits the
 initial feature message with its phase, `:loading:` while working, `:question:`
 when user input is required, and the last three safe operational log lines.
