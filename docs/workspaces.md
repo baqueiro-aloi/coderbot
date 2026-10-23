@@ -45,6 +45,11 @@ Agent-emitted `CHECK_PLAN` uses workspace-relative `cwd`. Repository checks are
 discovered automatically; verification also requires a shared root/E2E check.
 Repository and root source content contributes to evidence/cache identity,
 including unchanged dependency repositories.
+Child repositories contribute tracked files and non-ignored untracked source,
+using their own Git ignore rules. Ignored build caches, such as TypeScript
+incremental state, do not invalidate verification; tracked changes, deletions,
+dependencies and shared root source still do. Failed checks remain visible to
+the repair agent even when concurrent source changes invalidate their evidence.
 
 ## Workflow
 

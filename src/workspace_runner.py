@@ -421,17 +421,20 @@ def verify(state):
     before = snapshot(context.root)
     outcomes = checks.execute_plan(plan, context.root, main.phase_checkpoint.store(), state["execution_task_id"])
     failed = [outcome for outcome in outcomes if outcome["status"] not in ("pass", "skipped") or outcome.get("zero_tests")]
-    state["final_check_report"] = {"status": "fail" if failed else "pass", "checks": outcomes,
-                                   "snapshot": snapshot(context.root)}
-    if before != snapshot(context.root):
-        raise workspace.WorkspaceError("Source changed during workspace checks; verification must run again")
+    after = snapshot(context.root)
+    state["final_check_report"] = {"status": "fail" if failed or before != after else "pass", "checks": outcomes,
+                                   "snapshot": after, "source_changed": before != after}
     if failed:
         result = turn(state, "Fix these verification failures within the approved feature; do not hide or skip tests.\n"
-                      + json.dumps(failed))
+                       + ("Source also changed during checks; their evidence is stale and verification must run again after repairs.\n"
+                          if before != after else "")
+                       + json.dumps(failed))
         if not main.handle_result(state, result, "VERIFYING"):
             remember_checks(state, result.output)
             state["state"] = "VERIFYING"
         return
+    if before != after:
+        raise workspace.WorkspaceError("Source changed during workspace checks; verification must run again")
     state["workspace"]["verified_snapshot"] = before
     state["workspace"]["verification_repositories"] = [repo.relative_path for repo in context.repositories]
     if state["workspace"].get("reviewed_snapshot") != before:

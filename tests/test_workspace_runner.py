@@ -333,6 +333,25 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(self.state["state"], "ARCHIVING")
         self.assertEqual(self.state["workspace"]["verified_snapshot"], snapshot(self.root))
 
+    def test_failed_checks_are_reported_even_when_source_changes(self):
+        self.edit(self.api)
+        self.records()
+        self.state["reported_check_plan"] = [{"id": "integration", "argv": ["sh", "-c", "echo OK"], "cwd": "."}]
+        self.state["state"] = "VERIFYING"
+        failure = {"check": "integration", "status": "unknown", "exit_code": 1, "report": "failure.log"}
+        def run(*args):
+            (self.root / "shared-source.txt").write_text("changed during checks")
+            return [failure]
+        with patch("checks.execute_plan", side_effect=run), patch.object(runner, "turn") as repair, \
+             patch.object(main, "handle_result", return_value=False):
+            repair.return_value.output = ""
+            runner.verify(self.state)
+        self.assertIn("failure.log", repair.call_args.args[1])
+        self.assertIn("Source also changed", repair.call_args.args[1])
+        self.assertEqual(self.state["state"], "VERIFYING")
+        self.assertTrue(self.state["final_check_report"]["source_changed"])
+        self.assertNotIn("verified_snapshot", self.state["workspace"])
+
 
 if __name__ == "__main__":
     unittest.main()
