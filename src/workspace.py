@@ -39,7 +39,7 @@ def _relative(value, label):
 
 @dataclass(frozen=True)
 class Manifest:
-    max_depth: int = 4
+    max_depth: int = 1
     exclude: tuple[str, ...] = ()
     base_branches: tuple[tuple[str, str], ...] = ()
     shared_inputs: tuple[str, ...] = ("openspec", "docs", "scripts", "e2e",
@@ -64,7 +64,8 @@ def load_manifest(root, path=None):
     allowed = {"max_depth", "exclude", "base_branches", "shared_inputs", "checks", "docker"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise WorkspaceError("Workspace manifest must be an object with supported keys")
-    depth = value.get("max_depth", 4)
+    # Accept old manifests without allowing them to re-enable recursion.
+    depth = value.get("max_depth", 1)
     if type(depth) is not int or not 1 <= depth <= 16:
         raise WorkspaceError("Workspace max_depth must be an integer between 1 and 16")
     patterns = {}
@@ -116,7 +117,7 @@ def load_manifest(root, path=None):
         raise WorkspaceError("Docker compose_files must be a list")
     for file in files:
         contained(root, _relative(file, "compose file"))
-    return Manifest(depth, patterns["exclude"], tuple(sorted(bases.items())),
+    return Manifest(1, patterns["exclude"], tuple(sorted(bases.items())),
                     patterns["shared_inputs"], json.dumps(checks, sort_keys=True),
                     json.dumps(docker, sort_keys=True))
 
@@ -216,6 +217,15 @@ def _repository(root, path, manifest, base_override=None):
     return Repository(path, relative, remote_identity(url), base)
 
 
+def repository_paths(root, exclude=()):
+    """Only immediate children are candidates; never inspect their descendants."""
+    root = Path(root)
+    return tuple(child for child in sorted(root.iterdir())
+                 if not child.is_symlink() and child.is_dir() and child.name not in EXCLUDED_DIRS
+                 and not any(fnmatch.fnmatch(child.name, pattern) for pattern in exclude)
+                 and (child / ".git").exists())
+
+
 def discover(root, *, mode=None, manifest_path=None, base_branch=None):
     root = Path(root).resolve()
     if mode is None:
@@ -229,25 +239,5 @@ def discover(root, *, mode=None, manifest_path=None, base_branch=None):
         return Workspace(root, mode, (_repository(root, root, manifest, base_branch or "main"),), manifest)
     if (root / ".git").exists():
         raise WorkspaceError("Workspace mode requires a non-Git root; use repo mode for a repository")
-    paths = []
-
-    def walk(directory, depth):
-        for child in sorted(directory.iterdir()):
-            if child.is_symlink() or not child.is_dir() or child.name in EXCLUDED_DIRS:
-                continue
-            relative = child.relative_to(root).as_posix()
-            if any(fnmatch.fnmatch(relative, pattern) for pattern in manifest.exclude):
-                continue
-            if (child / ".git").exists():
-                paths.append(child)
-            if depth < manifest.max_depth:
-                walk(child, depth + 1)
-
-    walk(root, 1)
-    repos = []
-    for path in paths:
-        repo = _repository(root, path, manifest)
-        nested = tuple(child.relative_to(path).as_posix() for child in paths
-                       if child != path and child.is_relative_to(path))
-        repos.append(Repository(repo.path, repo.relative_path, repo.remote, repo.base_branch, nested))
+    repos = [_repository(root, path, manifest) for path in repository_paths(root, manifest.exclude)]
     return Workspace(root, mode, tuple(repos), manifest)

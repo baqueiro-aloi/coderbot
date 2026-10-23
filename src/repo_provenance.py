@@ -17,17 +17,9 @@ def inspect(repo):
     repo = Path(repo)
     import config
     if config.TARGET_MODE == "workspace" and not (repo / ".git").exists():
-        from workspace import EXCLUDED_DIRS
-        repositories = {}
-        def walk(directory):
-            for child in sorted(directory.iterdir()):
-                if child.is_symlink() or not child.is_dir() or child.name in EXCLUDED_DIRS:
-                    continue
-                if (child / ".git").exists():
-                    repositories[child.relative_to(repo).as_posix()] = inspect(child)
-                else:
-                    walk(child)
-        walk(repo)
+        from workspace import repository_paths, load_manifest
+        manifest = load_manifest(repo, config.WORKSPACE_MANIFEST)
+        repositories = {child.name: inspect(child) for child in repository_paths(repo, manifest.exclude)}
         files = {name + "/" + path: value for name, entry in repositories.items()
                  for path, value in entry["files"].items()}
         value = {"head": hashlib.sha256(json.dumps({name: entry["head"] for name, entry in repositories.items()},

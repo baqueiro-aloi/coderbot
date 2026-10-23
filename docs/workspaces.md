@@ -20,8 +20,9 @@ The parent Compose bind mount exposes child repositories at their host paths.
 Rebuild after entrypoint changes. Starting the bot starts real backlog work;
 review configuration and saved state first.
 
-Discovery defaults to four directory levels, excludes generated folders and
-symlink directories, and supports worktree `.git` files. Each repository needs
+Discovery checks **only immediate child folders**, excludes generated folders and
+symlink directories, and supports worktree `.git` files. It never scans inside
+repositories or other folders for additional repositories. Each repository needs
 `origin` and an available default branch, from `origin/HEAD` or a manifest override.
 The current checkout branch is never guessed as the base. GitHub Projects needs
 `CODEBOT_GH_ISSUE_REPO=owner/repo` because the workspace root has no origin.
@@ -30,8 +31,7 @@ Optional manifest:
 
 ```json
 {
-  "max_depth": 4,
-  "exclude": ["scratch/*"],
+  "exclude": ["scratch"],
   "base_branches": {"api": "develop", "frontend": "main"},
   "shared_inputs": ["openspec", "docs", "scripts", "e2e", "*compose*.y*ml"],
   "checks": [

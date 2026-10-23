@@ -53,16 +53,16 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
             context.mode = "repo"
         self.assertFalse((self.root / ".git").exists())
 
-    def test_worktrees_and_nested_ownership(self):
+    def test_first_level_worktrees_only(self):
         parent = repository(self.root / "parent")
         repository(parent / "child")
         git(parent, "worktree", "add", "-b", "feature", str(self.root / "linked"))
         context = discover(self.root)
-        self.assertEqual(len(context.repositories), 3)
+        self.assertEqual(len(context.repositories), 2)
         self.assertTrue((self.root / "linked" / ".git").is_file())
         self.assertEqual(context.repository("linked").base_branch, "main")
         self.assertEqual(discover(self.root / "linked").mode, "repo")
-        self.assertFalse(context.repository("parent").owns("child/source.txt"))
+        self.assertNotIn("parent/child", [repo.relative_path for repo in context.repositories])
         self.assertTrue(context.repository("parent").owns("source.txt"))
 
     def test_ancestor_git_not_discovered(self):
@@ -90,13 +90,36 @@ class WorkspaceDiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "no origin"):
             discover(self.root)
 
-    def test_exclusions_and_depth(self):
+    def test_exclusions_and_legacy_depth_never_enable_recursion(self):
         repository(self.root / "group" / "deep")
         repository(self.root / "ignored")
         context = discover(self.root, manifest_path=self.manifest({"max_depth": 1, "exclude": ["ignored"]}))
         self.assertEqual(context.repositories, ())
         context = discover(self.root, manifest_path=self.manifest({"max_depth": 2, "exclude": ["ignored"]}))
-        self.assertEqual([r.relative_path for r in context.repositories], ["group/deep"])
+        self.assertEqual(context.repositories, ())
+        self.assertEqual(context.manifest.max_depth, 1)
+
+    def test_generated_broken_worktrees_are_never_inspected(self):
+        repo = repository(self.root / "api")
+        generated = repo / "output/worktrees/2"
+        generated.mkdir(parents=True)
+        (generated / ".git").write_text("gitdir: /app/output/repo.git/worktrees/2\n")
+        grouped = self.root / "other/deep"
+        grouped.mkdir(parents=True)
+        (grouped / ".git").write_text("gitdir: /missing/repo\n")
+        self.assertEqual([r.relative_path for r in discover(self.root).repositories], ["api"])
+
+    def test_provenance_does_not_discover_nested_repositories(self):
+        import config
+        import repo_provenance
+        from unittest.mock import patch
+        repository(self.root / "api")
+        nested = self.root / "group/nested"
+        nested.mkdir(parents=True)
+        (nested / ".git").write_text("gitdir: /missing/repo\n")
+        with patch.object(config, "TARGET_MODE", "workspace"), \
+             patch.object(config, "WORKSPACE_MANIFEST", None):
+            self.assertEqual(set(repo_provenance.inspect(self.root)["repositories"]), {"api"})
 
     def test_external_symlinks_and_manifest_escape(self):
         repository(self.root / "actual")
