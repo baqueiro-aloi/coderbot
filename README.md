@@ -617,8 +617,8 @@ PR content are set aside and the "PR ready" email says so.
 **Recommended**: run the guided terminal setup on a macOS or Linux host.
 `scripts/setup.sh` works from bash or zsh, bootstraps a pinned Textual UI into
 `.venv/`, and falls back to a menu-driven text mode if that UI is unavailable.
-The first screen lists Repository, Backlog, Conversation, Agent, Evidence and
-Advanced. Open sections in any order; `Test` checks only the current section
+The first screen lists Repository, Backlog, Conversation, Agent, Evidence,
+Self-healing and Advanced. Open sections in any order; `Test` checks only the current section
 and its saved prerequisites, while `Save and Close` repeats that test and
 immediately saves that section to `.env` on success. Failures leave the section
 open with its draft intact and explain what to fix. A checkmark appears beside
@@ -638,6 +638,12 @@ up the original, and writes successful sections atomically:
 scripts/setup.sh
 scripts/setup.sh --text    # also works: bash scripts/setup.sh / zsh scripts/setup.sh
 ```
+
+Open **Self-healing** to select **Disabled** (`off`, default) or **Enabled**
+(`auto`, automatic validated Python repairs). **Observe** and **Propose** are
+available for a gradual rollout. Saving changes `.env` only; rebuild the image
+and recreate the container separately to apply the mode. See
+[self-healing](docs/self-healing.md) for repair boundaries and rollout guidance.
 
 ### One-time copy to an SSH VM
 

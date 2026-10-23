@@ -6,6 +6,11 @@ default `CODEBOT_SELF_HEAL=off` preserves direct worker startup.
 
 ## Modes and rollout
 
+Run `scripts/setup.sh` (or `scripts/setup.sh --text`) and open **Self-healing**.
+Choose **Disabled** to turn it off, **Enabled** for automatic validated repairs,
+or **Observe** / **Propose** for a gradual rollout. Save and Close updates `.env`
+without starting or restarting the bot. You can also edit the setting directly:
+
 ```dotenv
 CODEBOT_SELF_HEAL=observe
 ```

@@ -12,6 +12,18 @@ JIRA_STATUS_KEYS = ("CODEBOT_JIRA_PICK_STATUS", "CODEBOT_JIRA_ACTIVE_STATUS",
                     "CODEBOT_JIRA_REVIEW_STATUS", "CODEBOT_JIRA_DONE_STATUS")
 SLACK_APP_SETTINGS_URL = "https://api.slack.com/apps"
 GITHUB_TOKEN_URL = "https://github.com/settings/tokens"
+SELF_HEAL_OPTIONS = (
+    ("Disabled", "off"),
+    ("Observe only (no repairs)", "observe"),
+    ("Propose repairs (manual promotion)", "propose"),
+    ("Enabled (automatic validated repairs)", "auto"),
+)
+SELF_HEAL_SETUP_HELP = (
+    "Automatic mode may edit Coderbot Python source and restart its worker. "
+    "Start with Observe, then Propose before enabling automatic repairs. "
+    "Rebuild the image and recreate the container to apply a mode change; "
+    "saving setup only updates .env and never restarts the bot."
+)
 
 
 @dataclass(frozen=True)
@@ -33,7 +45,8 @@ def field(key, group, help, default="", kind="text", secret=False, advanced=Fals
 SETTINGS = (
     field("CODEBOT_REPO_PATH", "Repository", "Absolute path to a Git checkout or feature workspace.", kind="directory"),
     field("CODEBOT_WORKSPACE_MANIFEST", "Repository", "Optional JSON manifest inside the workspace for discovery, base overrides and checks.", advanced=True),
-    field("CODEBOT_SELF_HEAL", "Operations", "Independent supervisor: off, observe, propose, or automatic validated Python repair.", "off", "choice", advanced=True, choices=("off", "observe", "propose", "auto")),
+    field("CODEBOT_SELF_HEAL", "Self-healing", "Enable or disable controller self-healing.",
+          "off", "choice", choices=tuple(value for _label, value in SELF_HEAL_OPTIONS)),
     field("CODEBOT_BASE_BRANCH", "Repository", "Trunk branch for task branches and PRs.", "main"),
     field("CODEBOT_PROJECT_NAME", "Repository", "Human-readable project name used in prompts."),
     field("CODEBOT_INSTANCE", "Repository", "Optional instance name; blank generates a stable adjective-animal name."),
@@ -169,6 +182,8 @@ def validate_value(setting: Setting, value: str) -> str | None:
     # Every single-line value except exact 'true' is a valid disabled setting.
     if setting.kind == "exact_bool":
         return None
+    if setting.key == "CODEBOT_SELF_HEAL" and not value:
+        return "choose off, observe, propose or auto; use off to disable self-healing"
     if setting.choices and value and value not in setting.choices:
         return "choose one of: " + ", ".join(setting.choices)
     if setting.kind in ("positive", "nonnegative") and value:
