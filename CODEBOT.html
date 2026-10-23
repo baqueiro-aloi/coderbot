@@ -220,7 +220,7 @@
             <title id="e-title">Pipeline de evidencia y reparación automática</title><desc id="e-desc">Se reconcilia evidencia previa, se graban demos y se valida el run. Si es incompleto se genera la suite seleccionada completa. Fallos persistentes activan implementación, revisión, checks y recaptura. Solo después se convierte, publica, sincroniza la PR y confirma entrega.</desc>
             <defs><marker id="ev-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#86a0c0"/></marker></defs>
             <rect class="box" x="25" y="35" width="230" height="96" rx="12"/><text x="45" y="67" class="title">Reconciliar / reutilizar</text><text x="45" y="94" class="small">Manifiesto + snapshot + hash</text><text x="45" y="116" class="small">Drive y enlace PR, si existe</text>
-            <rect class="ctl" x="295" y="35" width="230" height="96" rx="12"/><text x="315" y="67" class="title">Grabar demos</text><text x="315" y="94" class="small">--grep @evidence</text><text x="315" y="116" class="small">PICA_E2E_VIDEO / PW_VIDEO</text>
+            <rect class="ctl" x="295" y="35" width="230" height="96" rx="12"/><text x="315" y="67" class="title">Grabar demos</text><text x="315" y="94" class="small">--grep @evidence</text><text x="315" y="116" class="small">PW_VIDEO</text>
             <rect class="pass" x="565" y="35" width="230" height="96" rx="12"/><text x="585" y="67" class="title">Validar run + vídeos</text><text x="585" y="94" class="small">Exit + JSON + casos + media</text><text x="585" y="116" class="small">Demos de cada spec seleccionado</text>
             <rect class="ctl" x="835" y="35" width="220" height="96" rx="12"/><text x="855" y="67" class="title">Convertir a MP4</text><text x="855" y="94" class="small">ffmpeg → H.264 / 1280×720</text><text x="855" y="116" class="small">ffprobe: vídeo y duración</text>
             <path class="edge" style="marker-end:url(#ev-arrow)" d="M255 83 H295 M525 83 H565 M795 83 H835"/>
@@ -312,7 +312,7 @@ docker compose logs --since 1h --timestamps codebot
 # execution.sqlite              → ledger de ejecución/entregas
 # outbox/checks/&lt;run&gt;/output.log → prueba concreta
 # outbox/evidence/&lt;run&gt;/         → diagnóstico y manifiesto
-# outbox/pica-e2e/&lt;run&gt;/         → resultados de harness PICA, si aplica</code></pre>
+# CODEBOT_ARTIFACT_MANIFEST      → artifacts externos declarados por el destino</code></pre>
         <div class="note good"><strong>Regla de recuperación:</strong> conservar Git, SQLite, estado de ejecución, manifiestos y media. No borrar el estado para «forzar un retry» ni restaurar un <code>state.json</code> viejo sobre trabajo nuevo. El paso pendiente se recupera con identidad y evidencias, no destruyendo su historia.</div>
         <h3>Ejemplo: «E2E pasó, pero no llegó el vídeo»</h3>
         <p class="intro">Son ejecuciones distintas. La suite de verificación puede pasar y la grabación posterior fallar por selección, inventario o infraestructura. Un <code>3 passed</code> de Playwright tampoco basta si el harness devuelve exit 1. El camino correcto es validar el run, producir lo faltante, convertir y confirmar la entrega. Si falta un demo o soporte de vídeo, la reparación debe implementarlo y pasar controles; no cerrar el problema con una nota de «sin evidencia».</p>

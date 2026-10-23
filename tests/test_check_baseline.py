@@ -29,25 +29,25 @@ class BaselineTests(unittest.TestCase):
             file.write_text(json.dumps(value)); self.assertEqual(before, dependency_snapshot(repo))
             value['packages']['node_modules/x']['version'] = '4'
             file.write_text(json.dumps(value)); self.assertNotEqual(before, dependency_snapshot(repo))
-    def test_baseline_links_matching_installed_dependencies_only_in_scratch(self):
+    def test_baseline_links_declared_nested_dependencies_only_in_scratch(self):
         from check_plan import Check
         from execution_store import ExecutionStore
         with tempfile.TemporaryDirectory() as root:
             repo = Path(root) / "repo"
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            (repo / "frontend").mkdir()
-            (repo / "frontend/package.json").write_text('{"scripts":{}}')
+            (repo / "services/client").mkdir(parents=True)
+            (repo / "services/client/package.json").write_text('{"scripts":{}}')
             (repo / ".gitignore").write_text("node_modules/\n")
             subprocess.run(["git", "add", "."], cwd=repo, check=True)
             subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "base"], cwd=repo, check=True)
             sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True).stdout.strip()
-            (repo / "frontend/node_modules").mkdir()
-            (repo / "frontend/node_modules/fixture").write_text("installed")
+            (repo / "services/client/node_modules").mkdir()
+            (repo / "services/client/node_modules/fixture").write_text("installed")
             import sys
-            check = Check("dependency", [sys.executable, "-c", "from pathlib import Path; assert Path('node_modules/fixture').read_text() == 'installed'"], cwd="frontend")
+            check = Check("dependency", [sys.executable, "-c", "from pathlib import Path; assert Path('node_modules/fixture').read_text() == 'installed'"], cwd="services/client")
             result = baseline_result(check, repo, sha, ExecutionStore(Path(root) / "data/db"))
             self.assertEqual(result["status"], "pass")
-            self.assertFalse((repo / "frontend/node_modules").is_symlink())
+            self.assertFalse((repo / "services/client/node_modules").is_symlink())
     def test_lint_paths_are_compared_relative_to_each_worktree(self):
         feature = {"status": "fail", "failures": {"/feature/src/a.ts:2:4:rule": "Bad regex"}}
         baseline = {"status": "fail", "failures": {"<repo>/src/a.ts:2:4:rule": "Bad regex"}}

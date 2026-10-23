@@ -90,12 +90,12 @@ class WorkspaceRunnerTests(unittest.TestCase):
     def test_question_reply_routes_without_lateral_worker(self):
         self.state.update(state="WAIT_REPLY", return_state="EXPLORING", pending_question="What scope?", thread_id="C123:1")
         with patch.object(main.gmail_client, "mark_processed"):
-            self.assertTrue(main._queue_conversation(self.state, "reply", "Only frontend, not PICA"))
+            self.assertTrue(main._queue_conversation(self.state, "reply", "Only frontend, not backend"))
         row = main.phase_checkpoint.store().list("conversation", "task")[0]
         self.assertEqual(row["data"]["route"], "flow")
         with patch.object(main, "_dispatch_wait_reply") as dispatch:
             self.assertTrue(main._dispatch_conversation(self.state))
-        dispatch.assert_called_once_with(self.state, "reply", "Only frontend, not PICA")
+        dispatch.assert_called_once_with(self.state, "reply", "Only frontend, not backend")
 
     def test_restart_recovers_pending_question_reply_but_not_btw(self):
         import parallel_conversation
@@ -112,11 +112,11 @@ class WorkspaceRunnerTests(unittest.TestCase):
     def test_pick_only_accepts_actual_backlog_item_and_preserves_branches(self):
         self.state = {"state": "IDLE"}
         main.task_source.list_pending_items.return_value = [
-            {"text": "Feature", "id": "MC-1", "detail": "Change API and UI"}]
+            {"text": "Feature", "id": "TASK-1", "detail": "Change API and UI"}]
         main.task_source.claim_task.return_value = True
         with patch.object(main.gmail_client, "open_thread", return_value="C123:1"):
             runner.pick(self.state)
-        self.assertEqual(self.state["item_id"], "MC-1")
+        self.assertEqual(self.state["item_id"], "TASK-1")
         self.assertEqual(self.state["state"], "EXPLORING")
         self.assertEqual(git(self.api, "branch", "--show-current"), "main")
         self.assertEqual(self.state["workspace"]["repositories"], {})

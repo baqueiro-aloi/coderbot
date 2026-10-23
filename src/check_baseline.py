@@ -149,7 +149,7 @@ def baseline_result(check, repo, sha, store):
         # Git worktrees omit ignored installed dependencies. Reuse the verified
         # installations only when dependency manifests match; create links solely
         # in the disposable baseline, never edit the target checkout.
-        for area in (".", "backend", "PICAv1/backend", "frontend", "e2e"):
+        for area in dict.fromkeys((".", "backend", "frontend", "e2e", check.cwd)):
             if separate:
                 break
             if not any(p in ("*", ".", "./") or p == area or p.startswith(area + "/")

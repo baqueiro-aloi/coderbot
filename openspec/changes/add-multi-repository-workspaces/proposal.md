@@ -1,6 +1,6 @@
 ## Why
 
-Features such as ejecuciones-mensuales span independent repositories and shared local integration infrastructure. Coderbot currently assumes its target is one Git repository, preventing safe planning, implementation, verification, and delivery from a non-Git workspace root.
+Features can span independent repositories and shared local integration infrastructure. Coderbot currently assumes its target is one Git repository, preventing safe planning, implementation, verification, and delivery from a non-Git workspace root.
 
 ## What Changes
 

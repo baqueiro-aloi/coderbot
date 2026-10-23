@@ -108,14 +108,12 @@ def discover(repo):
     if configured is not None:
         return configured
     checks = []
-    for directory in (".", "backend", "PICAv1/backend"):
+    for directory in (".", "backend"):
         area = repo / directory
         if (area / "tests").is_dir() and (directory != "." or (area / "requirements.txt").exists()):
             # Preserve the venv launcher path: resolving its symlink runs the base
             # interpreter without pyvenv.cfg and loses all installed dependencies.
             candidates = [area / name / "bin/python" for name in (".venv", "venv")]
-            if directory != ".":
-                candidates.extend(repo / "backend" / name / "bin/python" for name in (".venv", "venv"))
             python = next((p for p in candidates if p.is_file()), None)
             checks.append(Check("unit:" + directory,
                 [str(python.absolute()) if python else sys.executable,

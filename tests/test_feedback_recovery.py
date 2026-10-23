@@ -199,7 +199,7 @@ class FeedbackRecoveryTests(unittest.TestCase):
         report = {"snapshot": "head", "requirements": [{"id": "effort", "status": "implemented",
                    "implementation": "toolbar", "verification": "tests"}]}
         self.assertEqual(verification_ledger.validate_coverage(inventory, report, "head"), ["Model selector"])
-        self.assertEqual(review_intent.provenance({"author": "pr-code-review-aloi", "body": "ai-review-inline"}), "automated")
+        self.assertEqual(review_intent.provenance({"author": "custom-reviewer", "body": "ai-review-inline"}), "automated")
         self.assertEqual(review_intent.provenance({"author": "unknown"}), "unknown")
 
     def test_transient_review_failure_does_not_consume_round(self):

@@ -8,6 +8,10 @@ managed OpenSpec workflow via a selectable headless coding agent (Claude Code or
 OpenCode), and talks to the team by email (default) or Slack (`CODEBOT_COMM_CHANNEL=slack`).
 Several instances can share a backlog; Slack instances each use their own app.
 
+Coderbot is repository- and organization-agnostic. Target-specific checks, provider
+groups, preparation and artifacts belong in the target's declarative contracts,
+not hardcoded application adapters. See [harness contracts](docs/harness-contract.md).
+
 Target mode is automatic: a root `.git` means single repository; otherwise the
 directory is a workspace. See [feature workspaces](docs/workspaces.md).
 
@@ -115,7 +119,7 @@ among all pending items (prerequisites and enablers first).
 ### GitHub Projects v2 (`CODEBOT_TASK_SOURCE=github`)
 
 The backlog is a Projects v2 board (`CODEBOT_GH_PROJECT_URL`, e.g.
-`https://github.com/orgs/getriverly/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
+`https://github.com/orgs/example/projects/3`, or `CODEBOT_GH_PROJECT_OWNER` +
 `CODEBOT_GH_PROJECT_NUMBER`). A task is a board card backed by an **issue of the
 target repo** (the checkout's `origin`, or `CODEBOT_GH_ISSUE_REPO`): the issue title
 is the task text, its body the clarifications, and images in the body are downloaded
@@ -1092,7 +1096,7 @@ evidence for the PR handoff in the selected conversation channel:
 - **Playwright**: the implementation must include one demo test tagged `@evidence`
   that walks through the feature visibly. Codebot first re-runs only that test
   (`./run.sh <spec> --grep @evidence`), falling back to the feature's full specs when
-  no clip appears, with `PICA_E2E_VIDEO=on` and `PW_VIDEO=on` exported (either forces
+  no clip appears, with `PW_VIDEO=on` exported (the target harness can use it to enable
   `video: "on"` in `e2e/playwright.config.ts`). The resulting `.webm` clips from
   `e2e/test-results/` are stitched into a single H.264 `data/evidence.mp4` with ffmpeg
   (each clip scaled/padded to 1280x720 so mixed viewport sizes concatenate cleanly).

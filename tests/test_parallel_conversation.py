@@ -117,7 +117,7 @@ class ConversationReceiptsTests(unittest.TestCase):
         old = lateral.save_classification(self.store, old, self.classification())
         self.store.update("conversation", old, status="generated", output="Saved explanation")
         state = {**self.state, "execution_task_id": "new-task", "state": "WAIT_REPLY"}
-        new = lateral.receive(self.store, state, self.repo, "new", "Only frontend, not PICA")
+        new = lateral.receive(self.store, state, self.repo, "new", "Only frontend, not backend")
         generate = Mock(return_value=SimpleNamespace(output=json.dumps(self.classification(
             intent="answer", resolves_pending_question=True)), session_id="classifier"))
         deliver = Mock(return_value={"complete": False, "notification_id": "r", "error": "invalid old thread"})
