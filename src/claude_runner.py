@@ -12,6 +12,7 @@ import secret_store
 import handoffs
 import turn_control
 import operations
+import check_plan
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ followed by exactly one self-contained question. Put each numbered option on its
 own following line, then stop working and wait for that answer. Do not repeat the
 question in your preceding summary or ask another decision in the same turn.
 Otherwise finish the work and summarize what you did.
+Controller configuration, duplicate check registrations and bounded timeout increases
+are operational repairs, not human decisions. Emit CHECK_PLAN with explicit timeout
+values when needed; never ask the user to edit the controller for them. Keep ATTACH
+and CHECK_PLAN contracts separate from the final question.
 Make the question self-contained: explain the decision, available options and
 important consequences in plain language. Do not emit only 'answer the attached
 question' or put the actionable request solely in an attachment.
@@ -72,7 +77,7 @@ def sentinel_preamble(output: str) -> str:
     lines = output.splitlines()
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith(SENTINEL):
-            return "\n".join(lines[:i]).strip()
+            return check_plan.visible_text("\n".join(lines[:i])).strip()
     return ""
 
 
@@ -86,7 +91,7 @@ def sentinel_question(output: str) -> str | None:
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith(SENTINEL):
             tail = "\n".join([lines[i][len(SENTINEL):], *lines[i + 1:]])
-            return tail.strip()
+            return check_plan.visible_text(tail).strip()
     return None
 
 

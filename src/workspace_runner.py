@@ -357,14 +357,17 @@ def check_plan_for(state, context):
                                 inputs=[(Path(name) / path).as_posix() for path in check.inputs]))
     plan.extend(check_plan.discover(context.root))
     for entry in json.loads(context.manifest.checks_json):
-        plan.append(check_plan.Check(entry["id"], entry["argv"], cwd=entry.get("cwd", "."),
-                                    scope=entry.get("scope", "full")))
+        plan.append(check_plan.Check(**entry))
     plan.extend(check_plan.Check(**entry) for entry in state.get("reported_check_plan", []))
     unique = {}
     for check in plan:
         workspace.contained(context.root, check.cwd)
+        previous = unique.get(check.id)
+        if previous:
+            check = replace(check, resources=sorted(set(previous.resources) | set(check.resources)),
+                            timeout=max(previous.timeout, check.timeout))
         unique[check.id] = check
-    return [check for check in unique.values() if check.scope == "full"]
+    return check_plan.normalize([check for check in unique.values() if check.scope == "full"], context.root)
 
 
 def verify(state):
@@ -426,6 +429,12 @@ def verify(state):
                                    "snapshot": after, "source_changed": before != after}
     if failed:
         result = turn(state, "Fix these verification failures within the approved feature; do not hide or skip tests.\n"
+                       + "The controller deduplicates identical checks, locks shared E2E execution, and manages bounded timeouts. "
+                       "Do not ask the user to configure the controller or approve a timeout increase. "
+                       "Emit an explicit timeout in CHECK_PLAN when more time is justified. Do not run full suites yourself; "
+                       "the controller reruns them. Diagnose authentication/fixture and endpoint failures before claiming "
+                       "they are outside scope. Ask only a concrete product-scope or missing-secret decision, "
+                       "with numbered options and consequences.\n"
                        + ("Source also changed during checks; their evidence is stale and verification must run again after repairs.\n"
                           if before != after else "")
                        + json.dumps(failed))

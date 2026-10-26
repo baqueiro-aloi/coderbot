@@ -1,5 +1,6 @@
 """One final verification policy for all suites and all lifecycle paths."""
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import check_plan
@@ -21,13 +22,18 @@ def run(state, repo, store):
     declared = set()
     for entry in state.get("reported_check_plan", []):
         check = check_plan.Check(**entry)
+        if check.scope == "full" and check.id in known:
+            plan = [replace(existing, timeout=max(existing.timeout, check.timeout),
+                            resources=sorted(set(existing.resources) | set(check.resources)))
+                    if existing.id == check.id else existing for existing in plan]
         if check.scope == "full" and check.id not in known:
             if waived and check.id.startswith("e2e"):
                 continue
             plan.append(check)
             declared.add(check.id)
     plan = check_plan.relax(plan, [name for name, decision in (state.get("credentials") or {}).items()
-                                   if isinstance(decision, dict) and decision.get("decision") == "skip"])
+                                    if isinstance(decision, dict) and decision.get("decision") == "skip"])
+    plan = check_plan.normalize(plan, repo)
     task_id = store.task_identity(state, repo)
     results = checks.execute_plan(plan, repo, store, task_id)
     outcomes = []

@@ -452,7 +452,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
                               f"Session: `{result.session_id}`\n\n{result.output.strip()}\n")
     if _maybe_request_credential(state, result, phase):
         return True
-    question = result.question
+    question = check_plan.visible_text(result.question or "")
     if not question:  # None, or a bare/blank sentinel line — nothing actionable to ask
         state.pop("question_rounds", None)  # phase produced a real result; loop broken
         state.pop("pending_question", None)
@@ -476,7 +476,8 @@ def handle_result(state: dict, result, phase: str) -> bool:
              phase, len(attachments), config.COMM_CHANNEL)
     # The agent often puts the substance (a design to approve, options it weighed) ABOVE
     # the sentinel line and only the ask after it; the user needs both to answer.
-    preamble = getattr(result, "preamble", "") or ""
+    preamble = check_plan.visible_text(getattr(result, "preamble", "") or "")
+    preamble = handoffs.without_question(preamble, question)
     body = f"Task: {state.get('item', '?')}\nPhase: {phase}\n\n"
     if preamble:
         body += f"{preamble}\n\n---\n\n"

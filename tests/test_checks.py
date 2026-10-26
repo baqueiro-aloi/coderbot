@@ -17,7 +17,7 @@ class CheckRunnerTests(unittest.TestCase):
             repo.mkdir()
             subprocess.run(["git", "init", "-q", str(repo)], check=True)
             store = ExecutionStore(Path(root) / "data/db")
-            plan = [Check(str(i), [sys.executable, "-c", "import time; time.sleep(.1)"],
+            plan = [Check(str(i), [sys.executable, "-c", f"import time; time.sleep(.1); print({i})"],
                           resources=["port:8111"]) for i in range(2)]
             results = execute_plan(plan, repo, store, "t")
             # Operation start times are stored before lock acquisition; use the

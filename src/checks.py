@@ -9,6 +9,8 @@ from contextvars import copy_context
 
 import operations
 import preparation
+import check_plan
+from dataclasses import replace
 from selfheal_events import runtime_epoch
 from check_results import parse_output
 from execution_identity import digest, environment_identity, snapshot
@@ -31,6 +33,7 @@ def invalidate_environment(store, repo, check_ids):
 
 
 def execute_plan(plan, repo, store, task_id, *, workers=3):
+    plan = check_plan.normalize(plan, repo)
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -46,6 +49,17 @@ def check_environment():
 
 def execute(check, repo, store, task_id, *, reuse=True):
     repo = Path(repo).resolve()
+    check = check_plan.normalize([check], repo)[0]
+    if check_plan.is_harness(check, repo):
+        history = store.list("check_run", task_id)
+        key = check_plan.execution_key(check, repo)
+        for row in history:
+            old = row["data"].get("check")
+            result = row["data"].get("result", {})
+            if (isinstance(old, dict) and check_plan.execution_key(check_plan.Check(**old), repo) == key
+                    and result.get("reason") == "execution_timeout"):
+                check = replace(check, timeout=min(3600, max(check.timeout, old.get("timeout", 900) * 2)))
+                break
     env = check_environment()
     missing = check.missing_credentials(env) if check.optional else []
     if missing:
@@ -76,6 +90,13 @@ def execute(check, repo, store, task_id, *, reuse=True):
                  previous["data"]["result"]["status"], previous["data"]["result"].get("report"),
                  extra={"public_progress": f"check reused: {check.id} status={previous['data']['result']['status']}"})
         return {**previous["data"]["result"], "reused": True}
+    if (previous and previous["data"]["result"].get("reason") == "execution_timeout"
+            and check_plan.is_harness(check, repo) and check.timeout >= 3600):
+        # A timed-out attempt at the ceiling is not a pass and not permission to
+        # run the same unchanged suite forever. Changed source/environment can retry.
+        log.warning("check timeout budget exhausted: %s; repair before retrying", check.id,
+                    extra={"public_progress": f"check blocked: {check.id} (timeout ceiling reached; repair required)"})
+        return {**previous["data"]["result"], "reused": True, "timeout_budget_exhausted": True}
     candidates = store.list("check_run", task_id)
     previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
                            and r["data"]["check"].get("id") == check.id), None)
@@ -101,7 +122,13 @@ def execute(check, repo, store, task_id, *, reuse=True):
         result = parse_output(output, process.returncode, check.reporter)
     except (subprocess.TimeoutExpired, TimeoutError, OSError) as error:
         output = f"{type(error).__name__}: {error}"
+        for field in ("stdout", "stderr"):
+            value = getattr(error, field, None)
+            if value:
+                output += "\n" + (value.decode(errors="replace") if isinstance(value, bytes) else value)
         result = {"status": "infrastructure", "failures": {}, "exit_code": None}
+        if isinstance(error, subprocess.TimeoutExpired):
+            result["reason"] = "execution_timeout"
     except BaseException:
         store.put("check_run", task_id=task_id, id=run_id, identity=identity,
                   status="interrupted", data={"check": check.id})

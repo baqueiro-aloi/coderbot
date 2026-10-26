@@ -51,6 +51,23 @@ incremental state, do not invalidate verification; tracked changes, deletions,
 dependencies and shared root source still do. Failed checks remain visible to
 the repair agent even when concurrent source changes invalidate their evidence.
 
+The controller collapses identical check executions regardless of their IDs;
+different arguments, input selections, credentials, reporters or preparation
+remain separate. E2E `run.sh` checks share a workspace resource lock even when
+the agent omits `resources`. Their initial execution budget is at least 1800
+seconds, capped at 3600. A recorded execution timeout raises the next execution
+budget up to that ceiling automatically, preserving partial output for diagnosis.
+Once an execution times out at the ceiling, unchanged reruns remain blocked with
+the failure report until source or execution-environment identity changes.
+Waiting for controller resources is bounded separately from execution. Explicit
+manifest and agent timeout settings are retained within the E2E ceiling.
+
+Agents must not ask users to deduplicate checks or increase controller timeouts.
+These are operational repairs, not product approvals. Human questions should
+contain one concrete decision and consequences; transport contracts and attachment
+paths are parsed separately, not embedded in the visible question. Actual test
+failures still block verification; increasing a timeout does not waive them.
+
 ## Workflow
 
 - One source task, shared root OpenSpec plan, and communication thread.

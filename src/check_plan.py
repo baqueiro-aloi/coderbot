@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import sys
+import math
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -30,7 +31,8 @@ class Check:
         self.optional = self.optional is True  # agent JSON may send "no"/"false" strings
         if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
             raise ValueError("Check requires id and nonempty argv strings")
-        if self.timeout <= 0 or self.scope not in ("full", "focused"):
+        if (not isinstance(self.timeout, (int, float)) or isinstance(self.timeout, bool)
+                or not math.isfinite(self.timeout) or self.timeout <= 0 or self.scope not in ("full", "focused")):
             raise ValueError("Invalid check timeout or scope")
         for values in (self.inputs, self.env_keys, self.resources):
             if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
@@ -68,6 +70,61 @@ def parse(value):
 def load(repo):
     path = Path(repo) / ".codebot/checks.json"
     return parse(json.loads(path.read_text())) if path.exists() else None
+
+
+def execution_key(check, repo):
+    value = check.to_dict()
+    for key in ("id", "timeout", "resources"):
+        value.pop(key, None)
+    value["cwd"] = str((Path(repo) / check.cwd).resolve())
+    return json.dumps(value, sort_keys=True)
+
+
+def is_harness(check, repo):
+    cwd = (Path(repo) / check.cwd).resolve()
+    return any((cwd / arg).resolve().name == "run.sh" and
+               (cwd / arg).resolve().parent.name == "e2e" for arg in check.argv if not arg.startswith("-"))
+
+
+def normalize(checks, repo):
+    """Collapse execution aliases, not distinct selections or test contracts."""
+    unique = {}
+    for check in checks:
+        key = execution_key(check, repo)
+        previous = unique.get(key)
+        resources = set(check.resources) | (set(previous.resources) if previous else set())
+        timeout = max(check.timeout, previous.timeout if previous else 0)
+        if is_harness(check, repo):
+            resources.add("harness:" + str(Path(repo).resolve()))
+            timeout = min(3600, max(1800, timeout))
+        unique[key] = replace(check, id=previous.id if previous else check.id,
+                              timeout=timeout, resources=sorted(resources))
+    return list(unique.values())
+
+
+def visible_text(output):
+    """Remove parsed transport contracts from prose, without swallowing following text."""
+    if not isinstance(output, str):
+        return ""
+    text = output
+    for marker in reversed(list(re.finditer(r"(?m)^CHECK_PLAN:[ \t]*", text))):
+        start = marker.end()
+        payload = text[start:].lstrip()
+        fence = payload.startswith("```json\n") or payload.startswith("```\n")
+        if fence:
+            payload = payload.split("\n", 1)[1].lstrip()
+        try:
+            _, length = json.JSONDecoder().raw_decode(payload)
+            end = text.find(payload, start) + length
+            if fence:
+                closing = re.match(r"\s*```", text[end:])
+                if closing:
+                    end += closing.end()
+        except ValueError:
+            end = start  # Strip a bare marker, never guess where malformed prose ends.
+        text = text[:marker.start()] + text[end:]
+    text = re.sub(r"(?m)^ATTACH:[^\n]*(?:\n|$)", "", text)
+    return text.strip() if text != output else text
 
 
 def _reported(output):

@@ -154,20 +154,26 @@ def resources(names):
     with _lock:
         locks = [_resource_locks.setdefault(name, threading.Lock()) for name in sorted(set(names))]
     acquired = []
+    waiting = begin("resource_wait", "exclusive check resource", 3600) if locks else None
     try:
         for lock in locks:
-            if not lock.acquire(timeout=remaining(900)):
+            if not lock.acquire(timeout=remaining(3600)):
                 raise TimeoutError("Exclusive execution resource unavailable")
             acquired.append(lock)
+        if waiting:
+            finish(waiting)
+            waiting = None
         yield
     finally:
+        if waiting:
+            finish(waiting)
         for lock in reversed(acquired):
             lock.release()
 
 
 def run(argv, *, cwd=None, env=None, timeout=900, input=None, kind="check", cleanup=None,
         exclusive=()):
-    with budget(timeout), resources(exclusive):
+    with resources(exclusive), budget(timeout):
         return _run(argv, cwd=cwd, env=env, timeout=timeout, input=input, kind=kind, cleanup=cleanup)
 
 
