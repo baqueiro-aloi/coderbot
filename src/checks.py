@@ -50,7 +50,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     missing = check.missing_credentials(env) if check.optional else []
     if missing:
         detail = "missing credential " + ", ".join(missing)
-        log.info("check skipped: %s (%s)", check.id, detail)
+        log.info("check skipped: %s (%s)", check.id, detail,
+                 extra={"public_progress": f"check skipped: {check.id} (missing required credential)"})
         return {"status": "skipped", "skipped": detail, "failures": {}, "exit_code": None,
                 "check": check.id, "reused": False}
     preparation_error = None
@@ -72,7 +73,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown", "skipped"):
         log.info("check reused: %s status=%s report=%s", check.id,
-                 previous["data"]["result"]["status"], previous["data"]["result"].get("report"))
+                 previous["data"]["result"]["status"], previous["data"]["result"].get("report"),
+                 extra={"public_progress": f"check reused: {check.id} status={previous['data']['result']['status']}"})
         return {**previous["data"]["result"], "reused": True}
     candidates = store.list("check_run", task_id)
     previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
@@ -88,7 +90,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     report_dir.mkdir(parents=True)
     started = time.time()
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, data={"check": check.id})
-    log.info("check started: %s cwd=%s timeout=%ss reason=%s", check.id, cwd, check.timeout, reason)
+    log.info("check started: %s cwd=%s timeout=%ss reason=%s", check.id, cwd, check.timeout, reason,
+             extra={"public_progress": f"check started: {check.id}"})
     try:
         if preparation_error:
             raise OSError("Check preparation failed: " + str(preparation_error))
@@ -111,7 +114,8 @@ def execute(check, repo, store, task_id, *, reuse=True):
     store.put("check_run", task_id=task_id, id=run_id, identity=identity, status="complete",
               data={"check": check.to_dict(), "result": result})
     log.info("check finished: %s status=%s exit=%s duration=%.1fs report=%s", check.id,
-             result["status"], result["exit_code"], result["finished"] - started, report)
+              result["status"], result["exit_code"], result["finished"] - started, report,
+              extra={"public_progress": f"check finished: {check.id} status={result['status']} exit={result['exit_code']}"})
     return result
 
 
