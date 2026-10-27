@@ -3897,9 +3897,6 @@ def _startup_credentials() -> None:
 def handle_wait(state: dict) -> None:
     polled = gmail_client.poll_reply(state["thread_id"]) if state.get("thread_id") else None
     if polled is None:
-        log.debug("%s: no new unprocessed replies on thread %s; last notification=%r",
-                  state["state"], state.get("thread_id"),
-                  (state.get("last_email") or {}).get("subject"))
         return
     msg_id, reply = polled
     if config.COMM_CHANNEL == "slack" and state.get("slack_last_handled_id") == msg_id:
@@ -6167,7 +6164,8 @@ def _run_loop() -> None:
                     and state["state"] != "IDLE" and not state.get("thread_id")):
                 state["thread_id"] = gmail_client.open_thread(state)
                 save_state(state)
-            log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
+            if prev not in WAITS:
+                log.debug("tick: state=%s task=%r", prev, state.get("item", "-"))
             _announce_state(state)
             with _status_command_lock:
                 handled_command = check_commands(state)

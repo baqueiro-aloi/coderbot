@@ -198,14 +198,14 @@ class MergeGate(unittest.TestCase):
         finish.assert_not_called()
         self.assertIn("content changed", email.call_args.args[2])
 
-    def test_wait_log_describes_new_pending_replies_not_missing_history(self):
+    def test_empty_merge_wait_does_not_log_inbox_or_last_notification(self):
         state = self.state()
         state.update(thread_id="C123:1", last_email={"subject": "merge blocked"})
-        with patch.object(main.gmail_client, "poll_reply", return_value=None), \
+        with patch.object(main.gmail_client, "poll_reply", return_value=None) as poll, \
              patch.object(main.log, "debug") as log:
             main.handle_wait(state)
-        self.assertIn("no new unprocessed replies", log.call_args.args[0])
-        self.assertEqual(log.call_args.args[-1], "merge blocked")
+        poll.assert_called_once_with("C123:1")
+        log.assert_not_called()
 
     def state(self):
         return {"state": "WAIT_MERGE", "item": "task", "slug": "s", "branch": "b",
