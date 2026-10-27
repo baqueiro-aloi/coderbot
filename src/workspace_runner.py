@@ -429,7 +429,7 @@ def verify(state):
         evaluate=lambda c, r: workspace_gate(c, r, state, context, store))
     outcomes = staged["checks"]
     if staged["stage"] in ("needs_focused_e2e", "full_e2e_budget_exhausted"):
-        state["final_check_report"] = {"status": "indeterminate", "stage": staged["stage"], "checks": outcomes}
+        state["final_check_report"] = {"status": "indeterminate", **staged}
         if staged["stage"] == "full_e2e_budget_exhausted":
             main._enter_stuck(state, "VERIFYING", "The two full E2E regression audits have been consumed. "
                 "Focused feature evidence is preserved; the broad audit is not green. "
@@ -442,8 +442,14 @@ def verify(state):
             "\nProvide explicit focused E2E selections for the approved feature with kind=e2e and scope=focused. "
             "Declare a structured reporter and prove a positive executed-test count; a filename/zero exit alone is insufficient. "
             "Do not run or re-register the full suite to evade its two-run budget. Preserve all full-suite tests. "
+            "Repair the named registrations below using the SAME IDs; adding a new focused ID alone does not fix "
+            "an old unfiltered entry still labeled focused. Give a broad command scope=full, or add real case selections; "
+            "do not execute the full suite yourself. Shell syntax validation is a cheap check, not browser evidence. "
             "Do not repeat already answered scope questions. Report existing regression-audit failures separately; "
-            "do not claim a green audit or expand product scope. Emit CHECK_PLAN for cheap/focused diagnostics.")
+            "do not claim a green audit or expand product scope. Emit CHECK_PLAN for cheap/focused diagnostics.\n"
+            + main.prompts.fenced("controller selection defects", json.dumps(staged.get("selection_issues", [])))
+            + ("\n" + main.prompts.fenced_authoritative("user recovery guidance", state["pending_feedback"])
+               if state.get("pending_feedback") else ""))
         main.handle_result(state, result, "VERIFYING")
         return
     state["workspace"].get("verification_rounds", {}).pop("focused_selection", None)

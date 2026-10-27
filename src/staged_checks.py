@@ -27,8 +27,12 @@ def run(state, plan, repo, store, *, evaluate=None):
     full = [c for c in plan if check_plan.is_e2e(c, repo) and c.scope == "full"]
     if not execute(cheap):
         return {"stage": "unit_functional", "checks": outcomes}
-    if (full and not focused) or any(not check_plan.has_e2e_selection(c) for c in focused):
-        return {"stage": "needs_focused_e2e", "checks": outcomes}
+    invalid = [c for c in focused if not check_plan.has_e2e_selection(c)]
+    if (full and not focused) or invalid:
+        issues = [{"check": c.id, "argv": c.argv, "cwd": c.cwd,
+                   "reason": "unfiltered_e2e_registered_as_focused"} for c in invalid]
+        return {"stage": "needs_focused_e2e", "checks": outcomes,
+                "selection_issues": issues or [{"reason": "missing_focused_e2e", "full_checks": [c.id for c in full]}]}
     if not execute(focused, focused=True):
         return {"stage": "focused_e2e", "checks": outcomes}
     if not full:

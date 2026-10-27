@@ -72,7 +72,8 @@ def report(staged, repo):
                 for r in staged["checks"]]
     if staged["stage"] != "complete" and all(r["gate"]["status"] == "pass" for r in outcomes):
         outcomes.append({"check": staged["stage"], "status": "not_run", "gate": {"status": "indeterminate"},
-                         "reason": "Required verification stage is incomplete; repair focused evidence/diagnosis, not another identical full run"})
+                         "reason": "Required verification stage is incomplete; repair focused evidence/diagnosis, not another identical full run",
+                         "selection_issues": staged.get("selection_issues", [])})
     suite_status = ("fail" if any(r["status"] == "fail" for r in outcomes) else
                     "indeterminate" if not outcomes or any(r["status"] not in ("pass", "skipped") for r in outcomes) else
                     "skipped" if any(r["status"] == "skipped" for r in outcomes) else "pass")

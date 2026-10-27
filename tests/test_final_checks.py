@@ -120,3 +120,10 @@ class FinalCheckTests(unittest.TestCase):
             {"check": "optional", "status": "skipped", "gate": {"status": "pass"}}]}, "/repo")
         self.assertEqual(value["status"], "pass")
         self.assertEqual(value["suite_status"], "skipped")
+
+    def test_missing_selection_report_preserves_actionable_registration_details(self):
+        issue = {"check": "e2e-compartido", "argv": ["bash", "e2e/run.sh"],
+                 "reason": "unfiltered_e2e_registered_as_focused"}
+        report = final_checks.report({"stage": "needs_focused_e2e", "checks": [], "selection_issues": [issue]}, "/repo")
+        self.assertEqual(report["status"], "indeterminate")
+        self.assertEqual(report["checks"][0]["selection_issues"], [issue])

@@ -364,6 +364,30 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(turn.call_count, 2)
         stuck.assert_called_once()
 
+    def test_selection_recovery_repairs_stale_ids_and_preserves_user_guidance(self):
+        self.state.update(state="VERIFYING", pending_feedback="Verify ZIP Otros only; do not expand monthly/runtime scope.",
+            reported_check_plan=[{"id": "e2e-compartido", "argv": ["bash", "e2e/run.sh"], "scope": "focused"}])
+        corrected = {"version": 1, "checks": [
+            {"id": "e2e-compartido", "argv": ["bash", "e2e/run.sh"], "scope": "full"},
+            {"id": "zip-browser", "argv": ["playwright", "test", "zip-otros.spec.ts"],
+             "scope": "focused", "kind": "e2e", "reporter": "playwright"}]}
+        result = SimpleNamespace(session_id="session", output="CHECK_PLAN: " + json.dumps(corrected), question=None, attachments=[])
+        self.state["workspace"]["reviewed_snapshot"] = runner.snapshot(self.root)
+        def execute(selected, *args, **kwargs):
+            return [{"check": c.id, "status": "pass", "test_count": 1} for c in selected]
+        with patch.object(runner, "turn", return_value=result) as repair, \
+             patch("checks.execute_plan", side_effect=execute) as run:
+            runner.verify(self.state)
+            run.assert_not_called()
+            prompt = repair.call_args.args[1]
+            self.assertIn("e2e-compartido", prompt)
+            self.assertIn("unfiltered_e2e_registered_as_focused", prompt)
+            self.assertIn("SAME IDs", prompt)
+            self.assertIn(self.state["pending_feedback"], prompt)
+            runner.verify(self.state)
+        repair.assert_called_once()
+        self.assertEqual(self.state["state"], "ARCHIVING")
+
     def test_confirmed_local_baseline_debt_is_nonblocking_but_composite_unknown_is_not(self):
         from check_plan import Check
         failed = {"status": "fail", "failures": {"old": "baseline"}}

@@ -98,13 +98,48 @@ def execution_key(check, repo):
     return json.dumps(value, sort_keys=True)
 
 
+def is_shell_syntax(check):
+    """Recognize noninteractive no-exec options, not arguments passed to a script."""
+    argv = check.argv
+    if Path(argv[0]).name == "env":
+        argv = argv[1:]
+        while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
+            argv = argv[1:]
+        if argv and argv[0] == "--":
+            argv = argv[1:]
+    if not argv or Path(argv[0]).name not in {"bash", "sh"}:
+        return False
+    noexec = False
+    for option in argv[1:]:
+        if option in {"--noprofile", "--norc", "--posix"}:
+            continue
+        if option == "--":
+            break
+        if option.startswith("+"):
+            return False  # +n can re-enable execution.
+        if not re.fullmatch(r"-[A-Za-z]+", option):
+            if option.startswith("-"):
+                return False  # Unknown interpreter options cannot prove no-exec.
+            break
+        if any(flag in option[1:] for flag in "ioO"):
+            return False  # Interactive shells ignore -n; named options need parsing.
+        noexec |= "n" in option[1:]
+        if "c" in option[1:]:
+            break  # Following command/arguments are not interpreter options.
+    return noexec
+
+
 def is_harness(check, repo):
+    if is_shell_syntax(check):
+        return False
     cwd = (Path(repo) / check.cwd).resolve()
     return any((cwd / arg).resolve().name == "run.sh" and
                (cwd / arg).resolve().parent.name == "e2e" for arg in check.argv if not arg.startswith("-"))
 
 
 def is_e2e(check, repo):
+    if is_shell_syntax(check):
+        return False
     # Known browser/harness commands cannot be relabeled as cheap unit checks.
     if (check.kind == "e2e" or is_harness(check, repo) or check.reporter == "playwright"
             or any(Path(arg).name in {"playwright", "e2e", "e2e-tests", "browser-tests"} for arg in check.argv)):
