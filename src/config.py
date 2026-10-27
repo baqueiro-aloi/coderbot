@@ -226,7 +226,7 @@ AGENT_TIMEOUT_SECONDS = int(os.environ.get(
     "CODEBOT_AGENT_TIMEOUT", os.environ.get("CODEBOT_CLAUDE_TIMEOUT", "1800")))
 E2E_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_E2E_TIMEOUT", "900"))
 UTILITY_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_UTILITY_TIMEOUT", "30"))
-LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "45"))
+LOCAL_TOOL_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_LOCAL_TOOL_TIMEOUT", "200"))
 SUBAGENT_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_SUBAGENT_TIMEOUT", "600"))
 PROVIDER_TIMEOUT_SECONDS = int(os.environ.get("CODEBOT_PROVIDER_TIMEOUT", "180"))
 # Short calls (git/gh) must never hang the tick loop; a timeout surfaces as a tick

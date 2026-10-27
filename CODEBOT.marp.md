@@ -409,7 +409,7 @@ openspec/
 
 <div class="cards two">
 <div class="card amber"><h3>Runtime confiable y privilegiado</h3><p>Docker socket, Git, herramientas y proveedor tienen acceso configurado.</p><p>No ejecutar tareas no confiables suponiendo aislamiento OS fuerte.</p></div>
-<div class="card"><h3>Presupuestos explícitos</h3><p>Agente 1.800 s; E2E 900 s; tool local 45 s.</p><p>Subagente 600 s; proveedor 180 s; utilidad 30 s. Límites configurables y acotados por presupuesto padre.</p></div>
+<div class="card"><h3>Presupuestos explícitos</h3><p>Agente 1.800 s; E2E 900 s; tool local 200 s.</p><p>Subagente 600 s; proveedor 180 s; utilidad 30 s. Límites configurables y acotados por presupuesto padre.</p></div>
 </div>
 
 <div class="caption">Proteger .env, tokens, sesiones y datos. Reiniciar para aplicar configuración; cambios de toolchain pueden requerir rebuild.</div>

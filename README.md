@@ -241,13 +241,19 @@ service when changing plugins/configuration.
 
 OpenCode defaults to the managed HTTP event bridge (`CODEBOT_OPENCODE_TRANSPORT=http`)
 so tool starts, child activity and provider retries are observable. Defaults:
-aggregate agent 1800 s, E2E 900 s, local read/search 45 s, subagent 600 s,
+aggregate agent 1800 s, E2E 900 s, local tools other than bash/task 200 s, subagent 600 s,
 provider retry 180 s and utilities 30 s. Each is environment-overridable in the
 setup catalog. KICK also cancels controller-run tests and evidence operations.
 
+Tool execution watchdogs start only on `running`, never `pending`; argument
+generation and queueing still consume the aggregate agent budget. Repeated running
+updates do not extend local tool deadlines. Completed/error events retire the
+watchdog, including errors before execution; child metadata updates retain subagent
+progress tracking.
+
 Only primary sessions may launch subagents; child sessions (including resumed ones)
 are rejected before entering the concurrency queue. `CODEBOT_MAX_SUBAGENTS` defaults
-to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (45 s by default).
+to 3. Queued delegations wait at most `CODEBOT_LOCAL_TOOL_TIMEOUT` (200 s by default).
 Completed or failed tasks release their slot even when the runtime skips the
 after-tool hook. On delegation rejection or queue timeout, the agent must finish
 that unit directly rather than retrying delegation or increasing runtime limits.

@@ -88,6 +88,10 @@ def observe(event):
     kind = event.get("type")
     part = event.get("part") or {}
     session = event.get("sourceSessionID") or event.get("sessionID")
+    # Pending argument generation/queueing is not tool execution. The aggregate
+    # agent deadline still bounds it; do not start or refresh a tool watchdog.
+    if kind == "tool_start" and (part.get("state") or {}).get("status") != "running":
+        return
     progress = kind in ("tool_start", "tool_use", "step_finish", "text", "reasoning")
     if progress and session:
         with _lock:
