@@ -156,6 +156,90 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertEqual(self.state["final_check_report"]["checks"][0]["status"], "pass")
         self.assertEqual(len(store.list("operation", "task", identity="full-e2e-launch")), 2)
 
+    def test_plain_retry_preserves_guidance_and_reconciles_legacy_full_gate_before_checks(self):
+        self.state.update(state="WAIT_STUCK", stuck_return="VERIFYING", thread_id="C123:1",
+            pending_feedback="Keep ZIP scope; no monthly/runtime changes, DONE or merge.",
+            final_check_report={"stage": "full_e2e_budget_exhausted", "status": "indeterminate", "checks": []})
+        store = main.phase_checkpoint.store()
+        for _ in range(2):
+            store.put("operation", task_id="task", identity="full-e2e-launch", data={})
+        self.state["reported_check_plan"] = [
+            main.check_plan.Check("full", ["playwright", "test"], kind="e2e").to_dict(),
+            main.check_plan.Check("focused", ["playwright", "test", "feature.spec.ts"], kind="e2e",
+                                  scope="focused").to_dict()]
+        with patch.object(main.agent_runner, "run") as classify, \
+             patch.object(main.gmail_client, "mark_processed"), patch.object(main, "_conversation_worker", None):
+            self.assertTrue(main._queue_conversation(self.state, "retry-message", "retry"))
+            self.assertTrue(main._dispatch_conversation(self.state))
+        classify.assert_not_called()
+        self.assertEqual(self.state["state"], "VERIFYING")
+        self.assertIn("Keep ZIP scope", self.state["pending_feedback"])
+        result = SimpleNamespace(session_id="session", output='CHECK_PLAN: {"version":1,"checks":[{"id":"harness",'
+            '"argv":["playwright","test","stack.spec.ts"],"scope":"focused","kind":"e2e","reporter":"playwright"}]}',
+            question=None, attachments=[])
+        with patch.object(runner, "turn", return_value=result) as turn, patch("checks.execute_plan") as execute:
+            runner.verify(self.state)
+        execute.assert_not_called()
+        self.assertIn("actual diff", turn.call_args.args[1])
+        self.assertIn("harness", turn.call_args.args[1])
+        self.assertIn("not a mandatory feature gate", turn.call_args.args[1])
+        self.assertEqual(self.state["state"], "VERIFYING")
+        main.save_state(self.state)
+        self.state = json.loads(main.config.STATE_PATH.read_text())
+        self.state["workspace"]["reviewed_snapshot"] = snapshot(self.root)
+        def passed(selected, *args, **kwargs):
+            self.assertNotIn("full", [c.id for c in selected])
+            return [{"check": c.id, "status": "pass", "test_count": 2, "failures": {}, "exit_code": 0}
+                    for c in selected]
+        with patch("checks.execute_plan", side_effect=passed), patch.object(runner, "turn") as turn:
+            runner.verify(self.state)
+        turn.assert_not_called()
+        self.assertEqual(self.state["state"], "ARCHIVING")
+        self.assertEqual(self.state["thread_id"], "C123:1")
+        self.assertEqual(self.state["execution_task_id"], "task")
+        self.assertEqual(len(store.list("operation", "task", identity="full-e2e-launch")), 2)
+        self.assertEqual({c["id"] for c in self.state["reported_check_plan"]}, {"full", "focused", "harness"})
+
+    def test_interrupted_focused_plan_recovery_preserves_attempt_and_resume_prompt(self):
+        self.state.update(state="VERIFYING", final_check_report={"stage": "full_e2e_budget_exhausted"})
+        prompts = []
+        def interrupted(state, prompt):
+            prompts.append(prompt)
+            raise ConnectionError("interrupted")
+        with patch.object(runner, "turn", side_effect=interrupted), patch("checks.execute_plan") as execute:
+            for _ in range(2):
+                with self.assertRaises(ConnectionError):
+                    runner.verify(self.state)
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertEqual(self.state["workspace"].get("verification_rounds", {}).get("focused_scope", 0), 0)
+        execute.assert_not_called()
+
+    def test_completed_recovery_without_selected_plan_gets_fresh_bounded_attempts(self):
+        self.state.update(state="VERIFYING", final_check_report={"stage": "full_e2e_budget_exhausted"})
+        result = SimpleNamespace(session_id="session", output="Diagnosis only", question=None, attachments=[])
+        with patch.object(runner, "turn", return_value=result) as turn, \
+             patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3), patch("checks.execute_plan") as execute:
+            for _ in range(4):
+                runner.verify(self.state)
+        self.assertEqual(turn.call_count, 3)
+        self.assertEqual(len({call.args[1] for call in turn.call_args_list}), 3)
+        self.assertEqual(self.state["state"], "WAIT_STUCK")
+        self.assertNotIn("focused_scope_reconciled", self.state)
+        execute.assert_not_called()
+
+    def test_unselected_full_check_is_not_validated_as_required_feature_execution(self):
+        self.state.update(state="VERIFYING", reported_check_plan=[
+            main.check_plan.Check("full", ["playwright", "test"], kind="e2e").to_dict(),
+            main.check_plan.Check("focused", ["playwright", "test", "feature.spec.ts"], kind="e2e",
+                                  scope="focused").to_dict()])
+        self.state["workspace"]["reviewed_snapshot"] = snapshot(self.root)
+        def validate(context, check):
+            self.assertNotEqual(check.id, "full")
+        with patch.object(runner, "validate_check", side_effect=validate), \
+             patch("checks.execute_plan", return_value=[{"check": "focused", "status": "pass", "test_count": 2}]):
+            runner.verify(self.state)
+        self.assertEqual(self.state["state"], "ARCHIVING")
+
     def test_retry_revision_prevents_replay_even_if_old_checkpoint_was_not_retired(self):
         bad = self.bad_plan()
         self.state.update(state="VERIFYING", reported_check_plan_error=main.check_plan.reported_error(bad))

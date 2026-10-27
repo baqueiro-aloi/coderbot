@@ -325,13 +325,20 @@ Top engineering priority: implement the requested behavior with as little code a
 possible. Prefer reuse, simplification and justified net code removal; preserve
 existing functionality, tests, readability and safety. Line-count tricks do not count.
 
-With `CODEBOT_DETERMINISTIC_CHECKS=true` (default), testing is staged: extensive
-unit/functional tests during implementation, genuinely
-selected focused E2E once implementation is ready, then controller-owned full E2E
-regression audits. E2E plans declare `kind: "e2e"`, focused plans declare
+With `CODEBOT_DETERMINISTIC_CHECKS=true` (default), the feature gate runs extensive
+unit/functional checks, then genuinely selected E2E covering the actual changes,
+including changed harness paths. E2E plans declare `kind: "e2e"`, focused plans declare
 `scope: "focused"`, and a structured reporter must prove positive test execution
 (`playwright`, `junit`, or `json` with `ran`). Missing/empty focused evidence blocks
-the full audit. At most two actual full E2E launches per task are admitted, including
+the feature gate. Old unfiltered full-suite registrations remain saved, but do not
+run or block feature verification, retries, publication or archival. Explicitly
+selected commands with legacy `scope: "full"` are treated as focused checks; an
+unfiltered command cannot masquerade as focused. Historical broad results appear
+separately as non-required `audit_checks`, without being passed, waived or reused
+as current feature evidence. `suite_status` retains raw outcomes (including those
+audits); gate `status` depends on required checks only. A separate explicit controller
+audit call (`staged_checks.run(..., audit=True)`) retains the full regression path.
+At most two actual full E2E launches per task are admitted, including
 baseline executions; reservations survive crashes and cache hits cost nothing.
 Planning completion/archive alone does not invalidate code checks. Changed approved
 requirements, design or task text still require reconciliation; approval fingerprints
@@ -345,7 +352,8 @@ repair approved behavior or operational prerequisites, not expand scope to fix
 unrelated product debt or repeat the same command blindly. Confirmed baseline-only
 failures do not block the regression gate: `status` can be `pass` while raw
 `suite_status` remains `fail`. New/worsened failures, unknown attribution and missing
-required feature evidence still block. Workspace-local checks can use isolated
+required feature evidence still block required-check evaluation; historical broad
+audit failures are informational in the focused feature gate. Workspace-local checks can use isolated
 repository baselines only with explicitly repository-local inputs; shared/composite
 failures remain unresolved without an immutable composite baseline. Agent prose or
 being "outside scope" is not baseline evidence. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
@@ -360,6 +368,14 @@ starts a fresh repair attempt, not another blind run. Product/scope changes or
 unobtainable external prerequisites still require a concrete decision. Legacy final
 check waits recover through the same path when the user replies; `VERIFY` is not
 needed to restart planning or reset state.
+
+In an existing workspace `WAIT_STUCK` caused by the old full-audit budget gate,
+plain `retry` deterministically resumes the same task, preserving prior guidance,
+approvals, registrations and audit reservations. The bot first reconciles a selected
+plan against the actual repository/harness diff, then runs required checks and
+continues normal checklist reconciliation and independent review. Interrupted
+plan-recovery turns do not spend completed-repair attempts. This does not authorize
+missing-evidence completion, publication, merge or DONE.
 
 Check-plan metadata accepts `timeout_seconds` as an alias for `timeout`; conflicting
 values, unknown fields and string-valued `argv` remain invalid. Validation names

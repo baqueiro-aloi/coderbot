@@ -89,19 +89,24 @@ Staged testing policy (overrides generic skill advice to repeatedly run all test
    arguments. Positive executed-test counts are required; exit code 0 alone is not
    E2E evidence. Add selection support to the harness if needed; preserve its full mode,
   existing tests, assertions and coverage. Do not relabel a whole suite as focused.
-- Only after focused E2E passes may the controller run the unchanged full E2E suite
-  once or twice as a final regression audit. Agents and subagents do not run it.
-  Do not spend this budget during implementation, routine repair or administrative
-  archival. Focused evidence is not evidence that the full suite passed.
+- The required feature gate is selected E2E for the actual changes, including changed
+   harness paths, after unit and functional checks. A whole-suite regression audit is
+   not a mandatory feature gate. Do not register or execute an unfiltered full suite
+   for implementation, verification, repair, retry, publication or archival.
+   Existing full registrations and audit reports remain historical information;
+   they neither trigger another full run nor replace required focused evidence.
+   Only a separate explicit controller audit may run the full suite once or twice;
+   agents/subagents do not run it. Focused evidence never proves the full suite passed.
 - Investigate inherited failures against the immutable baseline and separate new
   regressions, existing debt and environment failures. Never label something
   pre-existing merely because it concerns another subsystem or is on main.
   Fix in-scope defects and operational prerequisites autonomously. Do not expand
   product scope to make unrelated historical tests green, or repeatedly ask a scope
    question the user already answered. Carry forward that decision and report debt.
-- Confirmed pre-existing failures do not block the regression gate. New/worsened
-  failures, unknown attribution, empty focused runs and missing required evidence
-  still block. Distinguish regression-gate status from raw full-suite status.
+- Required focused E2E must actually pass: failures, unknown/empty focused runs and
+   missing required evidence still block. Historical broad-audit failures remain
+   visible and unattributed unless proved otherwise; do not label them passed or
+   pre-existing. Distinguish the focused feature gate from raw full-suite status.
 - Missing packages, test selection, locks, timeout settings and evidence bookkeeping
   are engineering work, not reasons to stop for permission. Preserve valid work and
   recorded test evidence on recovery. Do not invent checklist tasks or rebuild a
@@ -524,8 +529,8 @@ behavior (real alternatives, not just formatting), do NOT guess: use the
 NEED_USER_INPUT mechanism to ask which resolution is wanted, describing each
 alternative concretely.
 
-After resolving: re-run the feature's tests (the e2e specs if the repo has an e2e
-harness; the full suite if the conflicts touched shared code) and make sure they pass,
+After resolving: re-run unit/functional checks and explicitly selected E2E cases
+covering the feature and any shared code affected by the conflicts, never an unfiltered full suite,
 then commit the merge on branch $branch. Coderbot pushes afterward: do NOT push, and
 do NOT merge the PR.
 End with a short summary of each conflict and how you resolved it.

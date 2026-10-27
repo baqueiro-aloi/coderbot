@@ -317,6 +317,10 @@ def verification(state: dict) -> str:
             lines.append(f"  Skipped ({check.get('skipped', 'missing credential')}); not reported as passed.")
         if check.get("zero_tests"):
             lines.append("  Executed 0 tests; this is not evidence of working behaviour.")
+    for audit in final.get("audit_checks", []):
+        lines.append(f"- Historical full E2E audit: {audit.get('status', 'unavailable')}; "
+                     "not required for the focused feature gate, not current verification. "
+                     + str(audit.get("report") or audit.get("reason", "")))
     if gate.get("preexisting"):
         lines.append("- Confirmed pre-existing failures: " + "; ".join(gate["preexisting"]))
     lines.append("- Internal review: passed" if review.get("status") == "pass"
@@ -355,5 +359,7 @@ def concise_verification(state):
         "not applicable" if not state.get("has_e2e_harness") else
         "passed" if state.get("e2e_passed") else "outcome unavailable")
     return (f"Verification: {accepted}/{len(checks)} final checks accepted; "
-            f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
-            "Detailed outcomes and exceptions are in the verification report.")
+             f"{preexisting} confirmed preexisting failures. E2E: {e2e}. "
+             + ("Historical full E2E audits are separate, non-required, and not reported as green. "
+                if final.get("audit_checks") else "")
+             + "Detailed outcomes and exceptions are in the verification report.")

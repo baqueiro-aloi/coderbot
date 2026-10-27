@@ -201,6 +201,17 @@ def has_e2e_selection(check):
     return False
 
 
+def feature_checks(plan, repo):
+    """A registered broad suite is not a required feature check; real selections are."""
+    required = []
+    for check in plan:
+        if not is_e2e(check, repo):
+            required.append(check)
+        elif check.scope == "focused" or has_e2e_selection(check):
+            required.append(replace(check, scope="focused"))
+    return required
+
+
 def normalize(checks, repo):
     """Collapse execution aliases, not distinct selections or test contracts."""
     unique = {}
@@ -286,7 +297,7 @@ def reported_error(output):
 
 
 def remember(state, output):
-    """Supplement durable registrations; diagnostic plans cannot erase full checks."""
+    """Keep durable registrations; feature policy selects required execution separately."""
     reported, error = _reported(output)
     if error:
         if not state.get("reported_check_plan_error"):

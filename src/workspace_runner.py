@@ -400,6 +400,35 @@ def verify(state):
                     f"The agent could not produce a valid check plan after {attempt} completed repair attempts; no malformed plan was executed.")
             return
         state.pop("check_plan_repair_round", None)
+    if (state.get("final_check_report", {}).get("stage") == "full_e2e_budget_exhausted"
+            and not state.get("focused_scope_reconciled")):
+        attempt = state["workspace"].get("verification_rounds", {}).get("focused_scope", 0) + 1
+        if attempt > config.QUALITY_GATE_MAX_ROUNDS:
+            main._enter_stuck(state, "VERIFYING", "Focused-plan reconciliation is still missing after bounded recovery; "
+                              "preserve the task and historical audit evidence.")
+            return
+        result = turn(state, main.prompts.TESTING_POLICY + f"\nFocused-plan recovery attempt {attempt}. "
+            "Recover this SAME task from the legacy full-audit gate. "
+            "Inspect the actual diff across affected repositories and shared/local harness files. "
+            "Emit a CHECK_PLAN with genuinely selected E2E cases covering changed behavior AND changed harness paths; "
+            "retain required unit/functional checks. Do not repeat the broad-failure investigation, run a full suite, "
+            "erase historical registrations/evidence, reset the audit budget, or expand product scope. "
+            "Legacy checklist duties to repeat a full audit are superseded by focused verification; reconcile their "
+            "verification purpose honestly without claiming the full audit passed or completing missing implementation. "
+            "Preserve approvals and user work. No DONE, publication or merge is authorized by this recovery.\n"
+            + main.prompts.fenced_authoritative("existing task guidance", state.get("pending_feedback", "")))
+        if main.handle_result(state, result, "VERIFYING"):
+            return
+        remember_checks(state, result.output)
+        state["workspace"].setdefault("verification_rounds", {})["focused_scope"] = attempt
+        if (state.get("reported_check_plan_error") or not any(
+                main.check_plan.is_e2e(c, context.root) and main.check_plan.has_e2e_selection(c)
+                for c in main.check_plan.reported(result.output))):
+            main.save_state(state)
+            return
+        state["focused_scope_reconciled"] = True
+        main.save_state(state)
+        return
     plan = check_plan_for(state, context)
     if not plan or not any(check.cwd in (".", "e2e") for check in plan):
         if not verification_attempt(state, "shared_plan", "No runnable shared integration check was supplied"):
@@ -416,7 +445,7 @@ def verify(state):
         raise workspace.WorkspaceError("Workspace verification requires a shared integration check; emit CHECK_PLAN or configure a manifest")
     from workspace_checks import HarnessBlocked
     try:
-        for check in plan:
+        for check in main.check_plan.feature_checks(plan, context.root):
             validate_check(context, check)
     except HarnessBlocked as error:
         state["workspace"]["harness_repair_round"] = state["workspace"].get("harness_repair_round", 0) + 1
@@ -475,11 +504,11 @@ def verify(state):
     if failed:
         if not verification_attempt(state, "failures", "Verification remains unresolved: " + json.dumps(failed)):
             return
-        result = turn(state, "Fix these verification failures within the approved feature; do not hide or skip tests.\n"
-                       + "The controller deduplicates identical checks, locks shared E2E execution, and manages bounded timeouts. "
-                       "Do not ask the user to configure the controller or approve a timeout increase. "
-                       "Emit an explicit timeout in CHECK_PLAN when more time is justified. Do not run full suites yourself; "
-                       "the controller reruns them. Diagnose authentication/fixture and endpoint failures before claiming "
+        result = turn(state, main.prompts.TESTING_POLICY + "\nFix these verification failures within the approved feature; do not hide or skip tests.\n"
+                        "The controller deduplicates identical checks, locks shared E2E execution, and manages bounded timeouts. "
+                        "Do not ask the user to configure the controller or approve a timeout increase. "
+                        "Emit an explicit timeout in CHECK_PLAN when more time is justified. "
+                        "Diagnose authentication/fixture and endpoint failures before claiming "
                        "they are outside scope. Ask only a concrete product-scope or missing-secret decision, "
                        "with numbered options and consequences.\n"
                        + ("Source also changed during checks; their evidence is stale and verification must run again after repairs.\n"
@@ -501,7 +530,8 @@ def verify(state):
         if pending["implementation"] or pending["verification"]:
             if not verification_attempt(state, "tasks", "Approved implementation/evidence tasks remain unresolved"):
                 return
-            result = turn(state, "Complete/reconcile these approved tasks using real focused evidence. "
+            result = turn(state, main.prompts.TESTING_POLICY + "\nComplete/reconcile these approved tasks using real focused evidence. "
+                "Legacy full-audit repetition duties are superseded; explain that without claiming a green full suite. "
                 "Do not mark missing evidence complete, expand scope, or rerun full E2E.\n" + json.dumps(pending))
             main.handle_result(state, result, "VERIFYING")
             return
@@ -792,16 +822,18 @@ def reply(state, reply):
     if phase == "WAIT_APPROVAL":
         return main.do_approval_reply(state, reply)
     if phase == "WAIT_STUCK":
-        action = main.parse_json_reply(main.agent_runner.run(main.prompts.render(
-            main.prompts.CLASSIFY_STUCK_REPLY, reply=reply) + main.handoffs.classification_context(state),
-            contract=False).output).get("action")
+        action = ("retry" if re.fullmatch(r"(?i)\s*retry[.!]?\s*", reply) else
+                  main.parse_json_reply(main.agent_runner.run(main.prompts.render(
+                      main.prompts.CLASSIFY_STUCK_REPLY, reply=reply) + main.handoffs.classification_context(state),
+                      contract=False).output).get("action"))
         if action == "abort":
             return main._abort_and_reset(state, "Task stopped; workspace changes preserved.")
         if action == "complete":
             return main._finish_task(state, "Marked complete at your request; local changes preserved.", reset_repo=False)
         if action in ("retry", "instructions"):
             origin = state.get("stuck_return", "VERIFYING")
-            state["pending_feedback"] = reply
+            if action == "instructions":
+                state["pending_feedback"] = reply
             main._clear_stuck(state, origin)
             state["state"] = origin
         return

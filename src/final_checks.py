@@ -15,22 +15,23 @@ def run(state, repo, store):
         return {"snapshot": before, "status": "indeterminate", "stage": "invalid_check_plan", "checks": [
             {"check": "check_plan", "status": "not_run", "gate": {"status": "indeterminate"},
              "reason": state["reported_check_plan_error"]}]}
-    plan = [c for c in check_plan.discover(repo) if c.scope == "full"]
+    plan = check_plan.discover(repo)
     waived = any(w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
     if waived:
         plan = [c for c in plan if not c.id.startswith("e2e")]
-    # A reported full check supplements discovery; focused checks never replace it.
+    # Same-ID corrections replace execution contracts, including full -> selected.
     known = {c.id for c in plan}
     for entry in state.get("reported_check_plan", []):
         check = check_plan.Check(**entry)
-        if check.scope == "full" and check.id in known:
-            plan = [replace(existing, timeout=max(existing.timeout, check.timeout),
+        if check.id in known:
+            plan = [replace(check, timeout=max(existing.timeout, check.timeout),
                             resources=sorted(set(existing.resources) | set(check.resources)))
                     if existing.id == check.id else existing for existing in plan]
         if check.id not in known:
             if waived and check.id.startswith("e2e"):
                 continue
             plan.append(check)
+            known.add(check.id)
     plan = check_plan.relax(plan, [name for name, decision in (state.get("credentials") or {}).items()
                                     if isinstance(decision, dict) and decision.get("decision") == "skip"])
     plan = check_plan.normalize(plan, repo)
@@ -74,10 +75,13 @@ def report(staged, repo):
         outcomes.append({"check": staged["stage"], "status": "not_run", "gate": {"status": "indeterminate"},
                          "reason": "Required verification stage is incomplete; repair focused evidence/diagnosis, not another identical full run",
                          "selection_issues": staged.get("selection_issues", [])})
-    suite_status = ("fail" if any(r["status"] == "fail" for r in outcomes) else
-                    "indeterminate" if not outcomes or any(r["status"] not in ("pass", "skipped") for r in outcomes) else
-                    "skipped" if any(r["status"] == "skipped" for r in outcomes) else "pass")
+    audits = staged.get("audit_checks", [])
+    raw = outcomes + audits
+    suite_status = ("fail" if any(r["status"] == "fail" for r in raw) else
+                    "indeterminate" if audits or not raw or any(r["status"] not in ("pass", "skipped") for r in raw) else
+                    "skipped" if any(r["status"] == "skipped" for r in raw) else "pass")
     return {"snapshot": snapshot(repo), "stage": staged["stage"],
+            "verification_scope": staged.get("verification_scope", "focused_e2e"), "audit_checks": audits,
             "suite_status": suite_status,
             "status": "pass" if staged["stage"] == "complete" and outcomes and all(r["gate"]["status"] == "pass" for r in outcomes)
             else "indeterminate" if not outcomes or any(r["gate"]["status"] == "indeterminate" for r in outcomes)

@@ -4662,7 +4662,7 @@ RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url"
               "implementation_attachments", "implementation_ready", "pending_decision", "check_repair", "pending_reply_delivery",
               "verification_guidance", "verification_requested_from", "verification_blocker",
               "verification_plan_recovery", "quality_snapshot", "quality_controller_validated",
-              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round")
+              "approved_task_inventory", "verified_task_inventory", "evidence_recovery_round", "focused_scope_reconciled")
 
 
 def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = False) -> None:

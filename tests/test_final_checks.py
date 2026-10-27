@@ -68,21 +68,57 @@ class FinalCheckTests(unittest.TestCase):
         self.assertEqual(report["status"], "indeterminate")
         self.assertEqual(report["stage"], "needs_focused_e2e")
 
-    def test_real_focused_pass_and_baseline_only_full_failure_pass_regression_gate(self):
+    def test_real_focused_pass_preserves_failed_historical_audit_without_running_it(self):
         focused = Check("focused", ["playwright", "test", "feature.spec.ts"], kind="e2e", scope="focused")
         full = Check("full", ["playwright", "test"], kind="e2e")
         failed = {"status": "fail", "failures": {"old": "baseline"}}
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
             state = {"base_sha": "a" * 40, "reported_check_plan": [focused.to_dict()]}
+            store.put("check_run", task_id=store.task_identity(state, root), status="complete",
+                      data={"check": full.to_dict(), "result": {**failed, "report": "old-audit.log"}})
             with patch("final_checks.check_plan.discover", return_value=[full]), \
-                 patch("checks.execute_plan", side_effect=[[{"status": "pass", "test_count": 1}], [failed]]), \
+                 patch("checks.execute_plan", return_value=[{"status": "pass", "test_count": 1}]) as run, \
                  patch("final_checks.baseline_result", return_value=failed) as baseline:
                 report = final_checks.run(state, root, store)
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["suite_status"], "fail")
-        self.assertEqual([r["check"] for r in report["checks"]], ["focused", "full"])
-        self.assertIn("audit_task", baseline.call_args.kwargs)
+        self.assertEqual([r["check"] for r in report["checks"]], ["focused"])
+        self.assertEqual(report["audit_checks"][0]["failures"], {"old": "baseline"})
+        self.assertEqual(report["audit_checks"][0]["report"], "old-audit.log")
+        self.assertNotIn("gate", report["audit_checks"][0])
+        self.assertEqual(report["verification_scope"], "focused_e2e")
+        run.assert_called_once()
+        baseline.assert_not_called()
+
+    def test_same_id_focused_registration_replaces_discovered_full_command(self):
+        full = Check("e2e", ["playwright", "test"], kind="e2e")
+        focused = Check("e2e", ["playwright", "test", "feature.spec.ts"], kind="e2e", scope="focused")
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"reported_check_plan": [focused.to_dict()]}
+            store.put("check_run", task_id=store.task_identity(state, root), status="complete",
+                      data={"check": full.to_dict(), "result": {"check": "e2e", "status": "pass",
+                          "report": "old-source-audit.log", "gate": {"status": "pass"}}})
+            with patch("final_checks.check_plan.discover", return_value=[full]), \
+                 patch("checks.execute_plan", return_value=[{"status": "pass", "test_count": 2}]) as run:
+                report = final_checks.run(state, root, store)
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["suite_status"], "indeterminate")
+        self.assertTrue(report["audit_checks"][0]["historical"])
+        self.assertNotIn("gate", report["audit_checks"][0])
+        self.assertEqual(run.call_args.args[0][0].argv, focused.argv)
+
+    def test_focused_failure_is_never_excused_by_a_historical_baseline(self):
+        focused = Check("e2e", ["playwright", "test", "feature.spec.ts"], kind="e2e", scope="focused")
+        failed = {"status": "fail", "failures": {"feature": "assertion"}, "test_count": 2}
+        with tempfile.TemporaryDirectory() as root:
+            with patch("final_checks.check_plan.discover", return_value=[focused]), \
+                 patch("checks.execute_plan", return_value=[failed]), patch("final_checks.baseline_result") as baseline:
+                report = final_checks.run({"base_sha": "a" * 40}, root, ExecutionStore(Path(root) / "db"))
+        self.assertNotEqual(report["status"], "pass")
+        self.assertEqual(report["checks"][0]["failures"], failed["failures"])
+        baseline.assert_not_called()
 
     def test_source_drift_blocks_even_when_every_check_passes(self):
         with tempfile.TemporaryDirectory() as root:

@@ -28,10 +28,43 @@ class StagedChecksTests(unittest.TestCase):
     def execute(self, selected, *args, **kwargs):
         return [{"check": c.id, "status": "pass", "test_count": 1} for c in selected]
 
-    def test_cheap_focused_full_order(self):
+    def test_default_gate_runs_cheap_and_focused_not_full(self):
         with patch("checks.execute_plan", side_effect=self.execute) as run:
             result = staged_checks.run(self.state, self.plan, self.root, self.store)
+        self.assertEqual([[c.id for c in call.args[0]] for call in run.call_args_list], [["unit"], ["focused"]])
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["audit_checks"][0]["status"], "not_run")
+        self.assertFalse(result["audit_checks"][0]["required"])
+
+    def test_explicit_audit_keeps_cheap_focused_full_order(self):
+        with patch("checks.execute_plan", side_effect=self.execute) as run:
+            result = staged_checks.run(self.state, self.plan, self.root, self.store, audit=True)
         self.assertEqual([[c.id for c in call.args[0]] for call in run.call_args_list], [["unit"], ["focused"], ["full"]])
+        self.assertEqual(result["stage"], "complete")
+
+    def test_exhausted_audits_and_unknown_history_do_not_block_focused_gate(self):
+        for i in range(2):
+            self.store.put("operation", task_id="task", identity="full-e2e-launch", data={"launch": i})
+            self.store.put("check_run", task_id="task", status="complete", data={
+                "check": self.plan[2].to_dict(), "result": {"check": "full", "status": "unknown",
+                    "exit_code": 1, "failures": {}, "report": f"audit-{i}.log", "content": "old-source"}})
+        before = self.store.list("check_run", "task")
+        with patch("checks.execute_plan", side_effect=self.execute) as run:
+            result = staged_checks.run(dict(self.state), self.plan, self.root, ExecutionStore(self.store.path))
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual([r["status"] for r in result["audit_checks"]], ["unknown", "unknown"])
+        self.assertTrue(all(r["historical"] and not r["required"] for r in result["audit_checks"]))
+        self.assertEqual(self.store.list("check_run", "task"), before)
+        self.assertEqual(len(self.store.list("operation", "task", identity="full-e2e-launch")), 2)
+
+    def test_selected_e2e_with_legacy_full_label_is_required_focused_execution(self):
+        selected = check_plan.Check("legacy", ["playwright", "test", "feature.spec.ts"], kind="e2e")
+        with patch("checks.execute_plan", side_effect=self.execute) as run:
+            result = staged_checks.run(self.state, [self.plan[0], selected], self.root, self.store)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.args[0][0].scope, "focused")
+        self.assertNotIn("audit_task", run.call_args.kwargs)
         self.assertEqual(result["stage"], "complete")
 
     def test_fast_failure_prevents_browser_execution(self):
@@ -81,13 +114,13 @@ class StagedChecksTests(unittest.TestCase):
         plan = [check_plan.Check("focused", ["python3", "-c", 'print(\'{"failures":{},"ran":1}\')', "feature.spec.ts"],
                                 scope="focused", kind="e2e", reporter="json"),
                 check_plan.Check("full", ["echo", "full"], kind="e2e")]
-        staged_checks.run(self.state, plan, self.root, self.store)
-        reused = staged_checks.run(dict(self.state), plan, self.root, ExecutionStore(self.store.path))
+        staged_checks.run(self.state, plan, self.root, self.store, audit=True)
+        reused = staged_checks.run(dict(self.state), plan, self.root, ExecutionStore(self.store.path), audit=True)
         self.assertTrue(all(r["reused"] for r in reused["checks"]))
         (self.root / "source").write_text("second")
-        staged_checks.run(self.state, plan, self.root, self.store)
+        staged_checks.run(self.state, plan, self.root, self.store, audit=True)
         (self.root / "source").write_text("third")
-        result = staged_checks.run(self.state, plan, self.root, self.store)
+        result = staged_checks.run(self.state, plan, self.root, self.store, audit=True)
         self.assertEqual(result["stage"], "full_e2e_budget_exhausted")
         self.assertEqual(len(self.store.list("operation", "task", identity="full-e2e-launch")), 2)
 
@@ -146,10 +179,12 @@ class StagedChecksTests(unittest.TestCase):
         self.assertEqual(self.store.list("operation", "task", identity="full-e2e-launch"), [])
 
     def test_policy_is_in_working_phase_and_headless_contracts(self):
-        for text in (prompts.ENVIRONMENT, prompts.IMPLEMENT, prompts.VERIFY, prompts.PROPOSE, claude_runner.SENTINEL_CONTRACT):
+        for text in (prompts.ENVIRONMENT, prompts.IMPLEMENT, prompts.VERIFY, prompts.PROPOSE,
+                     prompts.RESOLVE_CONFLICTS, claude_runner.SENTINEL_CONTRACT):
             self.assertIn("Staged testing policy", text)
-            self.assertIn("once or twice", text)
+            self.assertIn("not a mandatory feature gate", text)
             self.assertIn("unit and functional", text)
+            self.assertNotIn("full suite if the conflicts touched shared code", text)
 
     def test_minimal_code_policy_reaches_working_and_headless_prompts(self):
         for text in (prompts.ENVIRONMENT, prompts.PROPOSE, claude_runner.SENTINEL_CONTRACT):
