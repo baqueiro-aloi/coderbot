@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from check_plan import discover, parse, reported, reported_error
+from check_plan import discover, parse, reported, reported_error, remember
 from check_results import parse_output
 
 
@@ -86,3 +86,71 @@ class CheckPlanTests(unittest.TestCase):
                       {"version": 1, "checks": [{"id": "x", "argv": ["a"]}] * 2}):
             with self.assertRaises(ValueError):
                 parse(value)
+
+    def test_live_timeout_alias_is_normalized_without_changing_the_command(self):
+        entry = {"id": "e2e-compartido", "argv": ["bash", "e2e/run.sh", "tests/workspace-zip-otros.spec.ts",
+                 "--grep", "ZIP (mixto|solo desconocidos):"], "cwd": ".", "kind": "e2e", "scope": "focused",
+                 "reporter": "playwright", "timeout_seconds": 900}
+        original = json.loads(json.dumps(entry))
+        output = "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [entry]})
+        self.assertIsNone(reported_error(output))
+        check = reported(output)[0]
+        self.assertEqual(check.timeout, 900)
+        self.assertEqual(check.argv, entry["argv"])
+        self.assertNotIn("timeout_seconds", check.to_dict())
+        self.assertEqual(entry, original)
+
+    def test_matching_aliases_are_safe_but_conflicting_or_invalid_values_are_not(self):
+        base = {"id": "browser", "argv": ["test"], "timeout": 900, "timeout_seconds": 900.0}
+        self.assertEqual(parse({"version": 1, "checks": [base]})[0].timeout, 900)
+        for values in ({"timeout": 900, "timeout_seconds": 60}, {"timeout": 1, "timeout_seconds": True},
+                       {"timeout_seconds": True}, {"timeout_seconds": -1}, {"timeout_seconds": "900"}):
+            with self.subTest(values=values):
+                output = "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [{"id": "browser", "argv": ["test"], **values}]})
+                self.assertEqual(reported(output), [])
+                error = reported_error(output)
+                self.assertIn("browser", error)
+                self.assertIn("timeout", error)
+
+    def test_errors_identify_the_check_and_expected_field_contract(self):
+        for fields, expected in (({"timeout_millis": 900}, "timeout_millis"), ({"kind": "integration"}, "functional"),
+                                 ({"argv": "bash e2e/run.sh"}, "argv"), ({"scope": "all"}, "scope"),
+                                 ({"cwd": 12}, "cwd")):
+            with self.subTest(fields=fields):
+                output = "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [{"id": "zip", "argv": ["test"], **fields}]})
+                self.assertEqual(reported(output), [])
+                error = reported_error(output)
+                self.assertIn("zip", error)
+                self.assertIn(expected, error)
+
+    def test_shell_string_and_missing_version_are_not_guessed(self):
+        for value in ({"checks": [{"name": "zip", "command": "bash e2e/run.sh"}]},
+                      {"version": 1, "checks": [{"name": "zip", "command": "bash e2e/run.sh"}]},
+                      {"version": 1.0, "checks": []},
+                      {"version": True, "checks": []}):
+            with self.subTest(value=value):
+                output = "CHECK_PLAN: " + json.dumps(value)
+                self.assertEqual(reported(output), [])
+                self.assertIsNotNone(reported_error(output))
+
+    def test_new_error_episodes_change_recovery_revision_without_erasing_checks(self):
+        state = {"reported_check_plan": [{"id": "existing", "argv": ["test"]}]}
+        bad = 'CHECK_PLAN: {"version":1,"checks":[{"id":"zip","argv":["test"],"timeout_millis":900}]}'
+        good = 'CHECK_PLAN: {"version":1,"checks":[{"id":"zip","argv":["test"],"timeout_seconds":900}]}'
+        remember(state, bad)
+        first_revision = state["check_plan_repair_revision"]
+        state["check_plan_repair_round"] = 2
+        remember(state, bad)
+        self.assertEqual(state["check_plan_repair_revision"], first_revision)
+        self.assertEqual(state["check_plan_repair_round"], 2)
+        remember(state, good)
+        self.assertNotIn("reported_check_plan_error", state)
+        self.assertNotIn("check_plan_repair_round", state)
+        self.assertEqual({entry["id"] for entry in state["reported_check_plan"]}, {"existing", "zip"})
+        remember(state, bad)
+        self.assertGreater(state["check_plan_repair_revision"], first_revision)
+
+    def test_duplicate_error_names_the_id(self):
+        output = 'CHECK_PLAN: {"version":1,"checks":[{"id":"zip","argv":["test"]},{"id":"zip","argv":["test"]}]}'
+        self.assertEqual(reported(output), [])
+        self.assertIn("Duplicate check id zip", reported_error(output))

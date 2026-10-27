@@ -354,6 +354,13 @@ starts a fresh repair attempt, not another blind run. Product/scope changes or
 unobtainable external prerequisites still require a concrete decision. Legacy final
 check waits recover through the same path when the user replies; `VERIFY` is not
 needed to restart planning or reset state.
+
+Check-plan metadata accepts `timeout_seconds` as an alias for `timeout`; conflicting
+values, unknown fields and string-valued `argv` remain invalid. Validation names
+the check and offending field. Plan repairs use durable attempt/recovery revisions
+so rejected outputs are not replayed as new attempts; explicit `retry` resets the
+repair counter, not passing evidence or the full-E2E budget.
+
 Responses to user questions and their attachments are sent in the same thread in
 every phase before the continuation advances. Failed/partial delivery preserves the
 waiting phase and question rather than dropping the answer behind a progress banner.
@@ -482,6 +489,15 @@ thread with:
 - **complete** — mark the task done in the backlog and move on, or
 - **instructions** — free-form guidance; codebot applies it in the working session, then
   resumes the failed step.
+
+Failure notices identify the concrete cause, impact, recorded recovery and verification
+evidence, followed by one decision menu. Diagnostics retain redacted rejected check plans
+and recorded results; repair counters alone are not proof of fresh provider calls.
+Provider-filter notices quote the user's message and available submitted request, or
+identify an internal bot request rather than asking the user to rephrase text they never
+wrote. Long requests have visible excerpts and complete redacted attachments. Withheld
+response text and unknown filter triggers are not invented; unchanged attempts are not
+automatically retried. Follow-up conversation receives these facts, not just a file path.
 
 Every external `git`/`gh` call has a timeout (`CODEBOT_SUBPROCESS_TIMEOUT`, default 120s)
 so a hung command surfaces as a failure (feeding the budget) instead of wedging the loop.

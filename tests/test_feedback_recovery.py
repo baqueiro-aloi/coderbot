@@ -132,8 +132,9 @@ class FeedbackRecoveryTests(unittest.TestCase):
         state = {"item": "task", "state": "IMPLEMENTING", "session_id": "session",
                  "task_language": "Spanish", "technical_retry": {"attempts": 3}}
         with patch.object(main.agent_runner, "run") as run, \
-             patch.object(main.gmail_client, "send", return_value="thread"), \
-             patch.object(main, "trail"), patch.object(main, "_note_contact"), \
+              patch.object(main.gmail_client, "send", return_value="thread"), \
+              patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread"}), \
+              patch.object(main, "trail"), patch.object(main, "_note_contact"), \
              patch.object(main, "save_state"):
             main._content_filter_stop(state, "IMPLEMENTING")
         run.assert_not_called()

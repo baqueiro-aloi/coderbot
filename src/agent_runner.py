@@ -541,7 +541,8 @@ def _opencode(prompt: str, session_id: str | None = None) -> OpenCodeResult:
             content_filtered = True
 
     if content_filtered:
-        raise AgentContentFilterError("The response was blocked by the provider's content filter", proc)
+        raise AgentContentFilterError("The response was blocked by the provider's content filter", proc,
+            request=prompt, partial_response="\n".join(output), provider_detail="\n".join(errors))
     if proc.returncode != 0 or errors:
         detail = "\n".join(errors) or proc.stderr or proc.stdout
         if errors and any("fetch failed" in error.casefold() for error in errors):
@@ -635,6 +636,10 @@ def run(prompt: str, contract: bool = True):
                 parallel_conversation.incorporated(phase_checkpoint.store(), input_rows, result.session_id)
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
         return result
+    except AgentContentFilterError as error:
+        if not error.request:
+            error.request = prompt
+        raise
     finally:
         if context and before is not None:
             try:
@@ -705,6 +710,10 @@ def resume(session_id: str, prompt: str):
             _persist(repo_provenance.record, phase_checkpoint.store(), context, config.REPO_PATH)
             context.setdefault("phase_sessions", {})[context["state"]] = result.session_id
         return result
+    except AgentContentFilterError as error:
+        if not error.request:
+            error.request = prompt
+        raise
     finally:
         if context and before is not None:
             try:

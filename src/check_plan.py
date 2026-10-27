@@ -31,15 +31,22 @@ class Check:
     def __post_init__(self):
         self.optional = self.optional is True  # agent JSON may send "no"/"false" strings
         if self.kind not in ("auto", "unit", "functional", "e2e"):
-            raise ValueError("Invalid check kind")
-        if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
-            raise ValueError("Check requires id and nonempty argv strings")
+            raise ValueError("kind must be auto, unit, functional or e2e")
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("id must be a nonempty string")
+        if not isinstance(self.argv, list) or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
+            raise ValueError("argv must be a nonempty array of nonempty strings; shell command strings are not accepted")
+        if not isinstance(self.cwd, str) or not self.cwd:
+            raise ValueError("cwd must be a nonempty path string")
         if (not isinstance(self.timeout, (int, float)) or isinstance(self.timeout, bool)
-                or not math.isfinite(self.timeout) or self.timeout <= 0 or self.scope not in ("full", "focused")):
-            raise ValueError("Invalid check timeout or scope")
-        for values in (self.inputs, self.env_keys, self.resources):
+                or not math.isfinite(self.timeout) or self.timeout <= 0):
+            raise ValueError("timeout must be a finite positive number of seconds")
+        if self.scope not in ("full", "focused"):
+            raise ValueError("scope must be full or focused")
+        for name in ("inputs", "env_keys", "resources"):
+            values = getattr(self, name)
             if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
-                raise ValueError("Check list fields must contain strings")
+                raise ValueError(name + " must be an array of strings")
         if self.dependency_inputs is not None and (not isinstance(self.dependency_inputs, list) or
                 not all(isinstance(p, str) and p for p in self.dependency_inputs)):
             raise ValueError("Check dependency inputs must be nonempty strings")
@@ -64,11 +71,32 @@ def relax(checks, names):
 
 
 def parse(value):
-    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("checks"), list):
+    if (not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1
+            or not isinstance(value.get("checks"), list)):
         raise ValueError("Check plan must have version 1 and checks array")
-    checks = [Check(**entry) for entry in value["checks"]]
-    if len({c.id for c in checks}) != len(checks):
-        raise ValueError("Duplicate check ids")
+    checks, seen = [], set()
+    for index, entry in enumerate(value["checks"]):
+        if not isinstance(entry, dict):
+            raise ValueError(f"checks[{index}] must be a check object")
+        label = entry.get("id") if isinstance(entry.get("id"), str) and entry["id"] else f"checks[{index}]"
+        entry = dict(entry)  # Canonicalize metadata only; never guess executable commands.
+        try:
+            if "timeout_seconds" in entry:
+                alias = entry.pop("timeout_seconds")
+                if "timeout" in entry and (entry["timeout"] != alias or isinstance(alias, bool)):
+                    raise ValueError("conflicting timeout and timeout_seconds; use only timeout")
+                entry.setdefault("timeout", alias)
+            unknown = set(entry) - set(Check.__dataclass_fields__)
+            if unknown:
+                raise ValueError("unsupported fields: " + ", ".join(sorted(unknown))
+                                 + "; use canonical names such as id, argv, cwd and timeout")
+            check = Check(**entry)
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"check {label}: {error}") from error
+        if check.id in seen:
+            raise ValueError(f"Duplicate check id {check.id}; use unique IDs")
+        seen.add(check.id)
+        checks.append(check)
     return checks
 
 
@@ -214,10 +242,10 @@ def visible_text(output):
     return text.strip() if text != output else text
 
 
-def _reported(output):
+def reported_payload(output):
     markers = list(re.finditer(r"(?m)^CHECK_PLAN:[ \t]*", output))
     if not markers:
-        return [], None
+        return ""
     text = output[markers[-1].end():].lstrip()
     # Accept a pretty-printed object, including a JSON fence after the marker.
     # Never search prose for a later object or fall back to an earlier plan.
@@ -226,12 +254,23 @@ def _reported(output):
     elif text.startswith("```\n"):
         text = text[len("```\n"):].lstrip()
     try:
+        _, end = json.JSONDecoder().raw_decode(text)
+        return text[:end]
+    except ValueError:
+        return text
+
+
+def _reported(output):
+    text = reported_payload(output)
+    if not text and not re.search(r"(?m)^CHECK_PLAN:", output):
+        return [], None
+    try:
         value, _ = json.JSONDecoder().raw_decode(text)
         return parse(value), None
     except json.JSONDecodeError:
         return [], "CHECK_PLAN must contain a valid JSON object with version 1 and a checks array"
-    except (ValueError, TypeError, AttributeError):
-        return [], "CHECK_PLAN has invalid check fields, schema, or duplicate check IDs"
+    except (ValueError, TypeError, AttributeError) as error:
+        return [], "CHECK_PLAN: " + str(error)
 
 
 def reported(output):
@@ -250,9 +289,20 @@ def remember(state, output):
     """Supplement durable registrations; diagnostic plans cannot erase full checks."""
     reported, error = _reported(output)
     if error:
+        if not state.get("reported_check_plan_error"):
+            state["check_plan_repair_revision"] = state.get("check_plan_repair_revision", 0) + 1
         state["reported_check_plan_error"] = error
+        import diagnostics
+        payload = reported_payload(output)
+        try:
+            payload = json.dumps(diagnostics.safe(json.loads(payload)), ensure_ascii=False)
+        except ValueError:
+            payload = diagnostics.redact(payload)
+        state["rejected_check_plan"] = payload
     elif re.search(r"(?m)^CHECK_PLAN:", output):
         state.pop("reported_check_plan_error", None)
+        state.pop("rejected_check_plan", None)
+        state.pop("check_plan_repair_round", None)
         current = {entry["id"]: entry for entry in state.get("reported_check_plan", [])}
         current.update({check.id: check.to_dict() for check in reported})
         state["reported_check_plan"] = list(current.values())

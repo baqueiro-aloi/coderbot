@@ -3929,9 +3929,9 @@ def handle_wait(state: dict) -> None:
             credential_action()
         else:
             _dispatch_wait_reply(state, msg_id, reply)
-    except AgentContentFilterError:
+    except AgentContentFilterError as error:
         state["state"] = reply_phase
-        _content_filter_stop(state, reply_phase)
+        _content_filter_stop(state, reply_phase, error=error, user_text=reply)
     if config.COMM_CHANNEL == "slack":
         # Persist the state transition before clearing the durable inbox entry.
         # If the process dies between those writes, restart skips reapplying it.
@@ -3943,8 +3943,6 @@ def handle_wait(state: dict) -> None:
 
 
 def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
-    if config.TARGET_MODE == "workspace":
-        return _handle_reply(state, reply)
     selection = handoffs.selected_reply(state, reply)
     if selection is not None:
         if selection.get("error") or selection.get("wait"):
@@ -3958,6 +3956,8 @@ def _dispatch_wait_reply(state: dict, msg_id: str, reply: str) -> None:
                 or state.get("return_state") in ("EXPLORING", "PROPOSING")):
             _handle_reply(state, selection["reply"])
             return
+    if config.TARGET_MODE == "workspace":
+        return _handle_reply(state, reply)
     if (state["state"] == "WAIT_MERGE" or state.get("return_state") == "FEEDBACK_QUESTION" or
             state.get("execution_task_id") and state["state"] in ("WAIT_REPLY", "WAIT_STUCK")) and not re.fullmatch(
             r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?|abort|complete|retry)[.! ]*", reply):
@@ -4061,10 +4061,10 @@ def _dispatch_feedback(state: dict) -> bool:
     original_phase = state["state"]
     try:
         return _apply_received_feedback(state, database, row)
-    except AgentContentFilterError:
+    except AgentContentFilterError as error:
         state["state"] = original_phase
         database.update("feedback", row, status="blocked", outcome="content-filter")
-        _content_filter_stop(state, original_phase)
+        _content_filter_stop(state, original_phase, error=error, user_text=row["data"]["text"])
         return True
 
 
@@ -4653,7 +4653,8 @@ RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url"
               "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",
               "execution_task_id", "execution_attempt_id", "execution_checkpoint_id", "phase_sessions",
                "session_context_tokens", "focused_check_results", "reported_check_plan", "final_check_report",
-               "reported_check_plan_error", "check_plan_repair_round",
+               "reported_check_plan_error", "check_plan_repair_round", "check_plan_repair_revision",
+               "rejected_check_plan", "failure_context", "provider_block",
               "reviewed_snapshot", "delivered_sha", "localized_messages", "final_check_round", "final_repair_round",
               "post_review_check_round", "architecture_attempt_head", "implementation_feedback",
               "implementation_return_round", "implementation_turn", "implementation_progress",
@@ -4712,7 +4713,7 @@ def _finish_task(state: dict, note: str, reset_repo: bool, *, merged: bool = Fal
     state["state"] = "IDLE"
 
 
-def _content_filter_stop(state: dict, failed_state: str) -> None:
+def _content_filter_stop(state: dict, failed_state: str, *, error=None, user_text=None) -> None:
     """Reject this attempt, preserve the task, and request new text without an LLM."""
     state.setdefault("task_language", "English")
     if failed_state not in USER_SIDE_WAITS:
@@ -4720,13 +4721,24 @@ def _content_filter_stop(state: dict, failed_state: str) -> None:
         state["state"] = "WAIT_STUCK"
     state.pop("technical_retry", None)
     state.setdefault("failures", {}).pop(failed_state, None)
-    body = message_templates.operational("content_filtered", state.get("task_language", "English"))
+    state["provider_block"] = diagnostics.safe({"source": "user reply" if user_text is not None else "bot-generated request",
+        "phase": failed_state, "user_text": user_text, "request": getattr(error, "request", ""),
+        "partial_response": getattr(error, "partial_response", ""),
+        "provider_detail": getattr(error, "provider_detail", "")})
+    body = handoffs.provider_notice(state["provider_block"], state["task_language"])
     if failed_state not in USER_SIDE_WAITS:
-        state["stuck_error"] = body
+        state["stuck_error"] = diagnostics.summary(error=error, detail=body)
+    store = phase_checkpoint.store()
+    state["failure_context"] = diagnostics.failure_context(store, state, config.REPO_PATH, str(error or body))
+    files = []
+    if error is not None or user_text is not None:
+        path = diagnostics.report(store, state, config.REPO_PATH, config.DATA_DIR, failed_state, error=error, detail=body)
+        state["stuck_diagnostic"] = str(path)
+        files.append(path)
     save_state(state)
-    log.warning("provider content filter blocked %s; waiting for reformulated text", failed_state)
+    log.warning("provider content filter blocked %s; waiting with recorded request evidence", failed_state)
     label = "texto bloqueado" if state.get("task_language", "").casefold() == "spanish" else "content blocked"
-    email(state, label, body, localized=True)
+    email(state, label, body, files, localized=True)
 
 
 def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
@@ -4737,16 +4749,14 @@ def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
     escalates after repeated classifier failures) would strand the pending question —
     the answer would later resolve to an unknown phase and the task's context is lost."""
     state["stuck_return"] = failed_state
+    state["failure_context"] = diagnostics.failure_context(phase_checkpoint.store(), state, config.REPO_PATH, detail)
     path = diagnostics.report(phase_checkpoint.store(), state, config.REPO_PATH,
                               config.DATA_DIR, failed_state, detail=detail)
-    state["stuck_error"] = diagnostics.summary(detail=detail)
+    state["stuck_error"] = diagnostics.summary(detail=state["failure_context"]["cause"])
     state["stuck_diagnostic"] = str(path)
     email(state, f"stuck in {failed_state}",
           f"Task: {state.get('item', '?')}\nState: {failed_state}\n\n"
-          f"I stopped. {state['stuck_error']}\n\n"
-          "Reply 'retry' to try that step again, 'abort' to reset to a clean slate, "
-          "'complete' to mark the task done as-is, or reply with instructions and I'll "
-           "apply them and continue.", [path])
+          + handoffs.stopped_notice(state["failure_context"]), [path])
     state["state"] = "WAIT_STUCK"
 
 
@@ -4754,6 +4764,9 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
     if state.get("workspace"):
         state["workspace"].pop("harness_repair_round", None)
         state["workspace"].pop("verification_rounds", None)
+    if state.get("reported_check_plan_error"):
+        state.pop("check_plan_repair_round", None)
+        state["check_plan_repair_revision"] = state.get("check_plan_repair_revision", 0) + 1
     # return_state is deliberately KEPT: when resuming WAIT_REPLY it still points at the
     # phase whose question is pending, and handle_result refreshes it on new questions.
     if "failures" in state:
@@ -4766,6 +4779,8 @@ def _clear_stuck(state: dict, failed_state: str) -> None:
     state.pop("conflict_rounds", None)
     state.pop("stuck_return", None)
     state.pop("stuck_error", None)
+    state.pop("failure_context", None)
+    state.pop("provider_block", None)
     state.pop("technical_retry", None)
 
 
@@ -5778,9 +5793,9 @@ def _dispatch_conversation(state):
     phase = state["state"]
     try:
         _dispatch_wait_reply(state, row["identity"], row["data"]["original_text"])
-    except AgentContentFilterError:
+    except AgentContentFilterError as error:
         state["state"] = phase
-        _content_filter_stop(state, phase)
+        _content_filter_stop(state, phase, error=error, user_text=row["data"]["original_text"])
         store.update("conversation", row, status="failed", last_error="content-filter")
         return True
     state["conversation_flow_id"] = row["id"]
@@ -6238,8 +6253,8 @@ def _run_loop() -> None:
                      state.get("state"))
             backoff = 1
             continue
-        except AgentContentFilterError:
-            _content_filter_stop(state, prev)
+        except AgentContentFilterError as error:
+            _content_filter_stop(state, prev, error=error)
             backoff = 1
             gmail_client.wait(config.POLL_INTERVAL_SECONDS)
             continue

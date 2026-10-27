@@ -94,8 +94,19 @@ def process_one(store, repo, generate, deliver):
             spanish = row["data"]["snapshot"].get("task_language", "").casefold() == "spanish"
             notice = ("No pude procesar este mensaje lateral. Conservé el trabajo y la decisión pendiente. "
                       "Envía un mensaje nuevo o reformulado para continuar la conversación." if spanish else
-                      "I could not process this lateral message. Work and the pending decision are preserved. "
-                      "Send a new or reformulated message to continue the conversation.")
+                       "I could not process this lateral message. Work and the pending decision are preserved. "
+                       "Send a new or reformulated message to continue the conversation.")
+            if isinstance(error, AgentContentFilterError):
+                import diagnostics
+                view = row["data"]["snapshot"]
+                block = diagnostics.safe({"source": "user reply", "phase": "parallel conversation",
+                    "user_text": row["data"]["original_text"], "request": error.request,
+                    "partial_response": error.partial_response, "provider_detail": error.provider_detail})
+                view = {**view, "provider_block": block}
+                notice = handoffs.provider_notice(block, view.get("task_language", "English"))
+                notice += "\n\n" + ("La tarea y la decisión pendiente no cambiaron." if spanish else
+                                        "The task and pending decision are unchanged.")
+                row = store.update("conversation", row, snapshot=view)
             current = store.update("conversation", row, output=notice, generation_failed=True)
             try:
                 receipt = deliver(current)
@@ -141,8 +152,13 @@ def flow_pending(store, state, repo):
 def delivery(store, row, repo, directory, backend):
     import message_delivery
     view = row["data"]["snapshot"]
+    files = []
+    if view.get("provider_block"):
+        import diagnostics
+        files.append(diagnostics.report(store, view, repo, directory, "parallel conversation",
+            detail=row["data"]["output"], identity="conversation-failure:" + row["id"]))
     return message_delivery.deliver(store, view, repo, directory, backend,
-        "Task conversation", row["data"]["output"], view.get("thread_id"),
+        "Task conversation", row["data"]["output"], view.get("thread_id"), files,
         identity="conversation:" + row["id"])
 
 
@@ -175,6 +191,10 @@ def snapshot(store, state, repo):
             "archive_path", "pr_url", "execution_checkpoint_id", "workspace_path",
             "last_effective_progress", "quality_report", "proposal_snapshot")
     view = _safe(copy.deepcopy({k: state[k] for k in keys if k in state}))
+    if state.get("stuck_error") or state.get("reported_check_plan_error") or state.get("provider_block"):
+        import diagnostics
+        view["failure_context"] = _safe(copy.deepcopy(state.get("failure_context") or
+            diagnostics.failure_context(store, state, repo)))
     view["execution_task_id"] = store.task_identity(state, repo)
     view["decision_version"] = decision_version(state)
     view["captured_at"] = time.time()

@@ -87,6 +87,114 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertNotIn("verified_snapshot", self.state["workspace"])
         self.assertEqual(self.state["state"], "VERIFYING")
 
+    def bad_plan(self):
+        return 'CHECK_PLAN: {"version":1,"checks":[{"id":"zip-browser","argv":["playwright","test","zip.spec.ts"],"timeout_millis":900}]}'
+
+    def test_bad_plan_repairs_invoke_provider_three_times_not_one_cached_result(self):
+        bad = self.bad_plan()
+        self.state.update(state="VERIFYING", pending_feedback="Keep ZIP scope; repair only the check contract.",
+            reported_check_plan_error=main.check_plan.reported_error(bad),
+            reported_check_plan=[{"id": "existing", "argv": ["test"]}])
+        self.addCleanup(main.agent_runner.set_task_context, None)
+        with patch.object(main.config, "AGENT", "opencode"), patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3), \
+             patch.object(main.agent_runner, "_working_opencode", return_value=main.agent_runner.OpenCodeResult("repair", bad)) as provider, \
+             patch("checks.execute_plan") as execute:
+            for attempt in range(3):
+                runner.verify(self.state)
+                # Simulate restart after each completed tick, including durable counters.
+                main.save_state(self.state)
+                self.state = json.loads(main.config.STATE_PATH.read_text())
+        self.assertEqual(provider.call_count, 3)
+        prompts = [call.args[0] for call in provider.call_args_list]
+        self.assertEqual(len(set(prompts)), 3)
+        for number, prompt in enumerate(prompts, 1):
+            self.assertIn(f"attempt {number}/3", prompt)
+            self.assertIn("timeout_millis", prompt)
+            self.assertIn(self.state["pending_feedback"], prompt)
+        execute.assert_not_called()
+        self.assertEqual(self.state["state"], "WAIT_STUCK")
+        self.assertIn("timeout_millis", self.state["stuck_error"])
+        self.assertEqual(self.state["reported_check_plan"][0]["id"], "existing")
+
+    def test_delivery_failure_replays_same_completed_attempt_before_advancing(self):
+        bad = self.bad_plan()
+        self.state.update(state="VERIFYING", reported_check_plan_error=main.check_plan.reported_error(bad))
+        self.addCleanup(main.agent_runner.set_task_context, None)
+        with patch.object(main.config, "AGENT", "opencode"), \
+             patch.object(main.agent_runner, "_working_opencode", return_value=main.agent_runner.OpenCodeResult("repair", bad)) as provider:
+            with patch.object(main, "handle_result", side_effect=RuntimeError("delivery interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "delivery interrupted"):
+                    runner.verify(self.state)
+            self.state = json.loads(main.config.STATE_PATH.read_text())
+            runner.verify(self.state)
+            self.assertEqual(provider.call_count, 1)
+            self.assertEqual(self.state["check_plan_repair_round"], 1)
+            runner.verify(self.state)
+        self.assertEqual(provider.call_count, 2)
+
+    def test_exhausted_plan_repairs_escalate_without_fourth_provider_call(self):
+        self.state.update(state="VERIFYING", reported_check_plan_error="zip-browser: unsupported timeout_millis",
+                          check_plan_repair_round=3)
+        with patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 3), patch.object(runner, "turn") as turn:
+            runner.verify(self.state)
+        turn.assert_not_called()
+        self.assertEqual(self.state["state"], "WAIT_STUCK")
+
+    def test_retry_resets_plan_counter_not_errors_evidence_or_full_audit_budget(self):
+        self.state.update(state="WAIT_STUCK", stuck_return="VERIFYING", check_plan_repair_round=3,
+            check_plan_repair_revision=7, reported_check_plan_error="zip-browser: unsupported timeout_millis",
+            reported_check_plan=[{"id": "existing", "argv": ["test"]}],
+            final_check_report={"status": "indeterminate", "checks": [{"check": "unit", "status": "pass"}]})
+        store = main.phase_checkpoint.store()
+        for _ in range(2):
+            store.put("operation", task_id="task", identity="full-e2e-launch", data={})
+        main._clear_stuck(self.state, "VERIFYING")
+        self.assertEqual(self.state.get("check_plan_repair_round", 0), 0)
+        self.assertEqual(self.state["check_plan_repair_revision"], 8)
+        self.assertIn("timeout_millis", self.state["reported_check_plan_error"])
+        self.assertEqual(self.state["reported_check_plan"][0]["id"], "existing")
+        self.assertEqual(self.state["final_check_report"]["checks"][0]["status"], "pass")
+        self.assertEqual(len(store.list("operation", "task", identity="full-e2e-launch")), 2)
+
+    def test_retry_revision_prevents_replay_even_if_old_checkpoint_was_not_retired(self):
+        bad = self.bad_plan()
+        self.state.update(state="VERIFYING", reported_check_plan_error=main.check_plan.reported_error(bad))
+        self.addCleanup(main.agent_runner.set_task_context, None)
+        with patch.object(main.config, "AGENT", "opencode"), \
+             patch.object(main.agent_runner, "_working_opencode", return_value=main.agent_runner.OpenCodeResult("repair", bad)) as provider:
+            runner.verify(self.state)
+            self.state.update(state="WAIT_STUCK", stuck_return="VERIFYING")
+            # Simulate a crash before the FSM retires the completed checkpoint.
+            main._clear_stuck(self.state, "VERIFYING")
+            self.state["state"] = "VERIFYING"
+            runner.verify(self.state)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(self.state["check_plan_repair_round"], 1)
+        self.assertNotEqual(provider.call_args_list[0].args[0], provider.call_args_list[1].args[0])
+
+    def test_transport_failure_does_not_consume_a_completed_plan_repair(self):
+        bad = self.bad_plan()
+        self.state.update(state="VERIFYING", reported_check_plan_error=main.check_plan.reported_error(bad))
+        self.addCleanup(main.agent_runner.set_task_context, None)
+        with patch.object(main.config, "AGENT", "opencode"), \
+             patch.object(main.agent_runner, "_working_opencode", side_effect=[
+                 ConnectionError("provider unavailable"), main.agent_runner.OpenCodeResult("repair", bad)]) as provider:
+            with self.assertRaises(ConnectionError):
+                runner.verify(self.state)
+            self.state = json.loads(main.config.STATE_PATH.read_text())
+            self.assertEqual(self.state.get("check_plan_repair_round", 0), 0)
+            runner.verify(self.state)
+        self.assertEqual(provider.call_count, 2)
+        self.assertEqual(self.state["check_plan_repair_round"], 1)
+
+    def test_hold_preserves_repair_revision_and_clears_it_from_idle_state(self):
+        self.state["check_plan_repair_revision"] = 7
+        with patch.object(main, "_release_credentials"), patch.object(main, "_publish_progress"):
+            main._hold_task(self.state, "C123:1")
+        saved = json.loads(main.config.HOLDS_PATH.read_text())[0]["saved"]
+        self.assertEqual(saved["check_plan_repair_revision"], 7)
+        self.assertNotIn("check_plan_repair_revision", self.state)
+
     def test_question_reply_routes_without_lateral_worker(self):
         self.state.update(state="WAIT_REPLY", return_state="EXPLORING", pending_question="What scope?", thread_id="C123:1")
         with patch.object(main.gmail_client, "mark_processed"):

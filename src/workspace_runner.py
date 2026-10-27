@@ -374,17 +374,30 @@ def verify(state):
     if not state.get("archive_path") and main._verify_preflight(state):
         return
     if state.get("reported_check_plan_error"):
-        result = turn(state, "Correct your malformed check plan without repeating exploration or implementation. "
+        attempt = state.get("check_plan_repair_round", 0) + 1
+        if attempt > config.QUALITY_GATE_MAX_ROUNDS:
+            main._enter_stuck(state, "VERIFYING", state["reported_check_plan_error"]
+                              + "\nCheck-plan repair exhausted; no malformed plan was executed.")
+            return
+        result = turn(state, f"Check-plan repair attempt {attempt}/{config.QUALITY_GATE_MAX_ROUNDS}; "
+            f"recovery revision {state.get('check_plan_repair_revision', 0)}.\n"
+            "Correct only the malformed check contract; do not repeat exploration or implementation. "
             "Emit CHECK_PLAN: followed by a valid JSON object with version 1 and a checks array. "
-            "Each check needs id, argv as an array of strings, and workspace-relative cwd. "
-            "Include repository checks and shared integration/E2E checks. Do not claim verification passed.\n"
-            + state["reported_check_plan_error"])
+            "Use id, argv as an array of strings, workspace-relative cwd, and timeout in seconds. "
+            'Example: CHECK_PLAN: {"version":1,"checks":[{"id":"actual-check-id","argv":["tool","argument"],"cwd":".","timeout":900}]}\n'
+            "Kinds are auto, unit, functional or e2e; scopes are full or focused. Preserve registered checks and "
+            "actual commands/selections. Do not run full suites or claim verification passed.\n"
+            + main.prompts.fenced("check-plan validation error", state["reported_check_plan_error"])
+            + ("\n" + main.prompts.fenced_authoritative("user recovery guidance", state["pending_feedback"])
+               if state.get("pending_feedback") else ""))
         if main.handle_result(state, result, "VERIFYING"):
             return
         if state.get("reported_check_plan_error"):
-            state["check_plan_repair_round"] = state.get("check_plan_repair_round", 0) + 1
+            state["check_plan_repair_round"] = attempt
+            main.save_state(state)
             if state["check_plan_repair_round"] >= config.QUALITY_GATE_MAX_ROUNDS:
-                main._enter_stuck(state, "VERIFYING", "The agent could not produce a valid check plan; no malformed plan was executed.")
+                main._enter_stuck(state, "VERIFYING", state["reported_check_plan_error"] + "\n"
+                    f"The agent could not produce a valid check plan after {attempt} completed repair attempts; no malformed plan was executed.")
             return
         state.pop("check_plan_repair_round", None)
     plan = check_plan_for(state, context)
