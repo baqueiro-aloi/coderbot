@@ -453,6 +453,16 @@ configured email or Slack thread (optionally with `ATTACH: <path>` screenshots/v
 and resumes the same session with the reply. When an exploration reply completes the
 phase without another question, its explanation is sent to that thread before proposing.
 
+Task-thread messages are acknowledged as durably received before interpretation, without
+claiming that their instructions were applied. Routing gets only the current decision and
+bounded input references; detailed verification/history remains available to the separate
+answering session. Routing lowers configured reasoning effort to `low` (override via the
+existing `CODEBOT_OPENCODE_ROLE_EFFORTS` entry `routing`) and uses a 60-second budget, or
+the configured utility budget if longer. Coding model/effort and approval gates are unchanged.
+Classification, retry and terminal failure notices use independent, deduplicated delivery
+receipts. STATUS also shows message-processing progress. Timeouts report the effective
+inherited deadline and elapsed time, not a larger nominal coding-turn timeout.
+
 Evidence (screenshots, recordings, reports) is always routed to the task thread via that same
 `ATTACH: <path>` convention (saved under the outbox dir), in every phase — never
 committed to the target repo. Every resumed turn restates this rule. As a safety

@@ -5395,19 +5395,25 @@ def _short_status(state: dict, turn: dict, now: float) -> str:
                          f"({_fmt_dur(now - last)} ago).")
         if turn.get("process_dead"):
             lines.append("The agent process is no longer running.")
+    message_status = (parallel_conversation.status_summary(phase_checkpoint.store(), state, config.REPO_PATH)
+                      if state.get("execution_task_id") and state.get("thread_id") else "")
+    if message_status:
+        lines.append(message_status)
     for operation in operations.snapshot()[:4]:
         elapsed = _fmt_dur(now - operation["started_at"])
         lines.append(("Operación" if spanish else "Operation") + ": "
                      + f"{operation['kind']} / {operation['label']} ({elapsed}); "
                      + ("presupuesto restante" if spanish else "budget remaining")
                      + f": {operation['remaining']:.0f}s")
-    if state.get("state") in USER_SIDE_WAITS and not turn.get("active"):
-        lines.append(_ping_body(state, now, 0))
-    elif not turn.get("active") and not operations.snapshot():
-        lines.append("No hay ejecución activa; siguiente paso o reintento pendiente." if spanish else
-                     "No active execution; next step or retry pending.")
-    else:
-        lines.append("Estoy trabajando; no necesito nada de ti." if spanish else "Working; no action needed.")
+    if not message_status:
+        # An in-flight or failed message is not a request for another workflow reply.
+        if state.get("state") in USER_SIDE_WAITS and not turn.get("active"):
+            lines.append(_ping_body(state, now, 0))
+        elif not turn.get("active") and not operations.snapshot():
+            lines.append("No hay ejecución activa; siguiente paso o reintento pendiente." if spanish else
+                         "No active execution; next step or retry pending.")
+        else:
+            lines.append("Estoy trabajando; no necesito nada de ti." if spanish else "Working; no action needed.")
     return "\n".join(lines[:10])
 
 
@@ -5734,6 +5740,8 @@ def _queue_conversation(state, message_id, text):
     if fixed and row["status"] == "pending":
         parallel_conversation.save_classification(store, row, fixed)
     task_records.contact(store, state, config.REPO_PATH, message_id, state["thread_id"])
+    if _conversation_worker:
+        parallel_conversation._notify(row, "received", _conversation_worker.notify)
     gmail_client.mark_processed(message_id)
     if _conversation_worker:
         _conversation_worker.wake.set()
@@ -5807,7 +5815,12 @@ def _dispatch_conversation(state):
 
 def _deliver_conversation(row):
     return parallel_conversation.delivery(phase_checkpoint.store(), row, row["data"]["snapshot"].get("repo", config.REPO_PATH),
-                                         config.DATA_DIR, gmail_client._backend())
+                                          config.DATA_DIR, gmail_client._backend())
+
+
+def _deliver_conversation_status(row, stage):
+    return parallel_conversation.delivery(phase_checkpoint.store(), row, row["data"]["snapshot"].get("repo", config.REPO_PATH),
+        config.DATA_DIR, gmail_client._backend(), notice=stage)
 
 
 def _conversation_delivery_blocked(state):
@@ -6082,7 +6095,7 @@ def main() -> None:
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
     global _conversation_worker
     _conversation_worker = parallel_conversation.Worker(phase_checkpoint.store, config.REPO_PATH,
-                                                        agent_runner.converse, _deliver_conversation)
+        agent_runner.converse, _deliver_conversation, notify=_deliver_conversation_status)
     _conversation_worker.thread.start()
     threading.Thread(target=_status_supervisor_loop, daemon=True).start()
     log.info("codebot starting; instance=%s agent=%s repo=%s source=%s %s",

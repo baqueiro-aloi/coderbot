@@ -208,15 +208,16 @@ def _is_usage_exhausted(proc: subprocess.CompletedProcess) -> bool:
 
 
 @operations.bounded(lambda: config.AGENT_TIMEOUT_SECONDS)
-def _invoke(args: list[str], prompt: str) -> ClaudeResult:
+def _invoke(args: list[str], prompt: str, *, effort=None) -> ClaudeResult:
     global _fallback_until
-    proc, model = _invoke_with_model(args, prompt, _active_model())
+    options = {"effort": effort} if effort is not None else {}
+    proc, model = _invoke_with_model(args, prompt, _active_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc) and _fallback_model()
             and model != _fallback_model()):
         log.warning("model %s is out of usage credits; falling back to %s for %ds",
                     model, _fallback_model(), config.CLAUDE_FALLBACK_COOLDOWN_SECONDS)
         _fallback_until = time.monotonic() + config.CLAUDE_FALLBACK_COOLDOWN_SECONDS
-        proc, model = _invoke_with_model(args, prompt, _fallback_model())
+        proc, model = _invoke_with_model(args, prompt, _fallback_model(), **options)
     if (proc.returncode != 0 and _is_usage_exhausted(proc)
             and model == _fallback_model()):
         # The fallback itself is exhausted; stop pinning it so the next cycle starts
@@ -232,9 +233,10 @@ def _invoke(args: list[str], prompt: str) -> ClaudeResult:
 
 
 def _invoke_with_model(args: list[str], prompt: str,
-                       model: str) -> tuple[subprocess.CompletedProcess, str]:
+                       model: str, *, effort=None) -> tuple[subprocess.CompletedProcess, str]:
+    effort = effort if effort is not None else config.CLAUDE_EFFORT
     cmd = ["claude", *args, "-p", prompt, "--model", model,
-           "--effort", config.CLAUDE_EFFORT,
+           "--effort", effort,
            "--plugin-dir", str(config.SUPERPOWERS_PLUGIN_DIR),
            "--plugin-dir", str(config.BRIDGE_PLUGIN_DIR),
            "--plugin-dir", str(config.OPENSPEC_SKILLS_DIR),
@@ -246,7 +248,7 @@ def _invoke_with_model(args: list[str], prompt: str,
     elif config.USE_CAVEMAN:
         cmd.extend(["--plugin-dir", str(config.CAVEMAN_PLUGIN_DIR)])
     log.info("claude %s model=%s effort=%s (prompt %d chars); config %s",
-             " ".join(args) or "run", model, config.CLAUDE_EFFORT,
+             " ".join(args) or "run", model, effort,
              len(prompt), _config_report())
     proc = _run(cmd)
     if proc.returncode != 0 and _is_config_corrupt(proc.stderr):

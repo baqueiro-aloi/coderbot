@@ -197,7 +197,7 @@ class WorkspaceRunnerTests(unittest.TestCase):
 
     def test_question_reply_routes_without_lateral_worker(self):
         self.state.update(state="WAIT_REPLY", return_state="EXPLORING", pending_question="What scope?", thread_id="C123:1")
-        with patch.object(main.gmail_client, "mark_processed"):
+        with patch.object(main.gmail_client, "mark_processed"), patch.object(main, "_conversation_worker", None):
             self.assertTrue(main._queue_conversation(self.state, "reply", "Only frontend, not backend"))
         row = main.phase_checkpoint.store().list("conversation", "task")[0]
         self.assertEqual(row["data"]["route"], "flow")
