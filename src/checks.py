@@ -4,6 +4,7 @@ import subprocess
 import time
 import uuid
 import logging
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 
@@ -13,7 +14,7 @@ import check_plan
 from dataclasses import replace
 from selfheal_events import runtime_epoch
 from check_results import parse_output
-from execution_identity import digest, environment_identity, snapshot
+from execution_identity import digest, environment_identity, verification_snapshot as snapshot
 log = logging.getLogger(__name__)
 
 
@@ -32,12 +33,13 @@ def invalidate_environment(store, repo, check_ids):
                   data={"revision": environment_revision(store, repo, check_id) + 1})
 
 
-def execute_plan(plan, repo, store, task_id, *, workers=3):
+def execute_plan(plan, repo, store, task_id, *, workers=3, audit_task=None):
     plan = check_plan.normalize(plan, repo)
     # Each process takes sorted exclusive resources before launch. Preserve result
     # order for deterministic reporting, independently of completion order.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(copy_context().run, execute, check, repo, store, task_id) for check in plan]
+        kwargs = {"audit_task": audit_task} if audit_task else {}
+        futures = [pool.submit(copy_context().run, execute, check, repo, store, task_id, **kwargs) for check in plan]
         return [future.result() for future in futures]
 
 
@@ -47,7 +49,7 @@ def check_environment():
     return secret_store.environment()
 
 
-def execute(check, repo, store, task_id, *, reuse=True):
+def execute(check, repo, store, task_id, *, reuse=True, audit_task=None):
     repo = Path(repo).resolve()
     check = check_plan.normalize([check], repo)[0]
     if check_plan.is_harness(check, repo):
@@ -76,20 +78,24 @@ def execute(check, repo, store, task_id, *, reuse=True):
             preparation_error = error
     cwd = (repo / check.cwd).resolve()
     content = snapshot(repo, check.inputs)
-    environment = environment_identity(check.argv, cwd, env_keys=check.env_keys, environ=env,
-        tools={**tool_versions(check.argv, cwd), "repair_revision": environment_revision(store, repo, check.id),
+    contract = json.loads(check_plan.execution_key(check, repo))
+    versions = tool_versions(check.argv, cwd)
+    if contract["argv"][0] == "posix-script":
+        versions = {**versions, "executable": "posix-script"}
+    environment = environment_identity(contract["argv"], cwd, env_keys=check.env_keys, environ=env,
+        tools={**versions, "repair_revision": environment_revision(store, repo, check.id),
                "runtime_epoch": runtime_epoch()},
         key_path=store.path.parent / "identity.key")
     from check_baseline import dependency_snapshot, dependency_inputs
     dependencies = dependency_snapshot(repo, dependency_inputs(check, repo))
-    identity = digest({"content": content, "environment": environment, "check": check.to_dict(),
-                       "dependencies": dependencies, "version": 2})
+    identity = digest({"content": content, "environment": environment, "check": contract, "timeout": check.timeout,
+                       "dependencies": dependencies, "version": 3})
     previous = store.reusable_check(task_id, identity) if reuse and not preparation_error else None
     if previous and previous["data"]["result"]["status"] not in ("infrastructure", "unknown", "skipped"):
         log.info("check reused: %s status=%s report=%s", check.id,
                  previous["data"]["result"]["status"], previous["data"]["result"].get("report"),
                  extra={"public_progress": f"check reused: {check.id} status={previous['data']['result']['status']}"})
-        return {**previous["data"]["result"], "reused": True}
+        return {**previous["data"]["result"], "check": check.id, "reused": True}
     if (previous and previous["data"]["result"].get("reason") == "execution_timeout"
             and check_plan.is_harness(check, repo) and check.timeout >= 3600):
         # A timed-out attempt at the ceiling is not a pass and not permission to
@@ -97,6 +103,19 @@ def execute(check, repo, store, task_id, *, reuse=True):
         log.warning("check timeout budget exhausted: %s; repair before retrying", check.id,
                     extra={"public_progress": f"check blocked: {check.id} (timeout ceiling reached; repair required)"})
         return {**previous["data"]["result"], "reused": True, "timeout_budget_exhausted": True}
+    # Reserve each actual full-suite launch, not a batch. Cache hits cost nothing;
+    # crashes conservatively consume a reservation. Baselines share the feature budget.
+    if audit_task and not preparation_error and check.scope == "full" and check_plan.is_e2e(check, repo):
+        with store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            count = db.execute("SELECT COUNT(*) FROM operation WHERE task_id=? AND identity=?",
+                               (audit_task, "full-e2e-launch")).fetchone()[0]
+            if count >= 2:
+                return {"check": check.id, "status": "unknown", "failures": {},
+                        "reason": "full_e2e_budget_exhausted", "reused": False}
+            now = time.time()
+            db.execute("INSERT INTO operation VALUES(?,?,?,?,?,?,?,?)", (uuid.uuid4().hex, audit_task,
+                None, "reserved", "full-e2e-launch", now, now, json.dumps({"check": check.to_dict(), "identity": identity})))
     candidates = store.list("check_run", task_id)
     previous_check = next((r for r in candidates if isinstance(r["data"].get("check"), dict)
                            and r["data"]["check"].get("id") == check.id), None)

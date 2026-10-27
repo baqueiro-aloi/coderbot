@@ -87,7 +87,8 @@ def load_manifest(root, path=None):
     if not isinstance(checks, list) or not all(isinstance(check, dict) for check in checks):
         raise WorkspaceError("Workspace checks must be a list of objects")
     for check in checks:
-        if set(check) - {"id", "argv", "cwd", "repositories", "scope"}:
+        from check_plan import Check
+        if set(check) - (set(Check.__dataclass_fields__) | {"repositories"}):
             raise WorkspaceError("Unsupported workspace check keys")
         if not isinstance(check.get("id"), str) or not check["id"]:
             raise WorkspaceError("Workspace checks require an id")
@@ -103,6 +104,10 @@ def load_manifest(root, path=None):
             _relative(repo, "check repository")
         if check.get("scope", "full") not in ("full", "focused"):
             raise WorkspaceError("Invalid workspace check scope")
+        try:
+            Check(**{k: v for k, v in check.items() if k != "repositories"})
+        except (ValueError, TypeError) as error:
+            raise WorkspaceError("Invalid workspace check contract") from error
     if len({check["id"] for check in checks}) != len(checks):
         raise WorkspaceError("Workspace check ids must be unique")
     if not isinstance(docker, dict) or set(docker) - {"context", "host_root", "compose_files"}:

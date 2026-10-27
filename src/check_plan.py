@@ -26,9 +26,12 @@ class Check:
     # Optional checks (e.g. live calls to a third-party API) are skipped, not failed,
     # when any of their env_keys has no value.
     optional: bool = False
+    kind: str = "auto"
 
     def __post_init__(self):
         self.optional = self.optional is True  # agent JSON may send "no"/"false" strings
+        if self.kind not in ("auto", "unit", "functional", "e2e"):
+            raise ValueError("Invalid check kind")
         if not self.id or not self.argv or not all(isinstance(x, str) and x for x in self.argv):
             raise ValueError("Check requires id and nonempty argv strings")
         if (not isinstance(self.timeout, (int, float)) or isinstance(self.timeout, bool)
@@ -46,6 +49,8 @@ class Check:
         if not value["optional"]:
             # Omitted when false so state written by this code still loads in older code.
             value.pop("optional")
+        if value["kind"] == "auto":
+            value.pop("kind")
         return value
 
     def missing_credentials(self, environ) -> list[str]:
@@ -77,6 +82,19 @@ def execution_key(check, repo):
     for key in ("id", "timeout", "resources"):
         value.pop(key, None)
     value["cwd"] = str((Path(repo) / check.cwd).resolve())
+    # Only canonicalize plain invocations of an explicitly POSIX-shell script;
+    # shell flags, different selectors and non-POSIX scripts retain their identity.
+    argv = list(check.argv)
+    index = 1 if Path(argv[0]).name in {"sh", "bash"} and len(argv) > 1 else 0
+    script = Path(value["cwd"]) / argv[index]
+    try:
+        if not argv[index].startswith("-") and script.is_file():
+            with script.open("rb") as stream:
+                posix = stream.readline(128).strip() == b"#!/bin/sh"
+            if posix:
+                value["argv"] = ["posix-script", str(script.resolve()), *argv[index + 1:]]
+    except OSError:
+        pass
     return json.dumps(value, sort_keys=True)
 
 
@@ -84,6 +102,40 @@ def is_harness(check, repo):
     cwd = (Path(repo) / check.cwd).resolve()
     return any((cwd / arg).resolve().name == "run.sh" and
                (cwd / arg).resolve().parent.name == "e2e" for arg in check.argv if not arg.startswith("-"))
+
+
+def is_e2e(check, repo):
+    # Known browser/harness commands cannot be relabeled as cheap unit checks.
+    if (check.kind == "e2e" or is_harness(check, repo) or check.reporter == "playwright"
+            or any(Path(arg).name in {"playwright", "e2e", "e2e-tests", "browser-tests"} for arg in check.argv)):
+        return True
+    cwd = Path(repo) / check.cwd
+    text = " ".join(check.argv)
+    if "npm" in check.argv:
+        try:
+            scripts = json.loads((cwd / "package.json").read_text()).get("scripts", {})
+            text += " " + " ".join(scripts.get(name, "") for name in check.argv)
+        except (OSError, ValueError):
+            pass
+    for arg in check.argv:
+        path = cwd / arg
+        if path.suffix == ".sh" and path.is_file():
+            with path.open("rb") as stream:
+                text += " " + stream.read(65536).decode(errors="replace")
+    return bool(re.search(r"\bplaywright\s+test\b|(?:^|/)e2e/run\.sh\b", text))
+
+
+def has_e2e_selection(check):
+    for i, arg in enumerate(check.argv):
+        option, equal, inline = arg.partition("=")
+        if equal and option in {"--grep", "--test-filter"} and inline not in {"*", ".*", ".+", "^", "$", ""}:
+            return True
+        if arg in {"--grep", "-g", "--test-filter", "-k"} and i + 1 < len(check.argv):
+            if check.argv[i + 1] not in {"*", ".*", ".+", "^", "$", ""}:
+                return True
+        if any(part in Path(arg).name for part in (".spec.", ".test.", "test_")) and not any(c in arg for c in "*?"):
+            return True
+    return False
 
 
 def normalize(checks, repo):
@@ -94,7 +146,7 @@ def normalize(checks, repo):
         previous = unique.get(key)
         resources = set(check.resources) | (set(previous.resources) if previous else set())
         timeout = max(check.timeout, previous.timeout if previous else 0)
-        if is_harness(check, repo):
+        if is_e2e(check, repo):
             resources.add("harness:" + str(Path(repo).resolve()))
             timeout = min(3600, max(1800, timeout))
         unique[key] = replace(check, id=previous.id if previous else check.id,
@@ -157,6 +209,18 @@ def reported(output):
 def reported_error(output):
     """A rejected plan is not successful verification or an empty valid plan."""
     return _reported(output)[1]
+
+
+def remember(state, output):
+    """Supplement durable registrations; diagnostic plans cannot erase full checks."""
+    reported, error = _reported(output)
+    if error:
+        state["reported_check_plan_error"] = error
+    elif re.search(r"(?m)^CHECK_PLAN:", output):
+        state.pop("reported_check_plan_error", None)
+        current = {entry["id"]: entry for entry in state.get("reported_check_plan", [])}
+        current.update({check.id: check.to_dict() for check in reported})
+        state["reported_check_plan"] = list(current.values())
 
 
 def discover(repo):

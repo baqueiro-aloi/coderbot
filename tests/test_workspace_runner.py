@@ -352,6 +352,49 @@ class WorkspaceRunnerTests(unittest.TestCase):
         self.assertTrue(self.state["final_check_report"]["source_changed"])
         self.assertNotIn("verified_snapshot", self.state["workspace"])
 
+    def test_missing_focused_selection_recovery_is_bounded(self):
+        self.state.update(state="VERIFYING", reported_check_plan=[{"id": "full", "argv": ["playwright", "test"], "kind": "e2e"}])
+        result = SimpleNamespace(session_id="session", output="No selection", question=None, attachments=[])
+        with patch.object(main.config, "QUALITY_GATE_MAX_ROUNDS", 2), \
+             patch.object(runner, "turn", return_value=result) as turn, \
+             patch.object(main, "_enter_stuck") as stuck, patch("checks.execute_plan") as run:
+            for _ in range(3):
+                runner.verify(self.state)
+        run.assert_not_called()
+        self.assertEqual(turn.call_count, 2)
+        stuck.assert_called_once()
+
+    def test_confirmed_local_baseline_debt_is_nonblocking_but_composite_unknown_is_not(self):
+        from check_plan import Check
+        failed = {"status": "fail", "failures": {"old": "baseline"}}
+        with patch.object(main.final_checks, "baseline_result", return_value=failed):
+            local = runner.workspace_gate(Check("api-unit", ["test"], cwd="api", inputs=["api"]), failed,
+                                          self.state, self.context, main.phase_checkpoint.store())
+            shared = runner.workspace_gate(Check("integration", ["test"]), failed, self.state,
+                                           self.context, main.phase_checkpoint.store())
+        self.assertEqual(local["status"], "pass")
+        self.assertEqual(shared["status"], "indeterminate")
+        self.assertEqual(shared["reason"], "immutable_composite_baseline_missing")
+
+    def test_publication_waits_for_pending_conversation_changes(self):
+        self.verified()
+        with patch.object(main, "_conversation_delivery_blocked", return_value=True), \
+             patch.object(runner, "git") as git_calls, patch.object(runner, "gh") as gh:
+            runner.publish(self.state)
+        git_calls.assert_not_called()
+        gh.assert_not_called()
+
+    def test_planning_archive_does_not_invalidate_implementation_publication_identity(self):
+        from execution_identity import verification_snapshot
+        before = verification_snapshot(self.root)
+        path = self.root / "openspec/changes/feature/tasks.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("- [x] Done\n")
+        self.assertEqual(verification_snapshot(self.root), before)
+        explicit = verification_snapshot(self.root, ["openspec"])
+        path.write_text("- [x] Done\n- [ ] Newly approved behavior\n")
+        self.assertNotEqual(verification_snapshot(self.root, ["openspec"]), explicit)
+
 
 if __name__ == "__main__":
     unittest.main()

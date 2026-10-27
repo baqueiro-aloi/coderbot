@@ -13,6 +13,7 @@ import handoffs
 import turn_control
 import operations
 import check_plan
+import prompts
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ or read raw JSON to discover what you are asking. Attach logs/specs/full technic
 reports as supporting material, not as a replacement for the conversation.
 """
 
-SENTINEL_CONTRACT = f"""
+SENTINEL_CONTRACT = prompts.MINIMAL_CHANGE_POLICY + prompts.TESTING_POLICY + f"""
 You are running headlessly with no interactive user. If at any point you need
 the user to answer a question or make a decision, do NOT ask interactively.
 Instead, END your response with a line starting exactly with `{SENTINEL}`

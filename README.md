@@ -315,13 +315,34 @@ tests. The current documents and staged diff are backed up outside the repositor
 under `data/verification-recovery/` before any replacement. Review legitimate spec
 changes first; omit this option when they must be kept and reconcile them manually.
 
-Implementation/review use focused checks; the deterministic runner owns complete
-final checks and compares identifiable failures against the immutable `base_sha`.
+Top engineering priority: implement the requested behavior with as little code as
+possible. Prefer reuse, simplification and justified net code removal; preserve
+existing functionality, tests, readability and safety. Line-count tricks do not count.
+
+With `CODEBOT_DETERMINISTIC_CHECKS=true` (default), testing is staged: extensive
+unit/functional tests during implementation, genuinely
+selected focused E2E once implementation is ready, then controller-owned full E2E
+regression audits. E2E plans declare `kind: "e2e"`, focused plans declare
+`scope: "focused"`, and a structured reporter must prove positive test execution
+(`playwright`, `junit`, or `json` with `ran`). Missing/empty focused evidence blocks
+the full audit. At most two actual full E2E launches per task are admitted, including
+baseline executions; reservations survive crashes and cache hits cost nothing.
+Planning completion/archive alone does not invalidate code checks. Changed approved
+requirements, design or task text still require reconciliation; approval fingerprints
+ignore checkboxes, not intent. Agents must not launch full or baseline suites themselves.
+
+The deterministic runner compares identifiable failures against immutable `base_sha`.
 Results are reused only with matching content, command, tools and declared
 environment. Unknown failures and incomparable baseline environments do not pass.
 The default response to every failed/unknown/infrastructure check is diagnose and
-implement a fix, including inherited failures, not ask the user what to do or repeat
-the same command blindly. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
+repair approved behavior or operational prerequisites, not expand scope to fix
+unrelated product debt or repeat the same command blindly. Confirmed baseline-only
+failures do not block the regression gate: `status` can be `pass` while raw
+`suite_status` remains `fail`. New/worsened failures, unknown attribution and missing
+required feature evidence still block. Workspace-local checks can use isolated
+repository baselines only with explicitly repository-local inputs; shared/composite
+failures remain unresolved without an immutable composite baseline. Agent prose or
+being "outside scope" is not baseline evidence. `REPAIR_CHECKS` reads actual feature/baseline logs, repairs
 declared dependencies in the check's interpreter and fixes approved code/test/runner
 behavior without requiring SSH or manual bot edits. The controller then reruns only
 affected invalidated checks; unaffected valid results remain reusable. Agent prose

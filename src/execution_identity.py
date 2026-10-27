@@ -35,13 +35,23 @@ def environment_identity(argv, cwd, *, env_keys=(), environ=None, tools=None, ke
                    "environment": private, "tools": tools or {}})
 
 
-def snapshot(repo, inputs=None):
+def snapshot(repo, inputs=None, *, exclude=()):
     repo = Path(repo).resolve()
     if not (repo / ".git").exists():
         # Workspace roots have no Git index. Child Git roots and shared source
         # files all contribute; dependency changes invalidate integration evidence.
-        return workspace_snapshot(repo, inputs)
-    return digest(_repository_entries(repo, inputs or ["*"]))
+        return workspace_snapshot(repo, inputs, exclude=exclude)
+    return digest(_without(_repository_entries(repo, inputs or ["*"]), exclude))
+
+
+def _without(entries, exclude):
+    return [entry for entry in entries if not any(entry[0] == p.rstrip("/") or entry[0].startswith(p.rstrip("/") + "/") for p in exclude)]
+
+
+def verification_snapshot(repo, inputs=None):
+    """Planning completion/archive is not a code change; scope has its own gate."""
+    explicit_planning = inputs and any(p == "openspec" or p.startswith("openspec/") for p in inputs)
+    return snapshot(repo, inputs, exclude=() if explicit_planning else ("openspec",))
 
 
 def _repository_entries(repo, inputs, prefix=""):
@@ -74,7 +84,7 @@ def _repository_entries(repo, inputs, prefix=""):
     return selected
 
 
-def workspace_snapshot(root, inputs=None):
+def workspace_snapshot(root, inputs=None, *, exclude=()):
     from workspace import EXCLUDED_DIRS as caches
     root = Path(root).resolve()
     selected = []
@@ -101,4 +111,4 @@ def workspace_snapshot(root, inputs=None):
                     continue
                 selected.append((name, full.stat().st_mode & 0o111, hashlib.sha256(full.read_bytes()).hexdigest()))
     walk(root)
-    return digest(selected)
+    return digest(_without(selected, exclude))

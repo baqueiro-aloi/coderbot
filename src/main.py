@@ -436,6 +436,7 @@ def handle_result(state: dict, result, phase: str) -> bool:
     """
     state["session_id"] = result.session_id
     requested = check_plan.reported(result.output)
+    check_plan.remember(state, result.output)
     if config.TARGET_MODE == "workspace":
         import workspace_runner
         workspace_runner.remember_checks(state, result.output)
@@ -443,9 +444,13 @@ def handle_result(state: dict, result, phase: str) -> bool:
         requested = check_plan.relax(requested, _skipped_credentials(state))
         database = phase_checkpoint.store()
         task_id = database.task_identity(state, config.REPO_PATH)
-        outcomes = checks.execute_plan(requested, config.REPO_PATH, database, task_id)
-        state["focused_check_results"] = outcomes
-        state["reported_check_plan"] = [check.to_dict() for check in requested]
+        # Browser checks belong to the staged final gate, never an implementation,
+        # question or review response. Register them without launching them here.
+        cheap = [c for c in requested if not check_plan.is_e2e(c, config.REPO_PATH)]
+        outcomes = checks.execute_plan(cheap, config.REPO_PATH, database, task_id) if cheap else []
+        state["focused_check_results"] = [{**r, "gate": final_checks.gate(c, r, state, config.REPO_PATH, database)}
+                                          for c, r in zip(cheap, outcomes)]
+        check_plan.remember(state, "CHECK_PLAN: " + json.dumps({"version": 1, "checks": [check.to_dict() for check in requested]}))
     state.pop("kick_pending", None)
     log.debug("[%s] session=%s output=%d chars", phase, result.session_id, len(result.output))
     _transcript_append(state, f"\n## {phase} — {time.strftime('%Y-%m-%d %H:%M:%S %Z')}\n\n"
@@ -1215,6 +1220,7 @@ def do_approval_reply(state: dict, reply: str) -> None:
         trail(state, "Proposal approved by the user", reply)
         replanning.approve(state, current)
         state["approved_task_inventory"] = task_phases.inventory(config.REPO_PATH, state["slug"])
+        state["approved_scope_fingerprint"] = proposal_package.scope_fingerprint(current_files)
         state.pop("verified_task_inventory", None)
         announce_milestone(state, "implementing", "Proposal approved; implementation is starting.")
         return
@@ -1456,6 +1462,14 @@ def _verification_blocked(state: dict, kind: str, detail: str) -> None:
 
 def _scope_drift(state: dict) -> bool:
     path = config.REPO_PATH / "openspec/changes" / _validated_slug(state["slug"]) / "tasks.md"
+    if state.get("approved_scope_fingerprint"):
+        directory = (_validated_archive_path(state["archive_path"], state["slug"])
+                     if state.get("archive_path") else path.parent)
+        current = proposal_package.scope_fingerprint(proposal_package.collect_directory(directory))
+        if current != state["approved_scope_fingerprint"]:
+            _verification_blocked(state, "scope drift", "Requirements, design or task text changed after approval. "
+                                  "Completion checkboxes and archival do not require reapproval; changed approved intent does.")
+            return True
     if not path.is_file():
         return False
     actual = task_phases.inventory(config.REPO_PATH, state["slug"])
@@ -1495,7 +1509,7 @@ def _verify_requested_checks(state: dict, result) -> bool:
     if not check_plan.reported(result.output):
         return False
     failed = [check for check in state.get("focused_check_results", [])
-              if check["status"] not in ("pass", "skipped")]
+               if check.get("gate", {}).get("status") != "pass" and check["status"] not in ("pass", "skipped")]
     if not failed:
         return False
     report = {"status": "fail", "checks": [dict(check, gate={"status": "indeterminate"
@@ -1611,7 +1625,7 @@ def _complete_internal_review(state: dict, result) -> None:
         return
     if check_plan.reported(result.output):
         failed = [check for check in state.get("focused_check_results", [])
-                  if check["status"] not in ("pass", "skipped")]
+                  if check.get("gate", {}).get("status") != "pass" and check["status"] not in ("pass", "skipped")]
         if failed:
             report = {"status": "fail", "checks": [dict(check, gate={"status": "fail",
                       "regressions": list(check.get("failures", {})), "preexisting": []}) for check in failed]}
@@ -1670,7 +1684,7 @@ def do_e2e(state: dict) -> None:
         state.pop("check_repair", None)
         state.pop("final_repair_round", None)
         state.pop("final_check_round", None)
-        state["e2e_passed"] = bool(state.get("has_e2e_harness")) and not any(
+        state["e2e_passed"] = report.get("suite_status") == "pass" and bool(state.get("has_e2e_harness")) and not any(
             w.get("scope") == "e2e:general" for w in state.get("check_waivers", []))
         if state.get("quality_report", {}).get("deferred"):
             _commit_final_check_tasks(state)
@@ -2180,6 +2194,8 @@ def _publish_existing_pr(state: dict) -> None:
 
 
 def do_open_pr(state: dict) -> None:
+    if _scope_drift(state):
+        return
     if _conversation_delivery_blocked(state):
         return
     if not state.get("archive_path"):
@@ -3083,7 +3099,7 @@ def resolve_review_thread(thread_id: str) -> bool:
 
 def do_merge_reply(state: dict, reply: str) -> None:
     if re.fullmatch(r"(?i)\s*(merge(?: anyway)?|fusiona(?: de todos modos)?)[.!]?\s*", reply):
-        verdict = {"action": "merge", "force": True}
+        verdict = {"action": "merge", "force": bool(re.search(r"(?i)anyway|de todos modos", reply))}
     else:
         result = agent_runner.run(prompts.render(prompts.CLASSIFY_PR_REPLY, reply=reply)
                                   + handoffs.classification_context(state),
@@ -3241,18 +3257,13 @@ def _pr_head_moved(state: dict, expected: str, head: str | None) -> bool:
 
 
 def _gh_squash_merge(pr_url: str, expected: str | None) -> subprocess.CompletedProcess:
-    """`gh pr merge --squash`, pinned to `expected` when known. A gh too old for
-    --match-head-commit gets one retry without it rather than a permanent failure."""
+    """A client incapable of pinning the reviewed head must fail closed."""
     command = ["gh", "pr", "merge", pr_url, "--squash"]
     run = lambda args: subprocess.run(args, cwd=config.REPO_PATH, capture_output=True, text=True,
                                       timeout=config.SUBPROCESS_TIMEOUT_SECONDS)
     if not expected:
         return run(command)
-    merge = run(command + ["--match-head-commit", expected])
-    if merge.returncode != 0 and "unknown flag" in (merge.stderr or "").lower():
-        log.warning("gh does not support --match-head-commit; merging without the pin")
-        merge = run(command)
-    return merge
+    return run(command + ["--match-head-commit", expected])
 
 
 def _finish_address_pr_threads(state: dict) -> None:
@@ -4742,6 +4753,7 @@ def _enter_stuck(state: dict, failed_state: str, detail: str) -> None:
 def _clear_stuck(state: dict, failed_state: str) -> None:
     if state.get("workspace"):
         state["workspace"].pop("harness_repair_round", None)
+        state["workspace"].pop("verification_rounds", None)
     # return_state is deliberately KEPT: when resuming WAIT_REPLY it still points at the
     # phase whose question is pending, and handle_result refreshes it on new questions.
     if "failures" in state:

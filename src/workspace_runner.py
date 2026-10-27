@@ -14,7 +14,7 @@ import subprocess
 import config
 import workspace
 import workspace_state
-from execution_identity import snapshot
+from execution_identity import verification_snapshot as snapshot
 
 
 def target():
@@ -90,6 +90,7 @@ def record_changes(state, context, before):
 
 
 def instructions(state, context):
+    import prompts
     branches = {repo.relative_path: {"base": repo.base_branch,
                 "branch": state["workspace"]["repositories"].get(repo.relative_path, {}).get("branch")
                           or state["branch"]} for repo in context.repositories}
@@ -103,6 +104,7 @@ def instructions(state, context):
             "Use the root openspec/ for the shared feature plan; include repository paths in tasks. "
             "Adding another repository does not require selection approval. Honor the current functional phase.\n"
             + json.dumps(branches, sort_keys=True)
+            + "\n" + prompts.MINIMAL_CHANGE_POLICY + prompts.TESTING_POLICY
             + "\nFor verification emit CHECK_PLAN with explicit commands and workspace-relative cwd; "
               "include repository checks AND a root integration/E2E check. Never invent passing evidence. "
               "Do not run development-stack cleanup or prune shared Docker resources.\n")
@@ -320,15 +322,7 @@ def run_phase(state):
 
 def remember_checks(state, output):
     import check_plan
-    if error := check_plan.reported_error(output):
-        state["reported_check_plan_error"] = error
-        return
-    reported = check_plan.reported(output)
-    if reported:
-        state.pop("reported_check_plan_error", None)
-        current = {entry["id"]: entry for entry in state.get("reported_check_plan", [])}
-        current.update({check.id: check.to_dict() for check in reported})
-        state["reported_check_plan"] = list(current.values())
+    check_plan.remember(state, output)
 
 
 def complete_implementation(state, result):
@@ -339,9 +333,12 @@ def complete_implementation(state, result):
     if plan["approval"]:
         main._verification_blocked(state, "approval", "\n".join(plan["approval"]))
     elif plan["implementation"]:
+        if not verification_attempt(state, "implementation", "Approved implementation tasks remain incomplete"):
+            return
         state["implementation_feedback"] = "Complete pending approved tasks:\n" + "\n".join(plan["implementation"])
         state["state"] = "IMPLEMENTING"
     else:
+        state["workspace"].get("verification_rounds", {}).pop("implementation", None)
         state.pop("implementation_feedback", None)
         state["state"] = "VERIFYING"
 
@@ -357,7 +354,7 @@ def check_plan_for(state, context):
                                 inputs=[(Path(name) / path).as_posix() for path in check.inputs]))
     plan.extend(check_plan.discover(context.root))
     for entry in json.loads(context.manifest.checks_json):
-        plan.append(check_plan.Check(**entry))
+        plan.append(check_plan.Check(**{k: v for k, v in entry.items() if k != "repositories"}))
     plan.extend(check_plan.Check(**entry) for entry in state.get("reported_check_plan", []))
     unique = {}
     for check in plan:
@@ -367,13 +364,15 @@ def check_plan_for(state, context):
             check = replace(check, resources=sorted(set(previous.resources) | set(check.resources)),
                             timeout=max(previous.timeout, check.timeout))
         unique[check.id] = check
-    return check_plan.normalize([check for check in unique.values() if check.scope == "full"], context.root)
+    return check_plan.normalize(list(unique.values()), context.root)
 
 
 def verify(state):
     import main
     import checks
     context = target()
+    if not state.get("archive_path") and main._verify_preflight(state):
+        return
     if state.get("reported_check_plan_error"):
         result = turn(state, "Correct your malformed check plan without repeating exploration or implementation. "
             "Emit CHECK_PLAN: followed by a valid JSON object with version 1 and a checks array. "
@@ -390,6 +389,8 @@ def verify(state):
         state.pop("check_plan_repair_round", None)
     plan = check_plan_for(state, context)
     if not plan or not any(check.cwd in (".", "e2e") for check in plan):
+        if not verification_attempt(state, "shared_plan", "No runnable shared integration check was supplied"):
+            return
         result = turn(state, "Inspect the whole feature and run cross-repository verification. "
             "Emit CHECK_PLAN for each affected repository and a root/shared integration or E2E check. "
             "Include runnable commands and workspace-relative cwd. Do not claim checks passed without running them. "
@@ -422,12 +423,39 @@ def verify(state):
         return
     state["workspace"].pop("harness_repair_round", None)
     before = snapshot(context.root)
-    outcomes = checks.execute_plan(plan, context.root, main.phase_checkpoint.store(), state["execution_task_id"])
-    failed = [outcome for outcome in outcomes if outcome["status"] not in ("pass", "skipped") or outcome.get("zero_tests")]
+    import staged_checks
+    store = main.phase_checkpoint.store()
+    staged = staged_checks.run(state, plan, context.root, store,
+        evaluate=lambda c, r: workspace_gate(c, r, state, context, store))
+    outcomes = staged["checks"]
+    if staged["stage"] in ("needs_focused_e2e", "full_e2e_budget_exhausted"):
+        state["final_check_report"] = {"status": "indeterminate", "stage": staged["stage"], "checks": outcomes}
+        if staged["stage"] == "full_e2e_budget_exhausted":
+            main._enter_stuck(state, "VERIFYING", "The two full E2E regression audits have been consumed. "
+                "Focused feature evidence is preserved; the broad audit is not green. "
+                "Do not repeat an already answered scope decision or expand unrelated product functionality. "
+                "Recorded audit failures require attribution/repair before publication, not another identical full run.")
+            return
+        if not verification_attempt(state, "focused_selection", "A genuinely selected focused E2E check is still missing"):
+            return
+        result = turn(state, main.prompts.TESTING_POLICY + "\nController stage: " + staged["stage"] +
+            "\nProvide explicit focused E2E selections for the approved feature with kind=e2e and scope=focused. "
+            "Declare a structured reporter and prove a positive executed-test count; a filename/zero exit alone is insufficient. "
+            "Do not run or re-register the full suite to evade its two-run budget. Preserve all full-suite tests. "
+            "Do not repeat already answered scope questions. Report existing regression-audit failures separately; "
+            "do not claim a green audit or expand product scope. Emit CHECK_PLAN for cheap/focused diagnostics.")
+        main.handle_result(state, result, "VERIFYING")
+        return
+    state["workspace"].get("verification_rounds", {}).pop("focused_selection", None)
+    failed = main.check_repair.unresolved({"checks": outcomes})
     after = snapshot(context.root)
-    state["final_check_report"] = {"status": "fail" if failed or before != after else "pass", "checks": outcomes,
-                                   "snapshot": after, "source_changed": before != after}
+    state["final_check_report"] = main.final_checks.report(staged, context.root)
+    state["final_check_report"].update(source_changed=before != after)
+    if before != after:
+        state["final_check_report"]["status"] = "indeterminate"
     if failed:
+        if not verification_attempt(state, "failures", "Verification remains unresolved: " + json.dumps(failed)):
+            return
         result = turn(state, "Fix these verification failures within the approved feature; do not hide or skip tests.\n"
                        + "The controller deduplicates identical checks, locks shared E2E execution, and manages bounded timeouts. "
                        "Do not ask the user to configure the controller or approve a timeout increase. "
@@ -444,6 +472,20 @@ def verify(state):
         return
     if before != after:
         raise workspace.WorkspaceError("Source changed during workspace checks; verification must run again")
+    if staged["stage"] != "complete":
+        # No prefix of successful checks can stand in for the remaining stages.
+        verification_attempt(state, "incomplete_stage", "Required stage remains incomplete: " + staged["stage"])
+        return
+    path = context.root / "openspec/changes" / state["slug"] / "tasks.md"
+    if not state.get("archive_path") and path.is_file():
+        pending = main.task_phases.inspect(context.root, state["slug"])
+        if pending["implementation"] or pending["verification"]:
+            if not verification_attempt(state, "tasks", "Approved implementation/evidence tasks remain unresolved"):
+                return
+            result = turn(state, "Complete/reconcile these approved tasks using real focused evidence. "
+                "Do not mark missing evidence complete, expand scope, or rerun full E2E.\n" + json.dumps(pending))
+            main.handle_result(state, result, "VERIFYING")
+            return
     state["workspace"]["verified_snapshot"] = before
     state["workspace"]["verification_repositories"] = [repo.relative_path for repo in context.repositories]
     if state["workspace"].get("reviewed_snapshot") != before:
@@ -464,6 +506,42 @@ def verify(state):
             return
         state["workspace"]["reviewed_snapshot"] = before
     state["state"] = "ARCHIVING" if not state.get("archive_path") else "OPEN_PR"
+    state["workspace"].pop("verification_rounds", None)
+
+
+def verification_attempt(state, kind, detail):
+    """Bound successful ticks that make no verified progress, including replayed turns."""
+    import main
+    rounds = state["workspace"].setdefault("verification_rounds", {})
+    rounds[kind] = rounds.get(kind, 0) + 1
+    if rounds[kind] > config.QUALITY_GATE_MAX_ROUNDS:
+        main._enter_stuck(state, state["state"], detail + "; bounded automatic recovery exhausted. Work and evidence are preserved.")
+        return False
+    return True
+
+
+def workspace_gate(check, result, state, context, store):
+    """Repository-local attribution; composite checks need immutable shared evidence."""
+    import main
+    for repo in context.repositories:
+        relative = Path(check.cwd)
+        if relative == Path(repo.relative_path) or Path(repo.relative_path) in relative.parents:
+            record = state["workspace"]["repositories"].get(repo.relative_path, {})
+            base = record.get("base_sha") or state["workspace"].get("baseline", {}).get(repo.relative_path, {}).get("head")
+            # Default workspace inputs include other repositories, so do not claim
+            # a single-repository baseline establishes a composite check's provenance.
+            if (check.inputs and all(p == repo.relative_path or p.startswith(repo.relative_path + "/") for p in check.inputs)
+                    and (check.dependency_inputs is None or all(p == repo.relative_path or p.startswith(repo.relative_path + "/")
+                                                              for p in check.dependency_inputs))):
+                local = replace(check, cwd=relative.relative_to(repo.relative_path).as_posix(),
+                    inputs=[Path(p).relative_to(repo.relative_path).as_posix() for p in check.inputs],
+                    dependency_inputs=[Path(p).relative_to(repo.relative_path).as_posix() for p in check.dependency_inputs]
+                                      if check.dependency_inputs is not None else None)
+                return main.final_checks.gate(local, result, {**state, "base_sha": base}, repo.path, store)
+    value = main.final_checks.gate(check, result, {**state, "base_sha": None}, context.root, store)
+    if result["status"] == "fail":
+        value["reason"] = "immutable_composite_baseline_missing"
+    return value
 
 
 def validate_check(context, check):
@@ -522,9 +600,9 @@ def archive(state):
     if len(matches) != 1:
         raise workspace.WorkspaceError("Cannot identify the shared local feature archive")
     state["archive_path"] = matches[0].relative_to(context.root).as_posix()
-    # Archival only changes shared planning, not the previously tested application.
-    # Verify again so published evidence has an exact composite content identity.
-    state["state"] = "VERIFYING"
+    # Planning is excluded from the implementation identity. Publication still
+    # verifies the actual source identity and refuses any concurrent code change.
+    state["state"] = "OPEN_PR"
 
 
 def _validate_pr(repo, record, value):
@@ -552,6 +630,10 @@ def status_body(state):
 def publish(state):
     import main
     context = target()
+    if main._scope_drift(state):
+        return
+    if main._conversation_delivery_blocked(state):
+        return
     bind(state, context)
     if state["workspace"].get("verified_snapshot") != snapshot(context.root):
         state["state"] = "VERIFYING"
@@ -737,6 +819,8 @@ def reply(state, reply):
         if action == "complete":
             return main._finish_task(state, "Marked complete at your request.", reset_repo=False)
         if action == "merge":
+            if main._scope_drift(state) or main._conversation_delivery_blocked(state):
+                return
             context = target()
             if state["workspace"].get("verified_snapshot") != snapshot(context.root):
                 state["state"] = "VERIFYING"

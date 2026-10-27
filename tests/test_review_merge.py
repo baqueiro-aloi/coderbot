@@ -248,8 +248,16 @@ class MergeGate(unittest.TestCase):
         merge.assert_called_once()
         finish.assert_called_once()
 
-    def test_plain_merge_and_merge_anyway_bypass_review_gate_without_classifier(self):
-        for reply in ("merge", "merge anyway", "MERGE!", "fusiona"):
+    def test_plain_merge_preserves_review_gate_without_classifier(self):
+        for reply in ("merge", "MERGE!", "fusiona"):
+            with self.subTest(reply=reply):
+                email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
+                merge.assert_not_called()
+                finish.assert_not_called()
+                email.assert_called_once()
+
+    def test_explicit_merge_anyway_bypasses_review_gate(self):
+        for reply in ("merge anyway", "fusiona de todos modos"):
             with self.subTest(reply=reply):
                 email, finish, merge = self.run_merge(self.state(), threads=[human()], reply=reply)
                 merge.assert_called_once()

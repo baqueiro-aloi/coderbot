@@ -18,7 +18,7 @@ from selfheal_events import runtime_epoch
 def dependency_snapshot(repo, inputs=None):
     repo = Path(repo)
     if not (repo / ".git").exists():
-        return snapshot(repo, inputs)
+        return snapshot(repo, inputs, exclude=("openspec",))
     files = operations.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
                            cwd=repo, timeout=30).stdout.split('\0')
     entries = []
@@ -99,10 +99,10 @@ def compare(feature, baseline, *, roots=()):
     return result
 
 
-def baseline_result(check, repo, sha, store):
+def baseline_result(check, repo, sha, store, *, audit_task=None):
     cache_task = "baseline:" + str(Path(repo).resolve()) + ":" + sha
-    from checks import tool_versions, environment_revision
-    environment = environment_identity(check.argv, repo, env_keys=check.env_keys, tools=tool_versions(check.argv, Path(repo) / check.cwd),
+    from checks import tool_versions, environment_revision, check_environment
+    environment = environment_identity(check.argv, repo, env_keys=check.env_keys, environ=check_environment(), tools=tool_versions(check.argv, Path(repo) / check.cwd),
                                        key_path=store.path.parent / "identity.key")
     dependencies = dependency_inputs(check, repo)
     current_dependencies = dependency_snapshot(repo, dependencies)
@@ -166,7 +166,8 @@ def baseline_result(check, repo, sha, store):
                  else arg for arg in check.argv]
         if prepared_python and Path(argv[0]).name in ("python", "python3"):
             argv[0] = prepared_python
-        result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False)
+        kwargs = {"audit_task": audit_task} if audit_task else {}
+        result = execute(replace(check, argv=argv), path, store, cache_task, reuse=False, **kwargs)
         result["failures"] = {signature(test, (path, repo)): signature(error, (path, repo))
                               for test, error in result.get("failures", {}).items()}
     store.record_check(cache_task, identity, result=result)

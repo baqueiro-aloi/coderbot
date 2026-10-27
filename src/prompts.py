@@ -66,7 +66,52 @@ Work in parallel whenever possible — this is a standing instruction for every 
   for every tiny task. Respect the runtime's concurrent-subagent limit.
 """
 
-ENVIRONMENT += PARALLELISM + handoffs.DECISION_INSTRUCTIONS + """
+MINIMAL_CHANGE_POLICY = """
+TOP engineering priority: implement the requested change with as little code as possible.
+Preserving requested and existing functionality, correctness, tests and safety is mandatory.
+Within those constraints, prefer reuse, simplification and removal of obsolete/duplicated
+code over adding new code. Prefer the solution with the greatest justified net code
+reduction, not the most elaborate architecture. Inspect existing abstractions first.
+Do not build speculative helpers, frameworks, wrappers or new subsystems for a local fix.
+Explain unavoidable additions and report meaningful additions/removals honestly. Never
+delete required behavior, assertions or security checks, minify code, or hide complexity
+just to improve line counts. Small, readable, well-tested changes win.
+"""
+
+TESTING_POLICY = """
+Staged testing policy (overrides generic skill advice to repeatedly run all tests):
+- Use extensive unit and functional/integration tests for new behavior, edge cases,
+  error paths and regressions. Iterate with these cheap checks throughout development.
+- Defer browser/end-to-end execution until implementation and cheap checks are ready.
+  Then run ONLY explicitly selected E2E cases for the behavior changed by this task.
+   Emit CHECK_PLAN checks with kind="e2e", scope="focused", a structured test
+   reporter (playwright, junit or json with ran), and explicit case/file
+   arguments. Positive executed-test counts are required; exit code 0 alone is not
+   E2E evidence. Add selection support to the harness if needed; preserve its full mode,
+  existing tests, assertions and coverage. Do not relabel a whole suite as focused.
+- Only after focused E2E passes may the controller run the unchanged full E2E suite
+  once or twice as a final regression audit. Agents and subagents do not run it.
+  Do not spend this budget during implementation, routine repair or administrative
+  archival. Focused evidence is not evidence that the full suite passed.
+- Investigate inherited failures against the immutable baseline and separate new
+  regressions, existing debt and environment failures. Never label something
+  pre-existing merely because it concerns another subsystem or is on main.
+  Fix in-scope defects and operational prerequisites autonomously. Do not expand
+  product scope to make unrelated historical tests green, or repeatedly ask a scope
+   question the user already answered. Carry forward that decision and report debt.
+- Confirmed pre-existing failures do not block the regression gate. New/worsened
+  failures, unknown attribution, empty focused runs and missing required evidence
+  still block. Distinguish regression-gate status from raw full-suite status.
+- Missing packages, test selection, locks, timeout settings and evidence bookkeeping
+  are engineering work, not reasons to stop for permission. Preserve valid work and
+  recorded test evidence on recovery. Do not invent checklist tasks or rebuild a
+  finished implementation to satisfy a generic OpenSpec/Superpowers workflow.
+- Ask only when genuinely new product intent, a destructive action or an unavailable
+  external credential is needed. Ask one specific question with numbered options
+  and consequences. Never ask the user to install dependencies or configure the bot.
+"""
+
+ENVIRONMENT += MINIMAL_CHANGE_POLICY + PARALLELISM + TESTING_POLICY + handoffs.DECISION_INSTRUCTIONS + """
 Failure policy for every phase: IMPLEMENT A FIX. Diagnose actual logs and repair
 code/tests/runner or execution prerequisites autonomously before asking a human.
 Do not substitute blind retries, ignoring errors or a pass claim for repair.
@@ -167,7 +212,7 @@ do NOT push, do NOT open PRs. Implementation starts only after the user approves
 a proposal.
 """
 
-PROPOSE = """Invoke `coderbot-openspec-workflow` and `openspec-propose` to formalize
+PROPOSE = MINIMAL_CHANGE_POLICY + TESTING_POLICY + """Invoke `coderbot-openspec-workflow` and `openspec-propose` to formalize
 the exploration as change $slug. Create only OpenSpec artifacts: proposal.md,
 design.md, specs, and tasks.md. Requirements:
 Explicitly tag tasks that only execute the controller's complete final suite

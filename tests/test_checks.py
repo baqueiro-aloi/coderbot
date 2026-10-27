@@ -58,3 +58,16 @@ class CheckRunnerTests(unittest.TestCase):
         xml = '<testsuite><testcase classname="X" name="a"><failure message="bad">trace</failure></testcase></testsuite>'
         self.assertEqual(parse_output(xml, 1, "junit")["failures"], {"X:a": "bad\ntrace"})
         self.assertEqual(parse_output('{"failures":{"a":"bad"}}', 1, "json")["status"], "fail")
+
+    def test_positive_execution_counts_require_recognized_reporter_output(self):
+        from check_results import parse_output
+        for output, reporter, expected in (("  2 passed\n", "playwright", 2),
+                ('{"failures": {}, "ran": 3}', "json", 3),
+                ('<testsuite><testcase name="a"/></testsuite>', "junit", 1)):
+            self.assertEqual(parse_output(output, 0, reporter)["test_count"], expected)
+        self.assertNotIn("test_count", parse_output("feature.spec.ts", 0, "text"))
+
+    def test_partial_browser_failure_inventory_cannot_be_attributed_as_baseline_only(self):
+        from check_results import parse_output
+        output = "  1) [chromium] feature.spec.ts:2:3 › scenario\nAssertionError: bad\n  2 failed\n"
+        self.assertEqual(parse_output(output, 1, "playwright")["status"], "unknown")

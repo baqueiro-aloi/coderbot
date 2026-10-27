@@ -35,7 +35,7 @@ class FinalCheckTests(unittest.TestCase):
                 report = final_checks.run({"base_sha": "a" * 40}, root, store)
             self.assertEqual(report["status"], "fail")
             self.assertEqual(report["checks"][0]["gate"]["regressions"], ["new"])
-    def test_preexisting_failures_are_attributed_but_still_repaired(self):
+    def test_confirmed_preexisting_failures_do_not_block_regression_gate(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")
             failed = {"status": "fail", "failures": {f"test_{i}": "AssertionError: baseline" for i in range(18)}}
@@ -43,7 +43,8 @@ class FinalCheckTests(unittest.TestCase):
                  patch("final_checks.checks.execute_plan", return_value=[failed]), \
                  patch("final_checks.baseline_result", return_value=failed):
                 report = final_checks.run({"branch": "b", "base_sha": "a" * 40}, root, store)
-            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["suite_status"], "fail")
             self.assertEqual(len(report["checks"][0]["gate"]["preexisting"]), 18)
     def test_without_harness_still_executes_complete_unit_suite(self):
         with tempfile.TemporaryDirectory() as root:
@@ -54,3 +55,68 @@ class FinalCheckTests(unittest.TestCase):
                 result = final_checks.run({"branch": "b"}, root, store)
             self.assertEqual(result["status"], "pass")
             run.assert_called_once()
+
+    def test_preexisting_cheap_failure_cannot_create_success_from_partial_results(self):
+        plan = [Check("unit", ["test"]), Check("full", ["playwright", "test"], kind="e2e")]
+        failed = {"status": "fail", "failures": {"old": "baseline"}}
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            with patch("final_checks.check_plan.discover", return_value=plan), \
+                 patch("checks.execute_plan", return_value=[failed]), \
+                 patch("final_checks.baseline_result", return_value=failed):
+                report = final_checks.run({"base_sha": "a" * 40}, root, store)
+        self.assertEqual(report["status"], "indeterminate")
+        self.assertEqual(report["stage"], "needs_focused_e2e")
+
+    def test_real_focused_pass_and_baseline_only_full_failure_pass_regression_gate(self):
+        focused = Check("focused", ["playwright", "test", "feature.spec.ts"], kind="e2e", scope="focused")
+        full = Check("full", ["playwright", "test"], kind="e2e")
+        failed = {"status": "fail", "failures": {"old": "baseline"}}
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"base_sha": "a" * 40, "reported_check_plan": [focused.to_dict()]}
+            with patch("final_checks.check_plan.discover", return_value=[full]), \
+                 patch("checks.execute_plan", side_effect=[[{"status": "pass", "test_count": 1}], [failed]]), \
+                 patch("final_checks.baseline_result", return_value=failed) as baseline:
+                report = final_checks.run(state, root, store)
+        self.assertEqual(report["status"], "pass")
+        self.assertEqual(report["suite_status"], "fail")
+        self.assertEqual([r["check"] for r in report["checks"]], ["focused", "full"])
+        self.assertIn("audit_task", baseline.call_args.kwargs)
+
+    def test_source_drift_blocks_even_when_every_check_passes(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch("final_checks.snapshot", side_effect=["before", "after"]), \
+                 patch("final_checks.check_plan.discover", return_value=[Check("unit", ["test"])]), \
+                 patch("checks.execute_plan", return_value=[{"status": "pass"}]):
+                report = final_checks.run({}, root, ExecutionStore(Path(root) / "db"))
+        self.assertEqual(report["status"], "indeterminate")
+        self.assertTrue(report["source_changed"])
+
+    def test_implementation_output_registers_browser_checks_without_executing_them(self):
+        import json
+        import main
+        from types import SimpleNamespace
+        result = SimpleNamespace(session_id="session", attachments=[], question=None,
+            output="CHECK_PLAN: " + json.dumps({"version": 1, "checks": [Check("full", ["playwright", "test"]).to_dict()]}))
+        state = {"state": "IMPLEMENTING", "item": "task"}
+        with patch.object(main.config, "TARGET_MODE", "repo"), patch.object(main.checks, "execute_plan") as run, \
+             patch.object(main, "_maybe_request_credential", return_value=False), patch.object(main, "_transcript_append"):
+            main.handle_result(state, result, "IMPLEMENTING")
+        run.assert_not_called()
+        self.assertEqual(state["reported_check_plan"][0]["id"], "full")
+
+    def test_approval_scope_ignores_checkboxes_not_changed_requirements(self):
+        import proposal_package
+        files = {"tasks.md": "- [ ] Implement\n", "specs/feature/spec.md": "Required behavior"}
+        approved = proposal_package.scope_fingerprint(files)
+        files["tasks.md"] = "- [x] Implement\n"
+        self.assertEqual(proposal_package.scope_fingerprint(files), approved)
+        files["specs/feature/spec.md"] = "Different behavior"
+        self.assertNotEqual(proposal_package.scope_fingerprint(files), approved)
+
+    def test_skipped_checks_never_claim_the_raw_suite_is_green(self):
+        value = final_checks.report({"stage": "complete", "checks": [
+            {"check": "optional", "status": "skipped", "gate": {"status": "pass"}}]}, "/repo")
+        self.assertEqual(value["status"], "pass")
+        self.assertEqual(value["suite_status"], "skipped")
