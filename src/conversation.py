@@ -41,11 +41,11 @@ def flush_progress() -> None:
         flush()
 
 
-def deliver(state, subject, body, thread_id=None, attachments=()):
+def deliver(state, subject, body, thread_id=None, attachments=(), *, progress=None, identity=None):
     import message_delivery
     import phase_checkpoint
     return message_delivery.deliver(phase_checkpoint.store(), state, config.REPO_PATH,
-        config.DATA_DIR, _backend(), subject, body, thread_id, attachments)
+        config.DATA_DIR, _backend(), subject, body, thread_id, attachments, progress=progress, identity=identity)
 
 
 def retry_deliveries(state):

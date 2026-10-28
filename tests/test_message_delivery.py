@@ -8,9 +8,191 @@ import message_delivery
 import slack_client
 import gmail_client
 import diagnostics
+import milestones
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_ambiguous_slack_sdk_errors_require_reconciliation_not_reposting(self):
+        from slack_sdk.errors import SlackApiError, SlackRequestError
+        for error in (SlackRequestError("Lost response"),
+                      SlackApiError("Server failure", {"error": "internal_error"}),
+                      SlackApiError("Server failure", {"error": "fatal_error"})):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(slack_client._progress_failure_status(error), "uncertain")
+        self.assertEqual(slack_client._progress_failure_status(
+            SlackApiError("Denied", {"error": "invalid_auth"})), "failed")
+
+    def test_slack_progress_is_paired_with_body_and_not_reposted_after_restart(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"execution_task_id": "task"}
+            web = Mock()
+            web.files_upload_v2.return_value = {"files": [{"id": "F-progress"}]}
+            with patch.object(slack_client, "web", return_value=web):
+                result = message_delivery.deliver(store, state, root, root, slack_client,
+                    "Implementation", "Review reported 2 issues; I'm fixing them.", "C:1",
+                    progress=milestones.image("implementing"))
+                message_delivery.retry_pending(ExecutionStore(Path(root) / "db"), state, root, slack_client)
+            self.assertTrue(result["complete"])
+            web.files_upload_v2.assert_called_once()
+            self.assertIn("2 issues", web.files_upload_v2.call_args.kwargs["initial_comment"])
+            web.chat_postMessage.assert_not_called()
+            self.assertEqual(len(result["receipts"]), 2)
+
+    def test_email_progress_is_inline_in_the_same_body_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            with patch.object(gmail_client, "send", return_value="thread") as send:
+                result = message_delivery.deliver(store, {"execution_task_id": "task"}, root, root, gmail_client,
+                    "Implementation", "Review reported 2 issues; I'm fixing them.", "thread",
+                    progress=milestones.image("implementing"))
+            self.assertTrue(result["complete"])
+            send.assert_called_once()
+            self.assertIn("2 issues", send.call_args.args[1])
+            self.assertEqual(send.call_args.kwargs["progress"], milestones.image("implementing"))
+
+    def test_uncertain_slack_pair_reconciles_exact_image_and_comment_without_resending(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"execution_task_id": "task"}
+            web = Mock()
+            web.files_upload_v2.side_effect = ConnectionError("connection lost after acceptance")
+            with patch.object(slack_client, "web", return_value=web):
+                result = message_delivery.deliver(store, state, root, root, slack_client,
+                    "Implementation", "Review reported 2 issues; I'm fixing them.", "C:1",
+                    progress=milestones.image("implementing"))
+                self.assertFalse(result["complete"])
+                envelope = store.get("delivery_receipt", result["notification_id"])["data"]["envelope"]
+                progress = envelope["attachments"][0]
+                web.conversations_replies.return_value = {"messages": [{"text": envelope["body"], "files": [
+                    {"id": "F-paired", "name": slack_client._progress_name(envelope, progress), "size": progress["size"]}]}]}
+                message_delivery.retry_pending(store, state, root, slack_client)
+            self.assertEqual(store.get("delivery_receipt", result["notification_id"])["status"], "complete")
+            web.files_upload_v2.assert_called_once()
+            web.chat_postMessage.assert_not_called()
+
+    def test_old_stage_image_cannot_confirm_a_new_transition_notice(self):
+        import attachments
+        progress = attachments.describe(milestones.image("implementing"), role="progress")
+        envelope = {"id": "new-notice", "body": "Review reported 2 issues; I'm fixing them.",
+                    "thread_id": "C:1", "attachments": [progress]}
+        web = Mock()
+        for name, text in ((progress["filename"], envelope["body"]),
+                           (slack_client._progress_name(envelope, progress), "Different transition reason")):
+            with self.subTest(name=name, text=text):
+                web.conversations_replies.return_value = {"messages": [{"text": text, "files": [
+                    {"id": "F-old", "name": name, "size": progress["size"]}]}]}
+                with patch.object(slack_client, "web", return_value=web):
+                    self.assertIsNone(slack_client.reconcile_delivery(envelope, "body", {"status": "uncertain"}))
+
+    def test_paired_notice_keeps_failed_supporting_files_truthful_and_retries_only_the_file(self):
+        for backend in (slack_client, gmail_client):
+            with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:
+                store = ExecutionStore(Path(root) / "db")
+                state = {"execution_task_id": "task"}
+                path = Path(root) / "diagnostic.txt"
+                path.write_text("details")
+                body = "Checking the changes.\nSupporting evidence: attached diagnostic.txt"
+                web = Mock()
+                web.files_upload_v2.side_effect = [RuntimeError("offline"), {"files": [{"id": "F-progress"}]}]
+                with patch.object(slack_client, "web", return_value=web), \
+                     patch.object(gmail_client, "send", side_effect=["thread", RuntimeError("offline")]) as send:
+                    outcome = message_delivery.deliver(store, state, root, root, backend, "Verification", body,
+                        "C:1", [path], progress=milestones.image("verifying"))
+                self.assertFalse(outcome["complete"])
+                if backend is slack_client:
+                    notice = web.files_upload_v2.call_args.kwargs["initial_comment"]
+                    self.assertIn("pending delivery (diagnostic.txt)", notice)
+                    web.chat_postMessage.assert_not_called()
+                else:
+                    self.assertIn("delivery queued (diagnostic.txt)", send.call_args_list[0].args[1])
+                    self.assertIn("progress", send.call_args_list[0].kwargs)
+                web.files_upload_v2.side_effect = None
+                web.files_upload_v2.return_value = {"files": [{"id": "F-file"}]}
+                with patch.object(slack_client, "web", return_value=web), \
+                     patch.object(gmail_client, "send", return_value="thread") as retry:
+                    message_delivery.retry_pending(ExecutionStore(Path(root) / "db"), state, root, backend)
+                row = store.get("delivery_receipt", outcome["notification_id"])
+                self.assertEqual(row["status"], "complete")
+                if backend is slack_client:
+                    self.assertEqual(web.files_upload_v2.call_count, 3)
+                    self.assertNotIn("initial_comment", web.files_upload_v2.call_args.kwargs)
+                else:
+                    retry.assert_called_once()
+                    self.assertNotIn("progress", retry.call_args.kwargs)
+
+    def test_paired_receipt_survives_interruption_between_local_confirmations(self):
+        for backend in (slack_client, gmail_client):
+            with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:
+                store = ExecutionStore(Path(root) / "db")
+                state = {"execution_task_id": "task"}
+                web = Mock()
+                web.files_upload_v2.return_value = {"files": [{"id": "F-progress"}]}
+                with patch.object(slack_client, "web", return_value=web), \
+                     patch.object(gmail_client, "send", return_value="thread") as send:
+                    outcome = message_delivery.deliver(store, state, root, root, backend,
+                        "Verification", "Checking changes", "C:1", progress=milestones.image("verifying"))
+                    row = store.get("delivery_receipt", outcome["notification_id"])
+                    for surviving in ("body", row["data"]["envelope"]["attachments"][0]["id"]):
+                        store.update("delivery_receipt", row, status="pending",
+                                     receipts={surviving: outcome["receipts"][surviving]})
+                        message_delivery.retry_pending(ExecutionStore(Path(root) / "db"), state, root, backend)
+                        self.assertEqual(store.get("delivery_receipt", row["id"])["status"], "complete")
+                if backend is slack_client:
+                    web.files_upload_v2.assert_called_once()
+                    web.chat_postMessage.assert_not_called()
+                else:
+                    send.assert_called_once()
+
+    def test_local_receipt_write_failure_does_not_relabel_an_accepted_pair(self):
+        import attachments
+        progress = attachments.describe(milestones.image("verifying"), role="progress")
+        envelope = {"id": "notice", "thread_id": "C:1", "subject": "Verification",
+                    "body": "Checking changes", "attachments": [progress]}
+        for backend in (slack_client, gmail_client):
+            with self.subTest(channel=backend.__name__):
+                receipts = {}
+                fail_write = True
+                def confirm(key, value):
+                    nonlocal fail_write
+                    receipts[key] = value
+                    if key == progress["id"] and value["status"] == "confirmed" and fail_write:
+                        fail_write = False
+                        raise RuntimeError("receipt write interrupted")
+                web = Mock()
+                web.files_upload_v2.return_value = {"files": [{"id": "accepted"}]}
+                with patch.object(slack_client, "web", return_value=web), \
+                     patch.object(gmail_client, "send", return_value="thread") as send:
+                    with self.assertRaisesRegex(RuntimeError, "receipt write interrupted"):
+                        backend.send_envelope(envelope, receipts, confirm)
+                    self.assertEqual(receipts[progress["id"]]["status"], "confirmed")
+                    self.assertEqual(receipts["body"]["status"], "uncertain")
+                    backend.send_envelope(envelope, receipts, confirm)
+                    self.assertEqual(receipts["body"]["status"], "confirmed")
+                if backend is slack_client:
+                    web.files_upload_v2.assert_called_once()
+                else:
+                    send.assert_called_once()
+
+    def test_uncertain_email_pair_reconciles_one_message_for_text_and_image(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"execution_task_id": "task"}
+            with patch.object(gmail_client, "send", side_effect=ConnectionError("accepted but disconnected")):
+                outcome = message_delivery.deliver(store, state, root, root, gmail_client,
+                    "Verification", "Checking changes", "thread", progress=milestones.image("verifying"))
+            service = Mock()
+            service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+                "messages": [{"id": "accepted", "threadId": "thread"}]}
+            with patch.object(gmail_client, "_gmail", return_value=service), \
+                 patch.object(gmail_client, "send") as retry:
+                message_delivery.retry_pending(ExecutionStore(Path(root) / "db"), state, root, gmail_client)
+            retry.assert_not_called()
+            self.assertEqual(store.get("delivery_receipt", outcome["notification_id"])["status"], "complete")
+            queries = service.users.return_value.messages.return_value.list.call_args_list
+            self.assertEqual(len(queries), 2)
+            self.assertEqual(queries[0].kwargs["q"], queries[1].kwargs["q"])
+
     def test_unrouted_confirmed_effect_is_not_redirected_or_sent_again(self):
         with tempfile.TemporaryDirectory() as root:
             store = ExecutionStore(Path(root) / "db")

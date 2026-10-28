@@ -6,13 +6,15 @@ from pathlib import Path
 import attachments
 
 
-def deliver(store, state, repo, directory, backend, subject, body, thread_id, files=(), *, identity=None):
+def deliver(store, state, repo, directory, backend, subject, body, thread_id, files=(), *, identity=None, progress=None):
     for file in files:
         body = body.replace(Path(file).name, attachments.delivery_name(file))
     descriptors = [attachments.describe(file, role="diagnostic" if Path(file).suffix == ".txt"
                                         or (Path(file).suffix.lower() == ".md"
                                             and Path(file).name.startswith("diagnostic-"))
-                                        else "supporting") for file in files]
+                                         else "supporting") for file in files]
+    if progress is not None:
+        descriptors.insert(0, attachments.describe(progress, role="progress"))
     identity = identity or hashlib.sha256(json.dumps([backend.__name__, subject, body, thread_id,
         [a["id"] for a in descriptors]], ensure_ascii=False).encode()).hexdigest()
     limits = backend.attachment_limits()

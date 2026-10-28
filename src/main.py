@@ -43,6 +43,7 @@ from execution_identity import snapshot as content_snapshot, digest
 import delivery_checkpoint
 import evidence_delivery
 import message_templates
+import state_notices
 import performance
 import architecture_report
 import config
@@ -229,7 +230,7 @@ def _contact_name() -> str:
 
 def email(state: dict, phase: str, body: str, attachments: list[Path] | None = None,
           new_thread: bool = False, *, milestone: str | None = None,
-          visible_question: str | None = None, localized: bool = False) -> None:
+          visible_question: str | None = None, localized: bool = False) -> bool:
     thread_id = None if new_thread and config.COMM_CHANNEL == "email" else state.get("thread_id")
     fresh_stage = milestone if milestone and not milestones.announced(state, milestone) else None
     show_progress = milestone if milestone and state.get("banner_stage") != milestone else None
@@ -264,46 +265,65 @@ def email(state: dict, phase: str, body: str, attachments: list[Path] | None = N
     subj = subject(state, phase)
     log.info("sending %r (thread=%s, %d attachment(s), %d body chars)",
              subj, thread_id or "new", len(attachments or []), len(body))
-    if attachments:
-        delivery = gmail_client.deliver(state, subj, body, thread_id, attachments)
+    kwargs = {"progress": milestones.image(show_progress)} if show_progress else {}
+    notice_delivered = True
+    if milestone:
+        fingerprint = hashlib.sha256(json.dumps([state["state"], milestone, subj, body]).encode()).hexdigest()
+        pending = state.get("pending_state_notice", {})
+        if pending.get("fingerprint") != fingerprint:
+            pending = {"fingerprint": fingerprint, "identity": secrets.token_hex(16)}
+            state["pending_state_notice"] = pending
+            save_state(state)  # Preserve this occurrence's identity before any external effect.
+        kwargs["identity"] = pending["identity"]
+    if attachments or milestone:
+        delivery = gmail_client.deliver(state, subj, body, thread_id, attachments or [], **kwargs)
         state["thread_id"] = delivery["thread_id"] or thread_id
         state["last_delivery"] = delivery
+        if milestone:
+            required = ["body"]
+            if show_progress:
+                required.append(hashlib.sha256(milestones.image(show_progress).read_bytes()).hexdigest())
+            notice_delivered = bool(delivery.get("complete") or all(
+                delivery.get("receipts", {}).get(key, {}).get("status") == "confirmed" for key in required))
     else:
-        kwargs = {"progress": milestones.image(show_progress)} if show_progress else {}
         state["thread_id"] = gmail_client.send(subj, body, thread_id, attachments, **kwargs)
         state.pop("last_delivery", None)
-    if milestone:
-        # Artifact delivery has its own receipts; share the banner in the same
-        # thread without changing or bypassing the artifact delivery contract.
-        if attachments and show_progress:
-            gmail_client.send(subject(state, milestones.label(milestone)),
-                              _localized(state, milestones.label(milestone)), state["thread_id"],
-                              progress=milestones.image(milestone))
+    if milestone and notice_delivered:
+        state.pop("pending_state_notice", None)
+        # The diagram travels with this body, not in a separate stage message.
         state["banner_stage"] = milestone
         state["banner_state"] = {"approval": "WAIT_APPROVAL", "pr_review": "WAIT_MERGE",
                                  "merged": "IDLE"}.get(milestone, state["state"])
-    if fresh_stage:
+    if fresh_stage and notice_delivered:
         milestones.mark(state, fresh_stage)
         save_state(state)
     # Snapshot for STATUS replies: lets the user recover what the bot last said (and
     # is therefore waiting on) if the original email was lost or unclear.
-    state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
-    _note_contact(state)
+    if notice_delivered:
+        state["last_email"] = {"subject": subj, "body": body, "sent_at": time.time()}
+        _note_contact(state)
     names = [Path(a).name for a in (attachments or [])]
     activity = body + (f"\n\nFiles (delivery receipts tracked separately): {', '.join(names)}" if names else "")
     if state.get("task_language"):
         trail(state, phase, activity, localized=True)
     else:
         trail(state, phase, activity)
+    return notice_delivered
 
 
-def announce_milestone(state: dict, stage: str, body: str) -> None:
+def announce_milestone(state: dict, stage: str, body: str, *, localized: bool = False) -> None:
     """Announce each substate as text; illustrate only visible stage changes."""
     if state.get("banner_state") != state["state"] or state.get("banner_stage") != stage:
         previous_email = state.get("last_email")
-        email(state, milestones.label(stage), body, milestone=stage)
+        phase = milestones.label(stage)
+        if localized:
+            phase = message_templates.translate(phase, state.get("task_language") or "English") or phase
+        delivered = email(state, phase, body, milestone=stage, localized=localized)
         if previous_email is not None:
             state["last_email"] = previous_email
+        if delivered is False:
+            save_state(state)
+            return
         state["banner_state"] = state["state"]
         save_state(state)
 
@@ -314,12 +334,10 @@ def _announce_state(state: dict) -> None:
         return
     try:
         stage = milestones.state_stage(state)
-        body = f"{milestones.label(stage)} · {state['state']}"
-        if state["state"] == "IMPLEMENTING" and state.get("implementation_feedback"):
-            body += ("\n\nVerification found approved work still incomplete. "
-                     "I'm returning to implementation to finish it; no new approval is needed.\n\n"
-                     + state["implementation_feedback"])
-        announce_milestone(state, stage, body)
+        language = state.get("task_language") or "English"
+        label = message_templates.translate(milestones.label(stage), language) or milestones.label(stage)
+        body = f"{label} · {state['state']}\n\n{state_notices.reason(state)}"
+        announce_milestone(state, stage, body, localized=language.casefold() in ("english", "spanish"))
     except Exception:  # A notification failure must not rerun coding work.
         log.exception("could not send state banner for %s; will retry next tick", state["state"])
 
@@ -4644,7 +4662,7 @@ RESET_KEYS = ("credential_request", "credentials", "item", "item_id", "item_url"
               "e2e_repair_status", "push_context", "archive_error", "e2e_round",
               "review_threads", "await_new_run", "conflict_rounds", "conflict_return",
               "conflict_head", "stale_replies", "last_contact", "ping_count", "last_ping_at",
-              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "proposal_snapshot", "proposal_sent_key",
+              "evidence_url", "milestones_announced", "banner_state", "banner_stage", "pending_state_notice", "proposal_snapshot", "proposal_sent_key",
               "quality_report", "internal_review_report", "e2e_passed",
               "implementation_summary", "pending_feedback", "architecture_report",
               "kick_pending", "kick_count", "has_e2e_harness", "has_code_review", "e2e_kind",

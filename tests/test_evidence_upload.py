@@ -111,7 +111,8 @@ class FinalizePrTests(unittest.TestCase):
         self.assertEqual(send.call_args.args[3], "C123:100.000001")
         self.assertIn(LINK, send.call_args.args[2])
         self.assertEqual(send.call_args.args[4][0].suffix, ".md")
-        self.assertEqual(banner.call_args.kwargs["progress"].stem, "pr_review")
+        self.assertEqual(send.call_args.kwargs["progress"].stem, "pr_review")
+        banner.assert_not_called()
 
     def test_failed_upload_attaches_as_before(self):
         args, _ = self._finalize([self.mp4], None)

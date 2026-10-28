@@ -128,4 +128,5 @@ class ProposalHandoff(unittest.TestCase):
                 self.assertEqual(send.call_args.args[4][0].suffix, ".html")
                 self.assertIn("specs/api/spec.md", send.call_args.args[4][0].read_text())
                 self.assertEqual(state["state"], "WAIT_APPROVAL")
-                self.assertEqual(banner.call_args.kwargs["progress"].stem, "approval")
+                self.assertEqual(send.call_args.kwargs["progress"].stem, "approval")
+                banner.assert_not_called()

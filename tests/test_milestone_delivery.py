@@ -16,20 +16,32 @@ with patch.dict(sys.modules, {"gdoc_client": Mock(), "task_source": Mock(),
 
 
 class MilestoneDelivery(unittest.TestCase):
+    def setUp(self):
+        # State bookkeeping tests use a confirmed transport; adapter tests below
+        # exercise the real durable delivery and provider receipts separately.
+        def delivered(state, subject, body, thread, files, **kwargs):
+            kwargs.pop("identity", None)
+            result = main.gmail_client.send(subject, body, thread, files, **kwargs)
+            return {"thread_id": result, "complete": True}
+        transport = patch.object(main.gmail_client, "deliver", side_effect=delivered)
+        transport.start()
+        self.addCleanup(transport.stop)
+
     def test_artifact_updates_do_not_repeat_same_stage_image(self):
         for channel in ("email", "slack"):
             with self.subTest(channel=channel), patch.object(config, "COMM_CHANNEL", channel), \
                  patch.object(main, "save_state"), patch.object(main, "trail"), \
-                 patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread"}) as deliver, \
+                 patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread", "complete": True}) as deliver, \
                  patch.object(main.gmail_client, "send", return_value="thread") as send:
                 state = {"state": "VERIFYING", "item": "task", "slug": "task", "thread_id": "thread"}
                 main.email(state, "Verification", "Checks", [Path("checks.txt")], milestone="verifying")
-                self.assertEqual(send.call_count, 1)
-                self.assertEqual(send.call_args.kwargs["progress"], milestones.image("verifying"))
+                send.assert_not_called()
+                self.assertEqual(deliver.call_args.kwargs["progress"], milestones.image("verifying"))
                 state["state"] = "INTERNAL_REVIEW"
                 main.email(state, "Review", "Review results", [Path("review.txt")], milestone="verifying")
                 self.assertEqual(deliver.call_count, 2)
-                self.assertEqual(send.call_count, 1)
+                send.assert_not_called()
+                self.assertNotIn("progress", deliver.call_args.kwargs)
                 self.assertEqual(state["banner_state"], "INTERNAL_REVIEW")
 
     def test_return_to_visible_stage_gets_image_again(self):
@@ -53,10 +65,9 @@ class MilestoneDelivery(unittest.TestCase):
             main._announce_state(state)
         send.assert_called_once()
         body = send.call_args.args[1]
-        self.assertIn("returning to implementation", body)
-        self.assertIn("no new approval is needed", body)
-        self.assertIn("Verify cancellation", body)
-        self.assertIn("Finish harness cleanup", body)
+        self.assertIn("Approved work remains", body)
+        self.assertLess(len(body), 300)
+        self.assertEqual(state["implementation_feedback"], "Complete pending work:\n1. Verify cancellation\n2. Finish harness cleanup")
         self.assertEqual(send.call_args.kwargs["progress"], milestones.image("implementing"))
 
     def test_verification_block_includes_results_and_agent_evidence(self):
@@ -225,6 +236,39 @@ class MilestoneDelivery(unittest.TestCase):
         self.assertEqual(api.chat_postMessage.call_args_list[0].kwargs["thread_ts"], "1.0")
         self.assertIn("Stage: Proposal", api.chat_postMessage.call_args_list[0].kwargs["text"])
         self.assertEqual(api.files_upload_v2.call_args.kwargs["thread_ts"], "1.0")
+
+    def test_slack_progress_and_reason_are_one_visible_message(self):
+        import slack_client
+        api = MagicMock()
+        with patch.object(slack_client, "web", return_value=api), \
+             patch.object(slack_client, "_to_mrkdwn", side_effect=lambda text: text):
+            slack_client.send("", "Review reported 2 issues; I'm fixing them.", "C1:1.0",
+                              progress=milestones.image("implementing"))
+        api.files_upload_v2.assert_called_once()
+        self.assertEqual(api.files_upload_v2.call_args.kwargs["initial_comment"],
+                         "Review reported 2 issues; I'm fixing them.")
+        api.chat_postMessage.assert_not_called()
+
+    def test_automatic_transition_reason_shares_the_banner_delivery(self):
+        state = {"state": "VERIFYING", "item": "task", "slug": "task", "banner_state": "APPLY_FEEDBACK"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "send", return_value="thread") as send:
+            main._announce_state(state)
+        send.assert_called_once()
+        self.assertIn("repair turn", send.call_args.args[1])
+        self.assertEqual(send.call_args.kwargs["progress"], milestones.image("verifying"))
+
+    def test_failed_paired_notice_does_not_mark_banner_as_delivered(self):
+        state = {"state": "VERIFYING", "item": "task", "slug": "task", "thread_id": "thread"}
+        with patch.object(main, "save_state"), patch.object(main, "trail"), \
+             patch.object(main.gmail_client, "deliver", return_value={"thread_id": "thread", "complete": False, "receipts": {}}), \
+             patch.object(main.gmail_client, "send") as send:
+            self.assertFalse(main.email(state, "Verification", "Checking", [Path("checks.txt")], milestone="verifying"))
+        send.assert_not_called()
+        self.assertNotIn("banner_state", state)
+        self.assertNotIn("last_email", state)
+        self.assertNotIn("last_contact", state)
+        self.assertFalse(milestones.announced(state, "verifying"))
 
     def test_slack_index_marks_only_successfully_delivered_evidence(self):
         import slack_client

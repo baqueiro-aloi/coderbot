@@ -10,6 +10,7 @@ from email.utils import parseaddr
 from pathlib import Path
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 import config
 from command_text import COMMANDS, parse_command
@@ -159,24 +160,45 @@ def attachment_limits():
 def send_envelope(envelope, receipts, confirm):
     """Separate file messages make failed attachments independently retryable."""
     thread = envelope.get("thread_id")
+    progress = next((a for a in envelope["attachments"] if a.get("role") == "progress"), None)
+    if progress:
+        paired = receipts.get(progress["id"], {})
+        if paired.get("status") == "confirmed" and paired.get("progress_id") == progress["id"]:
+            confirm("body", paired)
     if receipts.get("body", {}).get("status") == "uncertain":
         return thread
     if receipts.get("body", {}).get("status") != "confirmed":
+        if progress:
+            confirm(progress["id"], {"status": "uncertain"})
         confirm("body", {"status": "uncertain"})
         try:
             body = envelope["body"]
             for artifact in envelope["attachments"]:
                 body = body.replace(f": attached {artifact['filename']}",
                                     f": delivery queued ({artifact['filename']})")
-            thread = send(envelope["subject"], body, thread, delivery_id=envelope["id"] + "-body")
-            confirm("body", {"status": "confirmed", "thread_id": thread})
+            kwargs = {"progress": Path(progress["path"])} if progress else {}
+            thread = send(envelope["subject"], body, thread, delivery_id=envelope["id"] + "-body", **kwargs)
         except Exception as error:
-            confirm("body", {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
-                             "error": type(error).__name__})
+            uncertain = isinstance(error, (OSError, TimeoutError)) or (
+                progress and isinstance(error, HttpError) and error.resp.status >= 500)
+            failure = {"status": "uncertain" if uncertain else "failed",
+                       "error": type(error).__name__}
+            if progress:
+                confirm(progress["id"], failure)
+            confirm("body", failure)
             return thread
+        accepted = {"status": "confirmed", "thread_id": thread,
+                    **({"progress_id": progress["id"]} if progress else {})}
+        if progress:
+            confirm(progress["id"], accepted)
+        confirm("body", accepted)
     else:
         thread = receipts["body"].get("thread_id", thread)
+        if progress and receipts["body"].get("progress_id") == progress["id"]:
+            confirm(progress["id"], receipts["body"])
     for artifact in envelope["attachments"]:
+        if artifact.get("role") == "progress":
+            continue
         key = artifact["id"]
         if receipts.get(key, {}).get("status") in ("confirmed", "uncertain"):
             continue
@@ -192,13 +214,18 @@ def send_envelope(envelope, receipts, confirm):
 
 
 def reconcile_delivery(envelope, key, receipt):
+    progress = next((a for a in envelope.get("attachments", []) if a.get("role") == "progress"), None)
+    paired = progress and key in ("body", progress["id"])
+    if paired:
+        key = "body"  # Text and inline image are in the same MIME message.
     identity = envelope["id"] + "-" + key
     result = _gmail().users().messages().list(userId="me",
         q=f"in:sent rfc822msgid:{identity}@coderbot.local", maxResults=1).execute()
     messages = result.get("messages", [])
     if messages:
         return {"status": "confirmed", "thread_id": messages[0].get("threadId"),
-                "provider_ids": [messages[0]["id"]]}
+                 "provider_ids": [messages[0]["id"]],
+                 **({"progress_id": progress["id"]} if paired else {})}
     return None
 
 

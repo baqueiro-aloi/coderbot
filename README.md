@@ -433,9 +433,14 @@ files before coderbot retries archival.
 
 ### Review-friendly task messages
 
-Task conversations announce important results, blockers and decisions in concise text.
-Routine phase images and working check-ins are suppressed. STATUS reports live activity,
-the last effective progress and the next action without starting a coding turn.
+Task conversations announce every state change with a brief, factual reason in the
+task's language. Visible lifecycle stage changes include the progress diagram in
+the same message: Slack pairs it with the upload comment, and email embeds it inline.
+Same-stage substates remain text-only; returning to a different stage shows its
+diagram again. Delivery receipts preserve pending or uncertain paired uploads
+without replaying coding work. Routine working check-ins remain suppressed.
+STATUS reports live activity, the last effective progress and the next action
+without starting a coding turn.
 Completing or aborting without a confirmed merge never announces a merge.
 
 Proposal-review messages attach one **offline, self-contained HTML file** containing

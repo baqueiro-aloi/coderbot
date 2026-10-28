@@ -474,24 +474,91 @@ def send(subject: str, body: str, thread_id: str | None = None,
             body = body.replace(f": attached {path.name}", f": unavailable ({path.name})")
     if failed:
         body += "\n\nEvidence file unavailable: " + ", ".join(path.name for path in failed)
+    if progress is not None:
+        try:
+            web().files_upload_v2(channel=channel, thread_ts=root_ts,
+                                  file=str(progress), filename=progress.name,
+                                  initial_comment=_to_mrkdwn(body))
+            return thread_id
+        except Exception:
+            log.exception("could not share %s in Slack thread", progress.name)
+            body += f"\n\nProgress diagram unavailable: {progress.name}"
     for part in _chunks(_to_mrkdwn(body)):
         web().chat_postMessage(channel=channel, thread_ts=root_ts, text=part,
                                 mrkdwn=True, unfurl_links=False)
-    for path in [progress] if progress else []:
-        try:
-            web().files_upload_v2(channel=channel, thread_ts=root_ts,
-                                  file=str(path), filename=path.name)
-        except Exception:
-            log.exception("could not share %s in Slack thread", path.name)
-            web().chat_postMessage(channel=channel, thread_ts=root_ts,
-                                   text=f"Evidence file unavailable: {path.name}")
     return thread_id
+
+
+def _progress_name(envelope, artifact):
+    # A stage can recur with the same PNG. Reconciliation must identify this
+    # particular notification, not an older occurrence of that stage.
+    return f"{Path(artifact['filename']).stem}-{envelope['id']}.png"
+
+
+def _progress_failure_status(error):
+    from slack_sdk.errors import SlackApiError, SlackRequestError
+    if isinstance(error, (OSError, TimeoutError, SlackRequestError)):
+        return "uncertain"
+    if isinstance(error, SlackApiError) and error.response.get("error") in (
+            "internal_error", "fatal_error", "request_timeout", "service_unavailable"):
+        return "uncertain"  # Slack may have completed part of the external effect.
+    return "failed"
+
+
+def _send_progress_envelope(envelope, receipts, confirm, artifact, channel, root):
+    key = artifact["id"]
+    body_receipt = receipts.get("body", {})
+    if body_receipt.get("status") == "confirmed":
+        if body_receipt.get("progress_id") == key and receipts.get(key, {}).get("status") != "confirmed":
+            confirm(key, body_receipt)
+        return
+    progress_receipt = receipts.get(key, {})
+    if progress_receipt.get("status") == "confirmed" and progress_receipt.get("progress_id") == key:
+        confirm("body", progress_receipt)
+        return
+    if (body_receipt.get("status") == "uncertain" or
+            receipts.get(key, {}).get("status") in ("confirmed", "uncertain")):
+        return  # Reconcile possible acceptance; never blindly repost text/image.
+    text = _to_mrkdwn(_delivery_body(envelope, receipts))
+    pending = {"status": "uncertain", "progress_id": key, "text": text}
+    confirm(key, pending)
+    confirm("body", pending)
+    try:
+        result = web().files_upload_v2(channel=channel, thread_ts=root,
+            file=artifact["path"], filename=_progress_name(envelope, artifact), title=artifact["filename"],
+            initial_comment=text)
+        ids = [file.get("id") for file in result.get("files", [])]
+    except Exception as error:
+        status = _progress_failure_status(error)
+        failure = {**pending, "status": status, "error": type(error).__name__}
+        confirm(key, failure)
+        confirm("body", failure)
+        log.warning("Slack state notice delivery failed: %s", error)
+        return
+    # A local receipt-write failure must not relabel accepted effects as failed.
+    accepted = {**pending, "status": "confirmed", "provider_ids": ids}
+    confirm(key, accepted)
+    confirm("body", accepted)
+
+
+def _delivery_body(envelope, receipts):
+    pending = [a["filename"] for a in envelope["attachments"]
+               if a.get("role") != "progress" and receipts.get(a["id"], {}).get("status") != "confirmed"]
+    body = envelope["body"]
+    if pending:
+        for filename in pending:
+            body = body.replace(f": attached {filename}", f": pending delivery ({filename})")
+        body += "\nFiles pending delivery: " + ", ".join(pending)
+    return body
 
 
 def send_envelope(envelope, receipts, confirm):
     """Upload each file once; the caller persists receipts before the next send."""
     channel, root = _split_thread(envelope["thread_id"])
+    progress = next((a for a in envelope["attachments"] if a.get("role") == "progress"), None)
     for artifact in envelope["attachments"]:
+        if artifact.get("role") == "progress":
+            continue
         key = artifact["id"]
         if receipts.get(key, {}).get("status") in ("confirmed", "uncertain"):
             continue
@@ -514,14 +581,10 @@ def send_envelope(envelope, receipts, confirm):
             confirm(key, {"status": "uncertain" if isinstance(error, (ConnectionError, TimeoutError)) else "failed",
                            "error": str(error)[:500]})
             log.warning("Slack attachment delivery failed for %s: %s", artifact["filename"], error)
-    if receipts.get("body", {}).get("status") not in ("confirmed", "uncertain"):
-        pending = [a["filename"] for a in envelope["attachments"]
-                   if receipts.get(a["id"], {}).get("status") != "confirmed"]
-        body = envelope["body"]
-        if pending:
-            for filename in pending:
-                body = body.replace(f": attached {filename}", f": pending delivery ({filename})")
-            body += "\nFiles pending delivery: " + ", ".join(pending)
+    if progress:
+        _send_progress_envelope(envelope, receipts, confirm, progress, channel, root)
+    elif receipts.get("body", {}).get("status") not in ("confirmed", "uncertain"):
+        body = _delivery_body(envelope, receipts)
         confirm("body", {"status": "uncertain"})
         ids = []
         try:
@@ -551,7 +614,17 @@ def reconcile_delivery(envelope, key, receipt):
                 args["cursor"] = cursor
             page = web().conversations_replies(**args)
             artifact = next((a for a in envelope["attachments"] if a["id"] == key), None)
+            progress = next((a for a in envelope["attachments"] if a.get("role") == "progress"), None)
             for message in page.get("messages", []):
+                if progress and key in ("body", progress["id"]):
+                    file = next((f for f in message.get("files", [])
+                                 if f.get("name") == _progress_name(envelope, progress)
+                                 and f.get("size") == progress["size"]), None)
+                    text = receipt.get("text", _to_mrkdwn(envelope["body"]))
+                    if file and message.get("text") == text:
+                        return {"status": "confirmed", "provider_ids": [file["id"]],
+                                "progress_id": progress["id"], "text": text}
+                    continue
                 if key == "body" and message.get("client_msg_id") == envelope["id"]:
                     return {"status": "confirmed", "provider_ids": [message["ts"]]}
                 for file in message.get("files", []):
