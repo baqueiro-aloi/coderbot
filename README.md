@@ -593,7 +593,7 @@ receipts. Legacy unsent alerts can be bound only to the exact last worker/task; 
 or uncertain effects are never redirected.
 
 To resume a paused supervisor (not a task `HOLD`), use its explicit control:
-`docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --data /app/data --control resume`.
+`docker compose exec --user bot codebot python3 /opt/coderbot-supervisor/supervisor.py --data /app/data --control resume`.
 This changes supervisor control only, not approvals, task/check state or audit budgets.
 Rebuild/recreate the image to deploy changes to the immutable supervisor. An exact
 unfinished invocation can resume its previous session across deployment; completed

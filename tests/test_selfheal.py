@@ -458,6 +458,18 @@ class SelfHealingTests(unittest.TestCase):
                 supervisor.run()
         start.assert_not_called()
 
+    def test_explicit_resume_control_preserves_task_and_restart_budget(self):
+        atomic_json(self.repairs.home / "control.json", {"action": "pause"})
+        atomic_json(self.repairs.home / "restarts.json", {"since": 100, "used": 4})
+        state_before = (self.data / "state.json").read_bytes()
+        budget_before = (self.repairs.home / "restarts.json").read_bytes()
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "scripts/supervisor.py"),
+                                 "--data", str(self.data), "--control", "resume"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_json(self.repairs.home / "control.json"), {"action": "resume"})
+        self.assertEqual((self.data / "state.json").read_bytes(), state_before)
+        self.assertEqual((self.repairs.home / "restarts.json").read_bytes(), budget_before)
+
     def test_opencode_adapter_keeps_provider_settings_without_task_context(self):
         folder, _, record = self.candidate()
         supervisor = Supervisor(self.source, self.data, "auto")
