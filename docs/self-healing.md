@@ -38,7 +38,11 @@ definitions must also be supplied as JSON for this initial adapter. V2 runs use
 
 Automatic source repairs are limited to reproducible TypeError, AttributeError,
 KeyError, IndexError, JSONDecodeError and eligible startup SyntaxError incidents.
-User-input waits, credentials/configuration, outages, disk errors, and application
+Controller implementation incidents with `OSError` and the explicit
+`ENAMETOOLONG` errno are also eligible; generic OS errors remain excluded.
+Check validation treats test-selection expressions and inline code as command
+values, probing only plausible script paths while retaining cleanup checks.
+User-input waits, credentials/configuration, outages, other disk errors, and application
 test failures are not automatically reclassified as implementation bugs.
 
 The supervisor stops the worker before snapshotting. Snapshots include current
@@ -91,6 +95,8 @@ three per hour, persisted across supervisor restarts; exhaustion pauses the work
 ## Communication and provider independence
 
 Supervisor events contain opaque task/provider/channel/conversation references.
+Incident notices distinguish disabled source repair from an enabled policy that
+does not admit that particular error; they do not conflate the two conditions.
 The delivery bridge uses the existing communication facade and durable receipts;
 Email and Slack are adapters, not dependencies of the supervisor state machine.
 Future adapters use the same event contract. Backlog updates remain worker-owned;

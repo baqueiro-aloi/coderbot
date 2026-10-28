@@ -436,6 +436,28 @@ class WorkspaceRunnerTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertEqual(self.state["state"], "VERIFYING")
 
+    def test_long_test_selection_reaches_checks_and_canonical_independent_review(self):
+        from check_plan import Check
+        from tests.test_check_argument_paths import PATTERN
+        import staged_checks
+        self.state.update(state="VERIFYING", archive_path="openspec/changes/archive/feature")
+        plan = [Check("zip-backend", ["go", "test", "./pkg/workspaces/models", "-run", PATTERN], cwd="api"),
+                Check("shared", ["python3", "-c", "print('ok')"], kind="functional")]
+        outcomes = [{"check": check.id, "status": "pass", "gate": {"status": "pass"}} for check in plan]
+        review = SimpleNamespace(session_id="review", question=None, attachments=[],
+            output='INTERNAL_REVIEW: {"status":"pass","critical":0,"important":0,"tests":["recorded checks"]}')
+        with patch.object(runner, "check_plan_for", return_value=plan), \
+             patch.object(staged_checks, "run", return_value={"stage": "complete", "checks": outcomes}) as checks, \
+             patch.object(runner, "turn", return_value=review) as turn, patch.object(main, "handle_result", return_value=False):
+            runner.verify(self.state)
+        checks.assert_called_once()
+        self.assertEqual(checks.call_args.args[1][0].argv[-1], PATTERN)
+        self.assertIn('"critical":0,"important":0', turn.call_args.args[1])
+        self.assertTrue(turn.call_args.kwargs["fresh"])
+        self.assertEqual(self.state["state"], "OPEN_PR")
+        self.assertEqual(self.state["final_check_report"]["status"], "pass")
+        self.assertEqual(self.state["workspace"]["reviewed_snapshot"], snapshot(self.root))
+
     def test_harness_repair_prompts_change_and_explicit_retry_resets_budget(self):
         from workspace_checks import HarnessBlocked
         self.state.update(state="VERIFYING", reported_check_plan=[{"id": "integration", "argv": ["true"], "cwd": "."}])

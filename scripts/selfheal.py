@@ -1,6 +1,7 @@
 """Stable, stdlib-only repair machinery. Never import the application here."""
 from contextlib import contextmanager
 import ast
+import errno
 import fcntl
 import hashlib
 import json
@@ -120,8 +121,10 @@ def redact(text, environ=None):
 
 
 def eligible(incident):
+    implementation_error = incident.get("error_type") in IMPLEMENTATION_ERRORS or (
+        incident.get("error_type") == "OSError" and incident.get("error_errno") == errno.ENAMETOOLONG)
     return (incident.get("category") == "implementation" and
-            incident.get("error_type") in IMPLEMENTATION_ERRORS and
+            implementation_error and
             incident.get("phase") not in {"IDLE", "WAIT_REPLY", "WAIT_APPROVAL", "WAIT_MERGE", "WAIT_STUCK"})
 
 

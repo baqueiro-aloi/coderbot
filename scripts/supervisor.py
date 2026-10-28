@@ -273,7 +273,11 @@ class Supervisor:
 
     def handle(self, incident):
         if self.mode not in {"propose", "auto"} or not eligible(incident):
-            self.repairs.event("incident_detected", incident, detail="Source repair is disabled or incident needs manual diagnosis")
+            detail = (f"Source repair is not enabled (mode: {self.mode}); work is preserved."
+                      if self.mode not in {"propose", "auto"} else
+                      f"Source repair is enabled, but this incident is outside its repair policy "
+                      f"({incident.get('error_type', 'unknown error')}); work is preserved.")
+            self.repairs.event("incident_detected", incident, detail=detail)
             self.notify()
             return
         folder = record_path = record = None

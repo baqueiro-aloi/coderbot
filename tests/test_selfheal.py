@@ -111,6 +111,30 @@ class SelfHealingTests(unittest.TestCase):
             self.assertFalse(eligible({**self.incident, "error_type": error}))
         self.assertFalse(eligible({**self.incident, "phase": "WAIT_APPROVAL"}))
 
+    def test_controller_filename_length_error_is_eligible_without_broad_oserror_repairs(self):
+        import errno
+        incident = {**self.incident, "error_type": "OSError", "error_errno": errno.ENAMETOOLONG}
+        self.assertTrue(eligible(incident))
+        for code in (None, errno.EACCES, errno.ENOSPC, errno.EIO, errno.ENOENT):
+            with self.subTest(errno=code):
+                self.assertFalse(eligible({**incident, "error_errno": code}))
+        self.assertFalse(eligible({**incident, "category": "operational"}))
+        self.assertFalse(eligible({**incident, "phase": "WAIT_APPROVAL"}))
+        self.assertFalse(eligible({**incident, "error_type": "PermissionError"}))
+
+    def test_incident_notice_distinguishes_disabled_mode_from_ineligible_error(self):
+        for mode, expected in (("observe", "not enabled"), ("auto", "outside its repair policy")):
+            with self.subTest(mode=mode):
+                supervisor = Supervisor(self.source, self.data, mode)
+                incident = {**self.incident, "error_type": "OSError"}
+                with patch.object(supervisor.repairs, "event") as event, patch.object(supervisor, "notify"), \
+                     patch.object(supervisor, "stop") as stop, patch.object(supervisor, "agent") as agent:
+                    supervisor.handle(incident)
+                self.assertIn(expected, event.call_args.kwargs["detail"])
+                self.assertNotIn(" or ", event.call_args.kwargs["detail"])
+                stop.assert_not_called()
+                agent.assert_not_called()
+
     def test_snapshot_excludes_live_data_and_credentials(self):
         (self.source / "data").mkdir()
         (self.source / "data/state.json").write_text("live")

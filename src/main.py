@@ -6323,6 +6323,7 @@ def _run_loop() -> None:
                     save_state(state)
                     selfheal_events.emit("incident", {**state, "state": prev}, category="implementation",
                         error_type=type(error).__name__, location=traceback.extract_tb(error.__traceback__)[-1].name,
+                        error_errno=getattr(error, "errno", None),
                         binding=selfheal_events.state_binding(state),
                         diagnostic=diagnostics.redact(traceback.format_exc()))
                     _announce_state(state)

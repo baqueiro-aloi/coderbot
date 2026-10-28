@@ -4,6 +4,7 @@ No permission sandbox: the configured workspace is trusted and wholly writable.
 Git publication is still scoped to explicit repositories and never resets user work.
 """
 from dataclasses import replace
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -541,7 +542,7 @@ def verify(state):
         result = turn(state, "Independently review this completed cross-repository feature for critical/important "
             "bugs and contract mismatches. Check shared requirements and implementation across affected repos. "
             "Do not edit code, push or merge. End with exactly INTERNAL_REVIEW: "
-            '{"status":"pass","critical":[],"important":[],"tests":["actual verification references"]} '
+            '{"status":"pass","critical":0,"important":0,"tests":["actual verification references"]} '
             "only if no critical or important issues remain; otherwise report status fail and real issues.", fresh=True)
         if main.handle_result(state, result, "INTERNAL_REVIEW"):
             return
@@ -602,8 +603,15 @@ def validate_check(context, check):
     scripts = []
     def script(path):
         nonlocal text
-        if path in visited or not path.is_file() or path.suffix not in (".sh", ".py", ".js", ".mjs"):
+        if path in visited or path.suffix not in (".sh", ".py", ".js", ".mjs"):
             return
+        try:
+            if not path.is_file():
+                return
+        except OSError as error:
+            if error.errno == errno.ENAMETOOLONG:
+                return  # Opaque command values cannot be existing script filenames.
+            raise
         visited.add(path)
         body = path.read_text()
         scripts.append(body)
@@ -617,7 +625,7 @@ def validate_check(context, check):
         if arg.startswith("-"):
             continue
         candidate = cwd / arg
-        if candidate.exists() and candidate.is_relative_to(context.root):
+        if candidate.is_relative_to(context.root):
             script(candidate)
     if re.search(r"\b(?:system|volume|container|network)\s+prune\b|\bvolume\s+rm\b", text):
         raise HarnessBlocked(f"Check {check.id} performs global destructive Docker cleanup")

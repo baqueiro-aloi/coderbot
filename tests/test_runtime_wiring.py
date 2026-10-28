@@ -1,5 +1,7 @@
 """Startup behavior tests for the managed agent runtime."""
 import pathlib
+import errno
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,29 @@ main.config.STATE_PATH = pathlib.Path(tempfile.mkdtemp()) / "state.json"
 
 
 class RuntimeValidationTests(unittest.TestCase):
+    def test_controller_incident_preserves_errno_for_source_repair_policy(self):
+        state = {"state": "VERIFYING", "item": "task", "execution_task_id": "task"}
+        def escalate(current, phase):
+            current.update(state="WAIT_STUCK", stuck_return=phase)
+            return True
+        with patch.object(main, "load_state", return_value=state), patch.object(main, "save_state"), \
+             patch.object(main, "_ensure_task_language"), patch.object(main, "_announce_state"), \
+             patch.object(main, "_credential_tick"), patch.object(main, "check_commands", return_value=False), \
+             patch.object(main, "_dispatch_conversation", return_value=False), \
+             patch.object(main, "_dispatch_feedback", return_value=False), patch.object(main, "_receive_feedback"), \
+             patch.object(main, "_escalate", side_effect=escalate), patch.object(main.diagnostics, "report"), \
+             patch.object(main.task_records, "apply_contacts"), patch.object(main.gmail_client, "retry_deliveries"), \
+             patch.object(main.config, "TARGET_MODE", "repo"), patch.object(main.config, "MAX_STATE_FAILURES", 1), \
+             patch.object(main.selfheal_events, "emit") as emit, \
+             patch.object(main.time, "sleep", side_effect=SystemExit("stop")), \
+             patch.dict(main.PHASES, {"VERIFYING": MagicMock(side_effect=OSError(errno.ENAMETOOLONG, "too long"))}):
+            with self.assertRaisesRegex(SystemExit, "stop"):
+                main._run_loop()
+        incident = next(call for call in emit.call_args_list if call.args[0] == "incident")
+        self.assertEqual(incident.kwargs["error_type"], "OSError")
+        self.assertEqual(incident.kwargs["error_errno"], errno.ENAMETOOLONG)
+        self.assertEqual(incident.kwargs["category"], "implementation")
+
     def test_empty_wait_inbox_is_quiet_and_still_polled(self):
         state = {"state": "WAIT_STUCK", "item": "task", "thread_id": "C:1"}
         before = dict(state)
@@ -115,6 +140,8 @@ class RuntimeValidationTests(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         root = Path(self.temporary_directory.name)
+        state_path = root / "state.json"
+        state_path.write_text(json.dumps({"state": "IDLE"}))
         self.superpowers = root / "superpowers"
         self.bridge = root / "bridge"
         self.openspec = root / "openspec-skills"
@@ -133,6 +160,7 @@ class RuntimeValidationTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture")
         self.path_patches = (
+            patch.object(main.config, "STATE_PATH", state_path),
             patch.object(main.config, "SUPERPOWERS_PLUGIN_DIR", self.superpowers, create=True),
             patch.object(main.config, "BRIDGE_PLUGIN_DIR", self.bridge, create=True),
             patch.object(main.config, "OPENSPEC_SKILLS_DIR", self.openspec, create=True),
