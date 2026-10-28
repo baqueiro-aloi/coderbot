@@ -22,6 +22,13 @@ def deliver(store, state, repo, directory, backend, subject, body, thread_id, fi
         "envelope": {"id": identity[:32], "subject": subject, "body": body,
                      "thread_id": thread_id, "attachments": prepared}, "receipts": {},
         "channel": backend.__name__})
+    if thread_id and not row["data"]["envelope"].get("thread_id"):
+        # Legacy runtime alerts were queued without a destination. Keep their
+        # receipt/client identity; never redirect a possibly accepted effect.
+        if any(receipt.get("status") not in (None, "failed") for receipt in row["data"]["receipts"].values()):
+            raise ValueError("Cannot bind a delivery destination after a confirmed or uncertain external effect")
+        row = store.update("delivery_receipt", row,
+            envelope={**row["data"]["envelope"], "thread_id": thread_id})
     return attempt(store, row, backend)
 
 

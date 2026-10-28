@@ -11,6 +11,37 @@ from agent_errors import AgentTransportError
 
 
 class CheckpointReplayTests(unittest.TestCase):
+    def test_deployment_resumes_only_same_unfinished_invocation_from_previous_epoch(self):
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(phase_checkpoint.config, "DATA_DIR", Path(root) / "data"), \
+             patch.object(phase_checkpoint.config, "REPO_PATH", Path(root)), \
+             patch.object(agent_runner.config, "AGENT", "opencode"):
+            state = {"state": "APPLY_FEEDBACK", "execution_task_id": "task"}
+            with patch.dict("os.environ", {"CODEBOT_RUNTIME_EPOCH": "old", "CODEBOT_PREVIOUS_RUNTIME_EPOCH": ""}):
+                phase_checkpoint.remember_session(state, "fix confirmed findings", "partial_root")
+            with patch.dict("os.environ", {"CODEBOT_RUNTIME_EPOCH": "new", "CODEBOT_PREVIOUS_RUNTIME_EPOCH": "old"}):
+                self.assertEqual(phase_checkpoint.interrupted(state, "fix confirmed findings"), "partial_root")
+                self.assertIsNone(phase_checkpoint.interrupted(state, "new guidance"))
+                self.assertIsNone(phase_checkpoint.interrupted(dict(state, state="VERIFYING"), "fix confirmed findings"))
+                self.assertIsNone(phase_checkpoint.interrupted(dict(state, execution_task_id="other"), "fix confirmed findings"))
+                with patch.object(agent_runner.config, "AGENT", "claude"):
+                    self.assertIsNone(phase_checkpoint.interrupted(state, "fix confirmed findings"))
+                phase_checkpoint.record(state, "fix confirmed findings", agent_runner.OpenCodeResult("partial_root", "fixed"))
+                self.assertIsNone(phase_checkpoint.interrupted(state, "fix confirmed findings"))
+                self.assertEqual(phase_checkpoint.store().list("checkpoint", "task", status="running"), [])
+
+    def test_completed_old_epoch_outcome_is_not_replayed_after_deployment(self):
+        with tempfile.TemporaryDirectory() as root, \
+             patch.object(phase_checkpoint.config, "DATA_DIR", Path(root) / "data"), \
+             patch.object(phase_checkpoint.config, "REPO_PATH", Path(root)), \
+             patch.object(phase_checkpoint, "snapshot", return_value="unchanged"):
+            state = {"state": "VERIFYING", "execution_task_id": "task"}
+            with patch.dict("os.environ", {"CODEBOT_RUNTIME_EPOCH": "old", "CODEBOT_PREVIOUS_RUNTIME_EPOCH": ""}):
+                phase_checkpoint.record(state, "verify", agent_runner.OpenCodeResult("old", "passed"))
+            with patch.dict("os.environ", {"CODEBOT_RUNTIME_EPOCH": "new", "CODEBOT_PREVIOUS_RUNTIME_EPOCH": "old"}):
+                self.assertIsNone(phase_checkpoint.replay(state, "verify"))
+                self.assertIsNone(phase_checkpoint.interrupted(state, "verify"))
+
     def test_failed_exploration_resumes_root_after_restart_and_partial_edits(self):
         for transport in ("cli", "http"):
             with self.subTest(transport=transport), tempfile.TemporaryDirectory() as root, \

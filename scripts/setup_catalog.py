@@ -150,7 +150,8 @@ assert len(BY_KEY) == len(SETTINGS), "duplicate configuration setting"
 # Runtime aliases, and variables injected solely into subprocesses, not user knobs.
 REVIEWED_NON_SETTINGS = {"GITHUB_TOKEN", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
                          "XDG_CACHE_HOME", "XDG_STATE_HOME", "PW_VIDEO",
-                         "CODEBOT_SUPERVISOR_DIR", "CODEBOT_WORKER_BOOT", "CODEBOT_RUNTIME_EPOCH"}
+                          "CODEBOT_SUPERVISOR_DIR", "CODEBOT_WORKER_BOOT", "CODEBOT_RUNTIME_EPOCH",
+                          "CODEBOT_PREVIOUS_RUNTIME_EPOCH"}
 
 
 def relevant(setting: Setting, values: dict[str, str]) -> bool:

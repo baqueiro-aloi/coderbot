@@ -11,6 +11,19 @@ import diagnostics
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_unrouted_confirmed_effect_is_not_redirected_or_sent_again(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = ExecutionStore(Path(root) / "db")
+            state = {"execution_task_id": "task"}
+            old = store.record("delivery_receipt", state, root, "event", {
+                "envelope": {"id": "stable", "thread_id": None, "subject": "alert", "body": "stalled", "attachments": []},
+                "receipts": {"body": {"status": "confirmed", "provider_ids": ["accepted"]}}, "channel": "slack_client"})
+            with patch.object(slack_client, "send_envelope") as sender:
+                with self.assertRaisesRegex(ValueError, "confirmed or uncertain"):
+                    message_delivery.deliver(store, state, root, root, slack_client, "alert", "stalled", "C:1", identity="event")
+            sender.assert_not_called()
+            self.assertEqual(store.get("delivery_receipt", old["id"])["data"], old["data"])
+
     def test_generated_markdown_diagnostic_delivery_in_both_channels(self):
         for backend in (slack_client, gmail_client):
             with self.subTest(channel=backend.__name__), tempfile.TemporaryDirectory() as root:

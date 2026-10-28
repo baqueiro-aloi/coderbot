@@ -23,6 +23,7 @@ class RepairNotificationTests(unittest.TestCase):
         self.folder.mkdir(parents=True)
         self.store = ExecutionStore(self.root / "execution.sqlite")
         for target, value in (("config.DATA_DIR", self.root), ("config.REPO_PATH", self.root),
+                              ("config.STATE_PATH", self.root / "state.json"),
                               ("phase_checkpoint.store", lambda: self.store)):
             manager = patch(target, value)
             manager.start()
@@ -68,6 +69,65 @@ class RepairNotificationTests(unittest.TestCase):
             repair_notifications.flush()
         sender.assert_called_once()
         self.assertEqual(self.store.list("delivery_receipt", "supervisor:task")[0]["id"], pending[0]["id"])
+
+    def test_legacy_unrouted_worker_alert_reuses_its_unsent_receipt(self):
+        path = self.folder / "legacy.json"
+        event = {"version": 1, "id": "legacy", "kind": "worker_unavailable", "incident": "boot",
+                 "task_id": None, "channel": None, "conversation": None, "detail": "stalled"}
+        atomic_json(path, event)
+        atomic_json(self.root / "state.json", {"execution_task_id": "task", "thread_id": "C:1"})
+        atomic_json(self.folder.parent / "worker.json", {"boot": "boot", "task_id": "task",
+                   "channel": "slack", "conversation": "C:1"})
+        old = self.store.record("delivery_receipt", {"execution_task_id": "supervisor:runtime"}, self.root,
+            "supervisor:legacy", {"envelope": {"id": "supervisor:legacy", "subject": "alert", "body": "stalled",
+            "thread_id": None, "attachments": []}, "receipts": {}, "channel": "slack_client"})
+        def send(envelope, receipts, confirm):
+            self.assertEqual(envelope["thread_id"], "C:1")
+            self.assertEqual(envelope["id"], old["data"]["envelope"]["id"])
+            confirm("body", {"status": "confirmed", "provider_ids": ["receipt"]})
+            return "C:1"
+        with patch.object(config, "COMM_CHANNEL", "slack"), \
+             patch.object(conversation, "_backend", return_value=slack_client), \
+             patch.object(slack_client, "send_envelope", side_effect=send) as sender:
+            repair_notifications.flush()
+            repair_notifications.flush()
+        sender.assert_called_once()
+        self.assertEqual(self.store.get("delivery_receipt", old["id"])["status"], "complete")
+        self.assertEqual(len(self.store.list("delivery_receipt", "supervisor:runtime")), 1)
+        self.assertEqual(self.store.list("delivery_receipt", "supervisor:task"), [])
+        self.assertTrue(path.with_suffix(".delivered").exists())
+
+    def test_legacy_alert_cannot_be_bound_to_a_different_boot_or_task(self):
+        for boot, task in (("different", "task"), ("boot", "different")):
+            with self.subTest(boot=boot, task=task):
+                atomic_json(self.folder / "legacy.json", {"version": 1, "id": "legacy", "kind": "worker_unavailable",
+                            "incident": "boot", "task_id": None, "channel": None, "conversation": None})
+                atomic_json(self.root / "state.json", {"execution_task_id": "task", "thread_id": "C:1"})
+                atomic_json(self.folder.parent / "worker.json", {"boot": boot, "task_id": task,
+                            "channel": "slack", "conversation": "C:1"})
+                with patch.object(config, "COMM_CHANNEL", "slack"), \
+                     patch.object(conversation, "_backend") as backend:
+                    repair_notifications.flush()
+                backend.assert_not_called()
+                self.assertTrue((self.folder / "legacy.json").exists())
+
+    def test_legacy_alert_never_changes_an_uncertain_delivery_destination(self):
+        atomic_json(self.folder / "legacy.json", {"version": 1, "id": "legacy", "kind": "worker_unavailable",
+                    "incident": "boot", "task_id": None, "channel": None, "conversation": None})
+        atomic_json(self.root / "state.json", {"execution_task_id": "task", "thread_id": "C:1"})
+        atomic_json(self.folder.parent / "worker.json", {"boot": "boot", "task_id": "task",
+                    "channel": "slack", "conversation": "C:1"})
+        old = self.store.record("delivery_receipt", {"execution_task_id": "supervisor:runtime"}, self.root,
+            "supervisor:legacy", {"envelope": {"id": "original", "subject": "alert", "body": "stalled",
+            "thread_id": None, "attachments": []}, "receipts": {"body": {"status": "uncertain"}}, "channel": "slack_client"})
+        with patch.object(config, "COMM_CHANNEL", "slack"), \
+             patch.object(conversation, "_backend", return_value=slack_client), \
+             patch.object(slack_client, "send_envelope") as sender:
+            repair_notifications.flush()
+        sender.assert_not_called()
+        after = self.store.get("delivery_receipt", old["id"])
+        self.assertEqual(after["data"], old["data"])
+        self.assertTrue((self.folder / "legacy.json").exists())
 
     def test_acceptance_survives_crash_before_outbox_rename(self):
         path = self.event()

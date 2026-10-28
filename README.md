@@ -583,6 +583,22 @@ built-in supervisor takes over at the next normal container restart.
 
 ## Mailbox commands: ABORT / STATUS / KICK / DONE / HOLD / CONTINUE
 
+When self-healing supervision is enabled, a host sleep/VM suspension can leave both
+the supervisor and worker unable to run. After a monitoring gap longer than 180
+seconds, the supervisor allows one bounded 180-second heartbeat recovery window.
+Continuous-monitoring watchdogs and the three-restarts-per-hour limit remain intact.
+An exhausted restart limit pauses the supervisor without parking or replacing the task.
+Supervisor outage alerts retain the active task's channel/thread and durable delivery
+receipts. Legacy unsent alerts can be bound only to the exact last worker/task; confirmed
+or uncertain effects are never redirected.
+
+To resume a paused supervisor (not a task `HOLD`), use its explicit control:
+`docker compose exec codebot python3 /opt/coderbot-supervisor/supervisor.py --data /app/data --control resume`.
+This changes supervisor control only, not approvals, task/check state or audit budgets.
+Rebuild/recreate the image to deploy changes to the immutable supervisor. An exact
+unfinished invocation can resume its previous session across deployment; completed
+old-epoch outcomes remain invalidated and do not establish fresh verification.
+
 Email codebot with a body of exactly `ABORT`, `STATUS`, `KICK`, `DONE`, `HOLD` (or `PAUSE`),
 or `CONTINUE` (or `RESUME`, which may be followed by a note) — case-insensitive,
 trailing punctuation tolerated — optionally with an instance name (`ABORT codebot-x7k2`)

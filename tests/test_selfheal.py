@@ -297,6 +297,100 @@ class SelfHealingTests(unittest.TestCase):
             self.assertTrue(Supervisor(self.source, self.data, "observe").restart_allowed())
         self.assertFalse(Supervisor(self.source, self.data, "observe").restart_allowed())
 
+    def test_continuously_observed_worker_still_has_three_minute_watchdog(self):
+        with patch("scripts.supervisor.time.time", return_value=100), \
+             patch("scripts.supervisor.time.monotonic", return_value=100):
+            supervisor = Supervisor(self.source, self.data, "observe")
+        supervisor.boot = "boot"
+        supervisor.started_at = 100
+        status = {"boot": "boot", "created": 100}
+        for now in (160, 220, 280):
+            with patch("scripts.supervisor.time.time", return_value=now), \
+                 patch("scripts.supervisor.time.monotonic", return_value=now):
+                self.assertFalse(supervisor.worker_stalled(status))
+        with patch("scripts.supervisor.time.time", return_value=281), \
+             patch("scripts.supervisor.time.monotonic", return_value=281):
+            self.assertTrue(supervisor.worker_stalled(status))
+
+    def test_monitoring_gap_gives_worker_bounded_grace_without_resetting_budget(self):
+        for monotonic_after_wake in (100, 1000):
+            with self.subTest(monotonic_after_wake=monotonic_after_wake):
+                with patch("scripts.supervisor.time.time", return_value=100), \
+                     patch("scripts.supervisor.time.monotonic", return_value=100):
+                    supervisor = Supervisor(self.source, self.data, "observe")
+                supervisor.boot = "boot"
+                supervisor.started_at = 100
+                status = {"boot": "boot", "created": 100}
+                with patch("scripts.supervisor.time.time", return_value=1000), \
+                     patch("scripts.supervisor.time.monotonic", return_value=monotonic_after_wake):
+                    self.assertFalse(supervisor.worker_stalled(status))
+                for elapsed in (60, 120, 179):
+                    with patch("scripts.supervisor.time.time", return_value=1000 + elapsed), \
+                         patch("scripts.supervisor.time.monotonic", return_value=monotonic_after_wake + elapsed):
+                        self.assertFalse(supervisor.worker_stalled(status))
+                with patch("scripts.supervisor.time.time", return_value=1180), \
+                     patch("scripts.supervisor.time.monotonic", return_value=monotonic_after_wake + 180):
+                    self.assertTrue(supervisor.worker_stalled(status))
+                self.assertFalse((self.repairs.home / "restarts.json").exists())
+
+    def test_worker_refreshes_heartbeat_after_monitoring_resumes(self):
+        with patch("scripts.supervisor.time.time", return_value=100), \
+             patch("scripts.supervisor.time.monotonic", return_value=100):
+            supervisor = Supervisor(self.source, self.data, "observe")
+        supervisor.boot = "boot"
+        supervisor.started_at = 100
+        with patch("scripts.supervisor.time.time", return_value=1000), \
+             patch("scripts.supervisor.time.monotonic", return_value=1000):
+            self.assertFalse(supervisor.worker_stalled({"boot": "boot", "created": 100}))
+        for now in (1060, 1120, 1181):
+            with patch("scripts.supervisor.time.time", return_value=now), \
+                 patch("scripts.supervisor.time.monotonic", return_value=now):
+                self.assertFalse(supervisor.worker_stalled({"boot": "boot", "created": now}))
+
+    def test_missing_startup_heartbeat_still_expires_when_monitoring_is_continuous(self):
+        with patch("scripts.supervisor.time.time", return_value=100), \
+             patch("scripts.supervisor.time.monotonic", return_value=100):
+            supervisor = Supervisor(self.source, self.data, "observe")
+        supervisor.boot = "boot"
+        supervisor.started_at = 100
+        for now in (160, 220, 280, 281):
+            with patch("scripts.supervisor.time.time", return_value=now), \
+                 patch("scripts.supervisor.time.monotonic", return_value=now):
+                self.assertEqual(supervisor.worker_stalled({"boot": "old", "created": now}), now > 280)
+
+    def test_worker_outage_retains_task_notification_destination(self):
+        supervisor = Supervisor(self.source, self.data, "observe")
+        supervisor.boot = "boot"
+        status = {"boot": "boot", "task_id": "task", "channel": "slack", "provider": "jira",
+                  "conversation": "C123:1", "phase": "APPLY_FEEDBACK"}
+        self.repairs.event("worker_unavailable", supervisor.worker_incident(status), detail="stalled")
+        event = json.loads(next((self.repairs.home / "notifications").glob("*.json")).read_text())
+        self.assertEqual(event["incident"], "boot")
+        for key in ("task_id", "channel", "provider", "conversation"):
+            self.assertEqual(event[key], status[key])
+
+    def test_worker_start_passes_previous_epoch_without_reusing_current_runtime_identity(self):
+        supervisor = Supervisor(self.source, self.data, "observe")
+        atomic_json(self.repairs.home / "worker.json", {"boot": "previous", "epoch": "old"})
+        with patch("scripts.supervisor.subprocess.Popen") as popen, \
+             patch("scripts.supervisor.threading.Thread"):
+            supervisor.start()
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual(env["CODEBOT_PREVIOUS_RUNTIME_EPOCH"], "old")
+        self.assertEqual(env["CODEBOT_RUNTIME_EPOCH"], epoch(self.source))
+
+    def test_worker_outage_does_not_reuse_foreign_boot_or_task_destination(self):
+        supervisor = Supervisor(self.source, self.data, "observe")
+        supervisor.boot = "boot"
+        atomic_json(self.data / "state.json", {"execution_task_id": "current", "thread_id": "C:current"})
+        with patch.dict(os.environ, {"CODEBOT_COMM_CHANNEL": "slack", "CODEBOT_TASK_SOURCE": "jira"}):
+            incident = supervisor.worker_incident({"boot": "old", "task_id": "foreign", "conversation": "C:foreign"})
+        self.assertEqual(incident["task_id"], "current")
+        self.assertEqual(incident["conversation"], "C:current")
+        incident = supervisor.worker_incident({"boot": "boot", "task_id": "foreign"})
+        self.assertEqual(incident["task_id"], "foreign")
+        self.assertIsNone(incident["conversation"])
+
     def test_pid_reuse_never_signals_unrelated_process(self):
         with patch("scripts.supervisor.process_table", return_value={42: {"ticks": "new"}}), \
              patch("scripts.supervisor.os.kill") as kill:

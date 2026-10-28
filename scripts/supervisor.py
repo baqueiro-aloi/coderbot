@@ -1,6 +1,7 @@
 """Immutable supervisor entrypoint. Application imports are intentionally forbidden."""
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -81,6 +82,8 @@ class Supervisor:
         self.log_thread = None
         self.next_notification = 0
         self.active_until = time.monotonic() + 60
+        self.monitor_checked = (time.time(), time.monotonic())
+        self.resume_grace_until = 0
 
     def heartbeat(self):
         atomic_json(self.repairs.home / "heartbeat.json", {"time": time.time(), "pid": os.getpid()})
@@ -88,9 +91,13 @@ class Supervisor:
     def start(self):
         self.boot = uuid.uuid4().hex
         self.started_at = time.monotonic()
+        self.monitor_checked = (time.time(), self.started_at)
+        self.resume_grace_until = 0
         self.tail = []
+        previous_epoch = worker_event(self.repairs.home / "worker.json").get("epoch")
         env = {**os.environ, "CODEBOT_SUPERVISOR_DIR": str(self.repairs.home),
                "CODEBOT_WORKER_BOOT": self.boot, "CODEBOT_RUNTIME_EPOCH": epoch(self.source),
+               "CODEBOT_PREVIOUS_RUNTIME_EPOCH": previous_epoch if isinstance(previous_epoch, str) else "",
                "CODEBOT_DATA_DIR": str(self.data)}
         self.worker = subprocess.Popen([sys.executable, "-u", str(self.source / "src/main.py")],
             cwd=self.source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -153,6 +160,35 @@ class Supervisor:
 
     def paused(self):
         return read_json(self.repairs.home / "control.json", {}).get("action") == "pause"
+
+    def worker_stalled(self, status):
+        """A suspended supervisor cannot count missed heartbeats as observed failure."""
+        wall, monotonic = time.time(), time.monotonic()
+        gap = max(wall - self.monitor_checked[0], monotonic - self.monitor_checked[1])
+        self.monitor_checked = (wall, monotonic)
+        if gap > 180:
+            # Host sleep/VM suspension can advance either clock. Give the worker
+            # one normal watchdog window to refresh, not another restart budget.
+            self.resume_grace_until = monotonic + 180
+            logging.getLogger(__name__).warning(
+                "Supervisor monitoring resumed after %.1fs gap; allowing 180s for worker heartbeat recovery", gap)
+        if monotonic < self.resume_grace_until:
+            return False
+        return (status.get("boot") == self.boot and wall - status.get("created", 0) > 180
+                or status.get("boot") != self.boot and monotonic - self.started_at > 180)
+
+    def worker_incident(self, status):
+        """Retain opaque task/channel references even when the worker is stopped."""
+        observed = status if status.get("boot") == self.boot else {}
+        state = read_json(self.data / "state.json", {})
+        if not isinstance(state, dict):
+            state = {}
+        task = observed.get("task_id")
+        same_task = not task or task == state.get("execution_task_id")
+        return {"id": self.boot, "task_id": task or state.get("execution_task_id"),
+                "provider": observed.get("provider") or os.environ.get("CODEBOT_TASK_SOURCE"),
+                "channel": observed.get("channel") or os.environ.get("CODEBOT_COMM_CHANNEL"),
+                "conversation": observed.get("conversation") or (state.get("thread_id") if same_task else None)}
 
     def restart_allowed(self):
         path = self.repairs.home / "restarts.json"
@@ -371,13 +407,14 @@ class Supervisor:
                     if self.worker is None:
                         self.start()
                     status = worker_event(self.repairs.home / "worker.json")
-                    if (status.get("boot") == self.boot and time.time() - status.get("created", 0) > 180
-                            or status.get("boot") != self.boot and time.monotonic() - self.started_at > 180):
+                    if self.worker_stalled(status):
                         # Liveness failure first receives a bounded restart, not
                         # permission to rewrite application code without a diagnosis.
                         self.stop()
                         if not self.restart_allowed():
-                            self.repairs.event("worker_unavailable", {"id": self.boot}, detail="Worker heartbeat/readiness stalled")
+                            self.repairs.event("worker_unavailable", self.worker_incident(status),
+                                detail="Worker heartbeat/readiness stalled; supervisor paused after three restart attempts. "
+                                       "Task and partial work are preserved.")
                             self.notify()
                             atomic_json(self.repairs.home / "control.json", {"action": "pause"})
                             continue
@@ -408,7 +445,7 @@ class Supervisor:
                                 "provider": os.environ.get("CODEBOT_TASK_SOURCE", "gdoc"), "conversation": state.get("thread_id")})
                             continue
                         if not allowed:
-                            self.repairs.event("worker_unavailable", {"id": self.boot}, detail=redact("".join(self.tail)))
+                            self.repairs.event("worker_unavailable", self.worker_incident(status), detail=redact("".join(self.tail)))
                             self.notify()
                             atomic_json(self.repairs.home / "control.json", {"action": "pause"})
                         else:
