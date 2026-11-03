@@ -531,7 +531,10 @@ def repair_checks(state):
     if not isinstance(context, dict):
         state["state"] = "VERIFYING"
         return
+    import scope_bookkeeping
+    before = scope_bookkeeping.capture(state, target().root)
     result = turn(state, main.check_repair.prompt(state, context))
+    scope_bookkeeping.finish(state, target().root, before)
     if main.handle_result(state, result, "REPAIR_CHECKS"):
         return
     state["check_repair"]["previous"] = result.output.strip()[-5000:]  # turn() rebinds state

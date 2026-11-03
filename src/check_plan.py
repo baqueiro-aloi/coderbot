@@ -309,6 +309,15 @@ def _reported(output):
         return [], None
     try:
         value, _ = json.JSONDecoder().raw_decode(text)
+        # A result-only object is a known agent formatting mistake, not input paths.
+        # Widen invalidation conservatively; never trust its prose as test evidence.
+        if isinstance(value, dict) and isinstance(value.get("checks"), list):
+            for entry in value["checks"]:
+                if isinstance(entry, dict) and isinstance(entry.get("inputs"), dict):
+                    inputs = entry["inputs"]
+                    if set(inputs) == {"result"} and isinstance(inputs["result"], str):
+                        entry["inputs"] = ["*"]
+                        log.warning("check %s: replaced result-only inputs with conservative wildcard", entry.get("id"))
         return parse(value), None
     except json.JSONDecodeError:
         return [], "CHECK_PLAN must contain a valid JSON object with version 1 and a checks array"

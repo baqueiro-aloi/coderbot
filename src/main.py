@@ -1706,10 +1706,18 @@ def _scope_drift(state: dict) -> bool:
     if state.get("approved_scope_fingerprint"):
         directory = (_validated_archive_path(state["archive_path"], state["slug"])
                      if state.get("archive_path") else path.parent)
-        current = proposal_package.scope_fingerprint(proposal_package.collect_directory(directory))
+        files = proposal_package.collect_directory(directory)
+        current = proposal_package.scope_fingerprint(files)
         if current != state["approved_scope_fingerprint"]:
+            approved = proposal_package.previous(state.get("proposal_snapshot", ""))
+            if approved and proposal_package.scope_fingerprint(approved) == state["approved_scope_fingerprint"]:
+                detail = "\nApproved/current diff (author not established):\n" + proposal_package.scope_diff(approved, files)
+            else:
+                detail = "\nThe matching approved snapshot is unavailable; an exact diff cannot be established."
             _verification_blocked(state, "scope drift", "Requirements, design or task text changed after approval. "
-                                  "Completion checkboxes and archival do not require reapproval; changed approved intent does.")
+                                  "Completion checkboxes and archival do not require reapproval; changed approved intent does."
+                                  " Put repair notes and evidence in execution-log.md, not the approved checklist."
+                                  + detail)
             return True
     if not path.is_file():
         return False
@@ -2090,7 +2098,10 @@ def do_repair_checks(state: dict) -> None:
     if context["attempt"] > config.QUALITY_GATE_MAX_ROUNDS:
         _begin_check_repair(state, {"checks": context["checks"]}, resume=context["resume"])
         return
+    import scope_bookkeeping
+    before = scope_bookkeeping.capture(state, config.REPO_PATH)
     result = agent_runner.resume(state["session_id"], check_repair.prompt(state, context))
+    scope_bookkeeping.finish(state, config.REPO_PATH, before)
     if handle_result(state, result, "REPAIR_CHECKS"):
         return
     # The diagnosis and evidence are part of the conversation, not only logs.

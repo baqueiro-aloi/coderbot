@@ -24,6 +24,12 @@ def failed(status="infrastructure"):
 
 
 class CheckRepairTests(unittest.TestCase):
+    def test_repair_prompt_keeps_bookkeeping_outside_approved_intent(self):
+        text = check_repair.prompt({}, {"attempt": 1, "checks": []})
+        self.assertIn("Do not add repair tasks", text)
+        self.assertIn("execution-log.md", text)
+        self.assertIn("Do not bump versions", text)
+
     def setUp(self):
         patcher = patch.object(main, "_tracked_snapshot", return_value=("head", ""))
         patcher.start()

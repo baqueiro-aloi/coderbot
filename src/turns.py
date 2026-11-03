@@ -24,7 +24,11 @@ RESULT_SCHEMA = {
             "text": {"type": "string"}, "options": {**_STRINGS, "maxItems": 4}}},
         "concerns": _STRINGS,
         "attachments": _STRINGS,
-        "checks": {"type": "array", "items": {"type": "object"}},
+        "checks": {"type": "array", "items": {"type": "object", "required": ["id", "argv", "cwd", "inputs"],
+            "properties": {"id": {"type": "string"}, "argv": _STRINGS, "cwd": {"type": "string"},
+                           "inputs": _STRINGS, "scope": {"type": "string"}, "kind": {"type": "string"},
+                           "reporter": {"type": "string"}, "env_keys": _STRINGS,
+                           "dependency_inputs": {"anyOf": [_STRINGS, {"type": "null"}]}}}},
         "e2e_specs": _STRINGS,
         "credential": {"type": "object", "required": ["env", "service", "purpose"], "properties": {
             "env": {"type": "string"}, "service": {"type": "string"}, "purpose": {"type": "string"}}},
@@ -81,7 +85,14 @@ def request(state: dict, phase: str | None) -> str:
                       if phase == "IMPLEMENTING" and state.get("implement_budget") else None)}
     lines = [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in facts.items()
              if value not in (None, "", [])]
-    return "```yaml\n" + "\n".join(lines) + "\n```\n\n" if len(lines) > 1 else ""
+    request = "```yaml\n" + "\n".join(lines) + "\n```\n\n" if len(lines) > 1 else ""
+    if state.get("approved_scope_fingerprint") and phase not in ("REPLANNING", "PROPOSING", "EXPLORING"):
+        request += ("Approved intent is frozen: do not add tasks or execution notes to tasks.md or rewrite "
+                    "requirements/design without explicit scope approval. Update only existing task completion "
+                    "checkboxes. Put repair history, commands, results and evidence in execution-log.md beside "
+                    "tasks.md or in the outbox; these are not approval artifacts. Do not bump versions merely "
+                    "to document verification repairs.\n\n")
+    return request
 
 
 def valid(data) -> bool:

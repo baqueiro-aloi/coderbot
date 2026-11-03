@@ -7,6 +7,27 @@ import proposal_package
 
 
 class ProposalPackage(unittest.TestCase):
+    def test_scope_ignores_completion_but_detects_intent_changes(self):
+        before = {"tasks.md": "## Tasks\n- [ ] 1.1 Add help\n", "design.md": "Use a modal\n"}
+        completed = {**before, "tasks.md": before["tasks.md"].replace("[ ]", "[x]")}
+        self.assertEqual(proposal_package.scope_fingerprint(before), proposal_package.scope_fingerprint(completed))
+        self.assertEqual(proposal_package.scope_diff(before, completed), "")
+        for after in ({**completed, "design.md": "Use a new page\n"},
+                      {**completed, "tasks.md": completed["tasks.md"] + "- [ ] 6.1 Repair reporter\n"},
+                      {**completed, "tasks.md": "## Tasks\n"}):
+            self.assertNotEqual(proposal_package.scope_fingerprint(before), proposal_package.scope_fingerprint(after))
+            self.assertIn("approved/", proposal_package.scope_diff(before, after))
+
+    def test_execution_log_is_outside_approval_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "specs/api").mkdir(parents=True)
+            for name in ("proposal.md", "design.md", "tasks.md", "specs/api/spec.md"):
+                (root / name).write_text("Approved intent\n")
+            before = proposal_package.collect_directory(root)
+            (root / "execution-log.md").write_text("Repair notes and evidence\n")
+            self.assertEqual(before, proposal_package.collect_directory(root))
+
     def test_contains_all_artifacts_and_safe_clickable_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "openspec/changes/example"

@@ -1,4 +1,5 @@
 """Build a safe, offline OpenSpec review document from actual change artifacts."""
+import difflib
 import hashlib
 import html
 import json
@@ -146,12 +147,25 @@ def fingerprint(files: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def scope_content(files: dict[str, str]) -> dict[str, str]:
+    """Preserve approved intent; normalize only task completion checkboxes."""
+    from task_phases import TASK
+    return {name: TASK.sub(lambda m: m[1] + " " + m[3] + m[4], text) if name == "tasks.md" else text
+            for name, text in files.items()}
+
+
 def scope_fingerprint(files: dict[str, str]) -> str:
     """Approval binds requirements/design/task text, not completion checkboxes."""
-    from task_phases import TASK
-    normalized = {name: TASK.sub(lambda m: m[1] + " " + m[3] + m[4], text) if name == "tasks.md" else text
-                  for name, text in files.items()}
-    return hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(scope_content(files), sort_keys=True).encode()).hexdigest()
+
+
+def scope_diff(before: dict[str, str], after: dict[str, str]) -> str:
+    """Exact approved-intent diff, without completion-only noise."""
+    before, after = scope_content(before), scope_content(after)
+    return "".join("".join(difflib.unified_diff(
+        before.get(name, "").splitlines(keepends=True), after.get(name, "").splitlines(keepends=True),
+        fromfile="approved/" + name, tofile="current/" + name))
+        for name in sorted(before.keys() | after.keys()) if before.get(name) != after.get(name))
 
 
 def prepare(data_dir: Path, repo: Path, slug: str, branch: str,
